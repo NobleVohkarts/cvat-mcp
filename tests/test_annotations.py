@@ -54,3 +54,9 @@ def test_tracks_on_the_frame_are_counted_as_skipped():
 def test_frame_outside_task():
     with pytest.raises(ValueError, match=r"0\.\.39"):
         get_frame_annotations(fake_client(fake_task([])), 1, 40)
+
+
+def test_video_task_has_one_meta_entry():
+    task = fake_task([], meta_frames=[Obj(width=1920, height=1080)])
+    result = get_frame_annotations(fake_client(task), 1, 25)
+    assert (result.width, result.height) == (1920, 1080)

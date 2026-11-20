@@ -2,7 +2,6 @@ import logging
 import sys
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from typing import TypeVar
 
 from cvat_sdk import Client, make_client
 from cvat_sdk.api_client.exceptions import ApiException
@@ -11,7 +10,7 @@ from mcp.types import ToolAnnotations
 from urllib3.exceptions import HTTPError
 
 from cvat_mcp.config import Settings
-from cvat_mcp.errors import tool_errors
+from cvat_mcp.errors import F, tool_errors
 
 logger = logging.getLogger("cvat_mcp")
 
@@ -46,6 +45,12 @@ async def lifespan(_server: MCPServer) -> AsyncIterator[Client]:
 
 
 WRITE_MODE = settings.mcp_mode == "write"
+READ_ONLY_NOTE = (
+    ""
+    if WRITE_MODE
+    else "Creating issues is disabled: the server runs in read-only mode "
+    "(CVAT_MCP_MODE=write enables it)."
+)
 
 INSTRUCTIONS = f"""\
 Tools for reviewing annotations in CVAT (computer vision annotation tool).
@@ -57,8 +62,7 @@ that miss their object) -> get_frame_annotations for exact ids and boxes
 Issues belong to the job of type "annotation" whose frame range contains the frame.
 All frame numbers are task frame numbers (0-based), not job-relative; coordinates are original
 image pixels [x1, y1, x2, y2].
-{"" if WRITE_MODE else "Creating issues is disabled: the server runs in read-only mode "
- "(CVAT_MCP_MODE=write enables it)."}
+{READ_ONLY_NOTE}
 Deleting or changing tasks, jobs and annotations is not available through this server in any
 mode: if the user asks for it, explain that it is disabled here and must be done in the CVAT UI.
 """
@@ -68,10 +72,9 @@ mcp = MCPServer("cvat", instructions=INSTRUCTIONS, lifespan=lifespan)
 REGISTERED_TOOLS: list[str] = []
 
 
-F = TypeVar("F", bound=Callable)
-
-
-def tool(*, write: bool = False, structured_output: bool | None = None) -> Callable[[F], F]:
+def tool(
+    *, write: bool = False, structured_output: bool | None = None, **hints
+) -> Callable[[F], F]:
     """Register a tool, wrapped with model-facing error messages.
 
     Write tools are registered only in write mode: what isn't in the mode doesn't exist.
@@ -80,12 +83,11 @@ def tool(*, write: bool = False, structured_output: bool | None = None) -> Calla
     def decorator(fn: F) -> F:
         if write and not WRITE_MODE:
             return fn
-        hints = {"read_only_hint": not write, "open_world_hint": False}
+        defaults = {"read_only_hint": not write, "open_world_hint": False}
         if write:
-            hints |= {"destructive_hint": False, "idempotent_hint": False}
-        mcp.tool(annotations=ToolAnnotations(**hints), structured_output=structured_output)(
-            tool_errors(fn)
-        )
+            defaults |= {"destructive_hint": False, "idempotent_hint": False}
+        annotations = ToolAnnotations(**(defaults | hints))
+        mcp.tool(annotations=annotations, structured_output=structured_output)(tool_errors(fn))
         REGISTERED_TOOLS.append(fn.__name__)
         return fn
 

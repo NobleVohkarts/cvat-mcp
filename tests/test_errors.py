@@ -4,7 +4,8 @@ import pytest
 from cvat_sdk.api_client.exceptions import ApiException
 from mcp.server.mcpserver.exceptions import ToolError
 
-from cvat_mcp.errors import explain, tool_errors
+from cvat_mcp.errors import InvalidArgument, explain, tool_errors
+from cvat_mcp.services.annotations import FrameObject
 
 
 def _api(status, reason=None, body=None):
@@ -13,27 +14,30 @@ def _api(status, reason=None, body=None):
     return exc
 
 
-def test_not_found_points_to_listing_tools():
-    message = explain(_api(404))
-    assert "not found" in message and "list_tasks" in message
-
-
-def test_forbidden_mentions_read_only_token():
-    message = explain(_api(403))
-    assert "permission" in message and "read-only" in message
-
-
-def test_unauthorized_mentions_token():
-    assert "token" in explain(_api(401))
-
-
-def test_bad_request_includes_server_reason():
-    message = explain(_api(400, "Bad Request", '{"frame": ["bad"]}'))
-    assert "rejected" in message and "frame" in message
+@pytest.mark.parametrize(
+    "status, body, words",
+    [
+        (404, None, ["not found", "list_tasks"]),
+        (403, None, ["permission", "read-only"]),
+        (401, None, ["token"]),
+        (400, '{"frame": ["bad"]}', ["rejected", "frame"]),
+    ],
+)
+def test_api_errors(status, body, words):
+    message = explain(_api(status, "Reason", body))
+    assert all(w in message for w in words)
 
 
 def test_own_validation_message_passes_through():
-    assert explain(ValueError("frame 99 is outside 0..39")) == "frame 99 is outside 0..39"
+    assert explain(InvalidArgument("frame 99 is outside 0..39")) == "frame 99 is outside 0..39"
+
+
+def test_other_value_errors_are_unexpected():
+    try:
+        FrameObject.model_validate({})
+    except ValueError as exc:  # pydantic's ValidationError is a ValueError too
+        assert explain(exc) is None
+    assert explain(ValueError("internal")) is None
 
 
 def test_unexpected_exception_is_not_explained():

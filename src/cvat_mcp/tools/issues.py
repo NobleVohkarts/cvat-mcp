@@ -1,4 +1,7 @@
+from typing import Annotated
+
 from mcp.server.mcpserver import Context
+from pydantic import Field
 
 from cvat_mcp.server import get_client, settings, tool
 from cvat_mcp.services import issues
@@ -12,7 +15,7 @@ def create_issue(
     frame: int,
     message: str,
     object_id: int | None = None,
-    bbox: list[float] | None = None,
+    bbox: Annotated[list[float], Field(min_length=4, max_length=4)] | None = None,
 ) -> IssueRef:
     """Use to report one annotation problem to the annotator: creates an issue on a frame of a
     job, shown in the CVAT UI at the given place. Pass object_id to mark an existing object's

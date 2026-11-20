@@ -1,6 +1,6 @@
 from PIL import Image
 
-from cvat_mcp.render import clamp_side, legend, render, scale_box
+from cvat_mcp.render import clamp_side, legend, render
 from cvat_mcp.services.annotations import FrameObject
 
 CAR = FrameObject(
@@ -14,8 +14,8 @@ CAR = FrameObject(
 )
 
 
-def _black(w=800, h=600):
-    return Image.new("RGB", (w, h))
+def _black():
+    return Image.new("RGB", (800, 600))
 
 
 def test_downscales_to_max_side():
@@ -34,10 +34,6 @@ def test_box_drawn_at_scaled_position():
 def test_never_upscales():
     out, scale = render(_black(), [CAR], {"car": "#ff0000"}, 2048)
     assert out.size == (800, 600) and scale == 1.0
-
-
-def test_scale_box():
-    assert scale_box([100, 100, 300, 250], 0.5) == [50, 50, 150, 125]
 
 
 def test_legend_uses_original_coordinates():

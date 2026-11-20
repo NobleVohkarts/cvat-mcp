@@ -13,6 +13,11 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 F = TypeVar("F", bound=Callable)
 
+
+class InvalidArgument(ValueError):
+    """The model passed something wrong; the message says what to pass instead."""
+
+
 _HINTS = {
     401: "CVAT rejected the access token (expired or revoked): create a new Personal Access "
     "Token in the CVAT UI and restart the server.",
@@ -25,7 +30,7 @@ _HINTS = {
 
 def explain(exc: Exception) -> str | None:
     """A message for the model, or None for an unexpected error."""
-    if isinstance(exc, ValueError):  # our own validation of the model's arguments
+    if isinstance(exc, InvalidArgument):
         return str(exc)
     if isinstance(exc, ApiException):
         if exc.status in _HINTS:

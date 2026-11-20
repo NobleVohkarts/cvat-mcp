@@ -1,5 +1,8 @@
 from cvat_sdk import Client
+from cvat_sdk.core.proxies.tasks import Task
 from pydantic import BaseModel
+
+from cvat_mcp.errors import InvalidArgument
 
 
 class FrameObject(BaseModel):
@@ -30,7 +33,7 @@ def shape_bbox(points: list[float]) -> list[float]:
 
 def check_frame(frame: int, size: int) -> None:
     if not 0 <= frame < size:
-        raise ValueError(f"frame {frame} is outside this task's frames 0..{size - 1}")
+        raise InvalidArgument(f"frame {frame} is outside this task's frames 0..{size - 1}")
 
 
 def _track_visible(track, frame: int) -> bool:
@@ -38,24 +41,25 @@ def _track_visible(track, frame: int) -> bool:
     return bool(keyframes) and not max(keyframes, key=lambda s: s.frame).outside
 
 
-def get_frame_annotations(client: Client, task_id: int, frame: int) -> FrameAnnotations:
-    task = client.tasks.retrieve(task_id)
+def frame_annotations(task: Task, labels: list, frame: int) -> FrameAnnotations:
+    """Annotations of one frame of an already retrieved task, with its labels."""
     check_frame(frame, task.size)
-    labels = {label.id: label for label in task.get_labels()}
-    attribute_names = {a.id: a.name for label in labels.values() for a in label.attributes}
+    names = {label.id: label.name for label in labels}
+    attribute_names = {a.id: a.name for label in labels for a in label.attributes}
     # shortcut: CVAT has no per-frame annotations endpoint, so this downloads the whole task;
     # fine for small tasks, fetch per job when tasks get large.
     annotations = task.get_annotations()
-    meta = task.get_meta().frames[frame]
+    frames = task.get_meta().frames
+    meta = frames[frame] if len(frames) > 1 else frames[0]  # a video has one entry for all frames
     return FrameAnnotations(
-        task_id=task_id,
+        task_id=task.id,
         frame=frame,
         width=meta.width,
         height=meta.height,
         objects=[
             FrameObject(
                 id=s.id,
-                label=labels[s.label_id].name,
+                label=names[s.label_id],
                 type=str(s.type),
                 bbox=shape_bbox(s.points),
                 attributes={attribute_names[a.spec_id]: a.value for a in s.attributes},
@@ -67,3 +71,8 @@ def get_frame_annotations(client: Client, task_id: int, frame: int) -> FrameAnno
         ],
         skipped_tracks=sum(_track_visible(t, frame) for t in annotations.tracks),
     )
+
+
+def get_frame_annotations(client: Client, task_id: int, frame: int) -> FrameAnnotations:
+    task = client.tasks.retrieve(task_id)
+    return frame_annotations(task, task.get_labels(), frame)
