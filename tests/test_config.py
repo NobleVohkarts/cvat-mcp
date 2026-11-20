@@ -71,8 +71,9 @@ def test_http_mode_needs_https_public_url(monkeypatch, url):
     monkeypatch.setenv("CVAT_MCP_TRANSPORT", "http")
     if url:
         monkeypatch.setenv("CVAT_MCP_PUBLIC_URL", url)
-    with pytest.raises(ValidationError, match="mcp_public_url|CVAT_MCP_PUBLIC_URL"):
+    with pytest.raises(ValidationError) as error:
         Settings()
+    assert error.value.errors()[0]["loc"] == ("mcp_public_url",)
 
 
 @pytest.mark.parametrize("url", ["https://x.trycloudflare.com", "http://localhost:8765"])

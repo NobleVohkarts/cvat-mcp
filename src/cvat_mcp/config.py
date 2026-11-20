@@ -2,10 +2,22 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import SecretStr, model_validator
+from pydantic import Field, SecretStr, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from cvat_mcp.errors import InvalidArgument
+
+LOCAL_HOSTS = {"localhost", "127.0.0.1"}
+
+
+def is_secure_url(url: str, hosts: set[str] | None = None) -> bool:
+    """https (http only for a local host), no query or fragment, host in `hosts` if given."""
+    parts = urlsplit(url)
+    if not parts.hostname or parts.query or parts.fragment:
+        return False
+    if hosts is not None and parts.hostname not in hosts:
+        return False
+    return parts.scheme == "https" or (parts.scheme == "http" and parts.hostname in LOCAL_HOSTS)
 
 
 class Settings(BaseSettings):
@@ -20,21 +32,16 @@ class Settings(BaseSettings):
     mcp_workdir: Path = Path("workdir")
     # HTTP mode for remote clients (claude.ai) through a tunnel; stdio needs none of these.
     mcp_transport: Literal["stdio", "http"] = "stdio"
-    mcp_public_url: str | None = None
+    mcp_public_url: str | None = Field(default=None, validate_default=True)
     mcp_port: int = 8765
     mcp_redirect_hosts: str = "claude.ai,claude.com,localhost,127.0.0.1"
 
-    @model_validator(mode="after")
-    def _check_http_mode(self) -> "Settings":
-        if self.mcp_transport == "http":
-            url = urlsplit(self.mcp_public_url or "")
-            local = url.hostname in ("localhost", "127.0.0.1")
-            if not url.hostname or (url.scheme != "https" and not (local and url.scheme == "http")):
-                raise ValueError(
-                    "mcp_public_url (CVAT_MCP_PUBLIC_URL) must be the https URL clients use "
-                    "(http only for localhost) when CVAT_MCP_TRANSPORT=http"
-                )
-        return self
+    @field_validator("mcp_public_url")
+    @classmethod
+    def _check_public_url(cls, url: str | None, info: ValidationInfo) -> str | None:
+        if info.data.get("mcp_transport") == "http" and not is_secure_url(url or ""):
+            raise ValueError("must be the https URL clients use (http only for localhost)")
+        return url
 
     @property
     def public_url(self) -> str:

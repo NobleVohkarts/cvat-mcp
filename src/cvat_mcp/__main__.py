@@ -13,20 +13,16 @@ def main() -> None:
     # Imported here so a bad configuration becomes a one-line message instead of a traceback.
     try:
         import cvat_mcp.tools  # pylint: disable=import-outside-toplevel,unused-import
-        from cvat_mcp.server import mcp  # pylint: disable=import-outside-toplevel
+        from cvat_mcp.server import (  # pylint: disable=import-outside-toplevel
+            HTTP_MODE,
+            mcp,
+            settings,
+            transport_security,
+        )
     except ValidationError as e:
         prefix = Settings.model_config["env_prefix"]
-        problems = [  # field errors name the variable; cross-field checks carry a message
-            f"{prefix}{str(err['loc'][0]).upper()}" if err["loc"] else err["msg"]
-            for err in e.errors()
-        ]
-        sys.exit(f"cvat-mcp: invalid or missing {'; '.join(problems)}. See cvat-mcp/.env.example.")
-
-    from cvat_mcp.server import (  # pylint: disable=import-outside-toplevel
-        HTTP_MODE,
-        settings,
-        transport_security,
-    )
+        names = ", ".join(f"{prefix}{str(err['loc'][0]).upper()}" for err in e.errors())
+        sys.exit(f"cvat-mcp: invalid or missing {names}. See cvat-mcp/.env.example.")
 
     try:
         if HTTP_MODE:

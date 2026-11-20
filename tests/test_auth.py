@@ -1,5 +1,9 @@
 """OAuth provider: only the PAT owner gets tokens; codes and login requests are single-use."""
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace as Obj
 from urllib.parse import parse_qs, urlsplit
 
 import anyio
@@ -11,7 +15,8 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from cvat_mcp.auth import CvatOAuthProvider
+from cvat_mcp import auth
+from cvat_mcp.auth import MAX_CLIENTS, MAX_FAILURES, MAX_PENDING, CvatOAuthProvider
 
 CALLBACK = "https://claude.ai/api/mcp/auth_callback"
 PASSWORD = "s3cret-pass"
@@ -205,3 +210,80 @@ def test_lockout_after_ten_failures(provider, web, clock):
     clock.t += 601
     _, request_id, _ = start_login(provider)
     assert login(web, request_id).status_code == 302
+
+
+def test_registered_clients_are_capped_and_stripped(provider):
+    info = OAuthClientInformationFull(
+        client_id="first", redirect_uris=[CALLBACK], contacts=["x" * 1000], jwks={"k": "v" * 1000}
+    )
+    anyio.run(provider.register_client, info)
+    stored = anyio.run(provider.get_client, "first")
+    assert stored.contacts is None and stored.jwks is None
+    for i in range(MAX_CLIENTS):
+        anyio.run(
+            provider.register_client,
+            OAuthClientInformationFull(client_id=f"c{i}", redirect_uris=[CALLBACK]),
+        )
+    assert anyio.run(provider.get_client, "first") is None  # oldest evicted
+    assert anyio.run(provider.get_client, f"c{MAX_CLIENTS - 1}") is not None
+
+
+def test_pending_logins_are_purged_and_capped(provider, clock):
+    start_login(provider)
+    clock.t += 601
+    for _ in range(MAX_PENDING + 5):
+        start_login(provider)
+    assert len(provider._pending) == MAX_PENDING  # pylint: disable=protected-access
+
+
+def test_logins_are_checked_one_at_a_time(clock):
+    active, peak, lock = [0], [0], threading.Lock()
+
+    def slow_check(_user, _password):
+        with lock:
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+        time.sleep(0.05)
+        with lock:
+            active[0] -= 1
+
+    p = CvatOAuthProvider(
+        "https://x.trycloudflare.com", {"claude.ai"}, slow_check, now=clock, failure_delay=0
+    )
+    p.owner = "admin"
+    app = Starlette(routes=[Route("/login", p.login_submit, methods=["POST"])])
+    ids = [start_login(p)[1] for _ in range(12)]
+    with TestClient(app) as web, ThreadPoolExecutor(12) as pool:
+        codes = list(pool.map(lambda rid: login(web, rid, password="bad").status_code, ids))
+    assert peak[0] == 1
+    assert codes.count(401) == MAX_FAILURES and codes.count(429) == 2
+
+
+def test_login_body_is_limited(provider, web):
+    _, request_id, _ = start_login(provider)
+    response = web.post(
+        "/login", data={"request": request_id, "username": "a" * 20_000, "password": "x"}
+    )
+    assert response.status_code == 413
+
+
+def test_cvat_login_logs_out_and_skips_version_check(monkeypatch):
+    calls = []
+
+    class FakeClient:
+        def __init__(self, url, check_server_version=True):
+            calls.append(("init", url, check_server_version))
+            self.users = Obj(retrieve_current_user=lambda: Obj(username="admin"))
+
+        def login(self, credentials):
+            calls.append(("login", credentials[0]))
+
+        def logout(self):
+            calls.append("logout")
+
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(auth, "Client", FakeClient)
+    assert auth.cvat_login_username("http://cvat", "admin", PASSWORD) == "admin"
+    assert calls == [("init", "http://cvat", False), ("login", "admin"), "logout", "close"]

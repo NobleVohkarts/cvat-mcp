@@ -109,7 +109,6 @@ from starlette.testclient import TestClient
 import cvat_mcp.server as s, cvat_mcp.tools
 app = s.mcp.streamable_http_app(transport_security=s.transport_security())
 client = TestClient(app, base_url="http://localhost:8765", follow_redirects=False)  # no lifespan
-paths = [r.path for r in app.routes]
 mcp = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
 print(json.dumps({
     "as": client.get("/.well-known/oauth-authorization-server").json(),
@@ -117,7 +116,6 @@ print(json.dumps({
     "mcp": mcp.status_code,
     "www": mcp.headers.get("www-authenticate", ""),
     "login": client.get("/login?request=nope").status_code,
-    "paths": paths,
 }))
 """
 
@@ -150,3 +148,23 @@ def test_http_mode_without_public_url_fails_at_startup(monkeypatch):
     result = run("from cvat_mcp.__main__ import main; main()", monkeypatch)
     assert result.returncode == 1
     assert "CVAT_MCP_PUBLIC_URL" in result.stderr and "Traceback" not in result.stderr
+
+
+def test_lifespan_sets_the_login_owner_from_the_token(monkeypatch):
+    monkeypatch.setenv("CVAT_MCP_TRANSPORT", "http")
+    monkeypatch.setenv("CVAT_MCP_PUBLIC_URL", "http://localhost:8765")
+    code = """
+import anyio
+from types import SimpleNamespace as Obj
+import cvat_mcp.server as s
+s._connect = lambda _settings: (Obj(close=lambda: None), "admin")
+
+async def main():
+    async with s.lifespan(s.mcp):
+        print(s.oauth.owner)
+
+anyio.run(main)
+"""
+    result = run(code, monkeypatch)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "admin"
