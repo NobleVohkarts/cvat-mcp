@@ -2,6 +2,7 @@ import logging
 import sys
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from typing import TypeVar
 
 from cvat_sdk import Client, make_client
 from cvat_sdk.api_client.exceptions import ApiException
@@ -57,7 +58,10 @@ mcp = MCPServer("cvat", instructions=INSTRUCTIONS, lifespan=lifespan)
 REGISTERED_TOOLS: list[str] = []
 
 
-def tool[F: Callable](**hints) -> Callable[[F], F]:
+F = TypeVar("F", bound=Callable)
+
+
+def tool(**hints) -> Callable[[F], F]:
     """Register a read-only tool with MCP annotations. Hints override the read-only defaults."""
 
     def decorator(fn: F) -> F:
