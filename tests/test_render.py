@@ -130,3 +130,19 @@ def test_render_frame_default_is_one_image():
 def test_clean_frame_for_an_empty_frame():
     jpegs, text = _render([], True)
     assert len(jpegs) == 2 and "no objects" in text
+
+
+def test_caption_text_contrasts_with_the_blended_bar():
+    # mid-green label over a white frame: the blended bar is light, so the text must be dark
+    white = Image.new("RGB", (800, 600), "white")
+    out, _ = render(white, [CAR], {"car": "#00a000"}, 400)
+    bar = out.crop((50, 34, 150, 49))  # caption area above the scaled box
+    assert min(channel_min for channel_min, _ in bar.getextrema()) < 60
+
+
+def test_overlapping_fallback_caption_is_opaque():
+    # six identical boxes: four caption spots, then captions must overlap
+    boxes = [CAR.model_copy(update={"id": i}) for i in range(6)]
+    out, _ = render(Image.new("RGB", (800, 600)), boxes, {"car": "#ff0000"}, 800)
+    # left padding of the first spot (above the box), covered again by a fallback caption
+    assert out.getpixel((100, 98)) == (255, 0, 0)

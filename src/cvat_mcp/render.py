@@ -3,7 +3,7 @@
 import io
 
 from cvat_sdk import Client
-from PIL import Image, ImageColor, ImageDraw, ImageFont
+from PIL import Image, ImageColor, ImageDraw, ImageFont, ImageStat
 
 from cvat_mcp.services.annotations import FrameObject, frame_annotations
 from cvat_mcp.services.tasks import clamp_limit
@@ -67,9 +67,16 @@ def annotate(
         left, top, right, bottom = draw.textbbox((0, 0), caption, font=font)
         text_w, text_h = right - left + 2 * width, bottom - top + 2 * width
         tx, ty = place_caption(box, (text_w, text_h), out.size, taken)
-        taken.append((tx, ty, tx + text_w, ty + text_h))
-        draw.rectangle(taken[-1], fill=(*ImageColor.getrgb(color)[:3], CAPTION_ALPHA))
-        ink = "black" if ImageColor.getcolor(color, "L") > 140 else "white"
+        rect = (tx, ty, tx + text_w, ty + text_h)
+        # A caption that has to overlap an earlier one is opaque, so the two texts don't mix.
+        alpha = 255 if any(_overlaps(rect, t) for t in taken) else CAPTION_ALPHA
+        taken.append(rect)
+        rgb = ImageColor.getrgb(color)[:3]
+        under = ImageStat.Stat(out.crop(tuple(round(v) for v in rect))).mean[:3]
+        bar = [(c * alpha + u * (255 - alpha)) / 255 for c, u in zip(rgb, under)]
+        draw.rectangle(rect, fill=(*rgb, alpha))
+        # pick the ink against the colour the bar really has after blending
+        ink = "black" if 0.299 * bar[0] + 0.587 * bar[1] + 0.114 * bar[2] > 140 else "white"
         draw.text((tx + width - left, ty + width - top), caption, fill=ink, font=font)
     return out
 
