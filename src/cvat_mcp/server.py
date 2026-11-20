@@ -47,6 +47,12 @@ async def lifespan(_server: MCPServer) -> AsyncIterator[Client]:
 
 
 WRITE_MODE = settings.mcp_mode == "write"
+FILE_ISSUES = (
+    " -> create_issue, one per problem, only when the user asks to file issues "
+    "(reviewing is not such a request)"
+    if WRITE_MODE
+    else ""
+)
 READ_ONLY_NOTE = (
     ""
     if WRITE_MODE
@@ -60,7 +66,7 @@ Mode: {settings.mcp_mode}.
 Typical flow: list_tasks -> get_task_overview (labels, jobs and their frame ranges)
 -> render_frame for each frame to review (look for missing objects, wrong labels and boxes
 that miss their object) -> get_frame_annotations for exact ids and boxes
--> {"create_issue, one per problem" if WRITE_MODE else "report the problems to the user"}.
+-> report the problems to the user{FILE_ISSUES}.
 Issues belong to the job of type "annotation" whose frame range contains the frame.
 All frame numbers are task frame numbers (0-based), not job-relative; coordinates are original
 image pixels [x1, y1, x2, y2].

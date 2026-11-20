@@ -93,6 +93,7 @@ def test_write_mode_adds_create_issue(tmp_path):
     tools, _, instructions = result.stdout.partition("\n")
     assert tools == str(sorted(READ_TOOLS + ["create_issue"]))
     assert "create_issue, one per problem" in instructions
+    assert "only when the user asks" in instructions  # reviewing is not a request to file issues
     assert "Creating issues is disabled" not in instructions
 
 
