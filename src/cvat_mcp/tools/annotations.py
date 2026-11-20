@@ -15,10 +15,19 @@ def get_frame_annotations(ctx: Context, task_id: int, frame: int) -> FrameAnnota
 
 
 @tool(structured_output=False)
-def render_frame(ctx: Context, task_id: int, frame: int, max_side: int = 1280) -> list:
+def render_frame(
+    ctx: Context, task_id: int, frame: int, max_side: int = 1280, include_clean: bool = False
+) -> list:
     """Use to look at a frame: returns the image (longest side up to max_side, 256..2048) with
     every object's box and `#id label` caption drawn on it, plus a text legend with exact boxes
     in original pixels. Check visually for missing objects, wrong labels and boxes that miss
-    their object. Use get_frame_annotations for attributes."""
-    jpeg, text = render.render_frame(get_client(ctx), task_id, frame, max_side)
-    return [Image(data=jpeg, format="jpeg"), text]
+    their object. Set include_clean=True for crowded frames: you also get the same frame
+    without annotations, so nothing is hidden under captions. Use get_frame_annotations for
+    attributes."""
+    jpeg, clean, text = render.render_frame(
+        get_client(ctx), task_id, frame, max_side, include_clean
+    )
+    images = [Image(data=jpeg, format="jpeg")]
+    if clean is not None:
+        images.append(Image(data=clean, format="jpeg"))
+    return [*images, text]

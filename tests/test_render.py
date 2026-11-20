@@ -1,6 +1,9 @@
+import io
+
+from fakes import fake_client, fake_task, shape
 from PIL import Image
 
-from cvat_mcp.render import clamp_side, legend, place_caption, render
+from cvat_mcp.render import clamp_side, legend, place_caption, render, render_frame
 from cvat_mcp.services.annotations import FrameObject
 
 CAR = FrameObject(
@@ -96,3 +99,34 @@ def test_caption_bar_lets_the_image_show_through():
     out, _ = render(white, [CAR], {"car": "#ff0000"}, 400)
     r, g, b = out.getpixel((50, 47))  # left padding of the caption bar above the scaled box
     assert r > 200 and 60 < g < 230 and 60 < b < 230  # red blended with white, not solid
+
+
+def _frame_png(_frame, quality):  # pylint: disable=unused-argument
+    buffer = io.BytesIO()
+    Image.new("RGB", (640, 480)).save(buffer, "PNG")
+    buffer.seek(0)
+    return buffer
+
+
+def _render(shapes, include_clean):
+    task = fake_task(shapes, get_frame=_frame_png)
+    return render_frame(fake_client(task), 1, 0, 1280, include_clean=include_clean)
+
+
+def test_render_frame_can_add_the_clean_frame():
+    annotated, clean, text = _render([shape(1, 1, 0, [100, 100, 300, 250])], True)
+    annotated, clean = Image.open(io.BytesIO(annotated)), Image.open(io.BytesIO(clean))
+    assert annotated.size == clean.size == (640, 480)
+    assert annotated.getpixel((100, 175))[0] > 150  # the red box edge
+    assert clean.getpixel((100, 175))[0] < 40  # nothing drawn on the clean copy
+    assert "without annotations" in text.splitlines()[0]
+
+
+def test_render_frame_default_is_one_image():
+    _, clean, text = _render([shape(1, 1, 0, [100, 100, 300, 250])], False)
+    assert clean is None and "without annotations" not in text
+
+
+def test_clean_frame_for_an_empty_frame():
+    annotated, clean, text = _render([], True)
+    assert annotated and clean and "no objects" in text

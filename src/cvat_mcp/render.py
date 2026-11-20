@@ -89,15 +89,26 @@ def legend(objects: list[FrameObject], scale: float, frame: int, skipped_tracks:
     return "\n".join([head, *(f"#{o.id} {o.label} {o.bbox}" for o in objects)])
 
 
-def render_frame(client: Client, task_id: int, frame: int, max_side: int) -> tuple[bytes, str]:
-    """JPEG bytes of the frame with its annotations drawn, and a text legend."""
+def _jpeg(image: Image.Image) -> bytes:
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=85)
+    return buffer.getvalue()
+
+
+def render_frame(
+    client: Client, task_id: int, frame: int, max_side: int, include_clean: bool = False
+) -> tuple[bytes, bytes | None, str]:
+    """The frame with its annotations drawn (JPEG), optionally the same frame clean, and a legend."""
     task = client.tasks.retrieve(task_id)
     labels = task.get_labels()
     data = frame_annotations(task, labels, frame)
     colors = {label.name: label.color for label in labels if label.color}
     # "compressed" frames are EXIF-rotated like CVAT's coordinates, and smaller than originals.
     with Image.open(task.get_frame(frame, quality="compressed")) as image:
-        out, scale = render(image, data.objects, colors, clamp_side(max_side))
-    buffer = io.BytesIO()
-    out.save(buffer, format="JPEG", quality=85)
-    return buffer.getvalue(), legend(data.objects, scale, frame, data.skipped_tracks)
+        side = clamp_side(max_side)
+        out, scale = render(image, data.objects, colors, side)
+        clean = render(image, [], colors, side)[0] if include_clean else None
+    text = legend(data.objects, scale, frame, data.skipped_tracks)
+    if clean is not None:
+        text = "The second image is the same frame without annotations.\n" + text
+    return _jpeg(out), clean and _jpeg(clean), text
