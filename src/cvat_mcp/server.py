@@ -1,3 +1,4 @@
+import functools
 import logging
 import sys
 from collections.abc import AsyncIterator, Callable
@@ -6,11 +7,12 @@ from contextlib import asynccontextmanager
 from cvat_sdk import Client, make_client
 from cvat_sdk.api_client.exceptions import ApiException
 from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from urllib3.exceptions import HTTPError
 
 from cvat_mcp.config import Settings
-from cvat_mcp.errors import F, tool_errors
+from cvat_mcp.errors import F, explain
 
 logger = logging.getLogger("cvat_mcp")
 
@@ -70,6 +72,22 @@ mode: if the user asks for it, explain that it is disabled here and must be done
 mcp = MCPServer("cvat", instructions=INSTRUCTIONS, lifespan=lifespan)
 
 REGISTERED_TOOLS: list[str] = []
+
+
+def tool_errors(fn: F) -> F:
+    """Re-raise expected failures as ToolError so their message reaches the model."""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            message = explain(exc)
+            if message is None:
+                raise
+            raise ToolError(message) from exc
+
+    return wrapper
 
 
 def tool(

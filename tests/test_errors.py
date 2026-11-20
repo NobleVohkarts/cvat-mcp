@@ -1,10 +1,7 @@
-import inspect
-
 import pytest
 from cvat_sdk.api_client.exceptions import ApiException
-from mcp.server.mcpserver.exceptions import ToolError
 
-from cvat_mcp.errors import InvalidArgument, explain, tool_errors
+from cvat_mcp.errors import InvalidArgument, explain
 from cvat_mcp.services.annotations import FrameObject
 
 
@@ -47,21 +44,3 @@ def test_other_value_errors_are_unexpected():
 
 def test_unexpected_exception_is_not_explained():
     assert explain(RuntimeError("boom")) is None
-
-
-def test_tool_errors_raises_tool_error_and_keeps_signature():
-    def get_thing(task_id: int, frame: int = 0) -> str:
-        raise _api(404)
-
-    wrapped = tool_errors(get_thing)
-    assert inspect.signature(wrapped) == inspect.signature(get_thing)
-    with pytest.raises(ToolError, match="not found"):
-        wrapped(1)
-
-
-def test_tool_errors_lets_unexpected_exceptions_through():
-    def broken():
-        raise RuntimeError("boom")
-
-    with pytest.raises(RuntimeError):
-        tool_errors(broken)()

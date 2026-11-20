@@ -3,7 +3,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from cvat_mcp.config import Settings
+from cvat_mcp.config import Settings, resolve_in_workdir
+from cvat_mcp.errors import InvalidArgument
 
 
 @pytest.fixture(autouse=True)
@@ -46,3 +47,19 @@ def test_env_file_is_read(tmp_path):
     s = Settings()
     assert s.access_token.get_secret_value() == "from-file"
     assert s.mcp_mode == "write"
+
+
+def test_path_inside_workdir(tmp_path):
+    assert resolve_in_workdir(tmp_path, "a/b.zip") == tmp_path.resolve() / "a" / "b.zip"
+
+
+@pytest.mark.parametrize("path", ["../x", "/etc/passwd", "a/../../x"])
+def test_path_escaping_workdir(tmp_path, path):
+    with pytest.raises(InvalidArgument, match="CVAT_MCP_WORKDIR"):
+        resolve_in_workdir(tmp_path, path)
+
+
+def test_symlink_out_of_workdir(tmp_path):
+    (tmp_path / "link").symlink_to("/tmp")
+    with pytest.raises(InvalidArgument, match="CVAT_MCP_WORKDIR"):
+        resolve_in_workdir(tmp_path, "link/x")

@@ -4,6 +4,8 @@ from typing import Literal
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from cvat_mcp.errors import InvalidArgument
+
 
 class Settings(BaseSettings):
     """Server configuration. Only environment variables (or `.env`); passwords are not supported."""
@@ -14,3 +16,12 @@ class Settings(BaseSettings):
     access_token: SecretStr
     mcp_mode: Literal["read-only", "write"] = "read-only"
     mcp_workdir: Path = Path("workdir")
+
+
+def resolve_in_workdir(workdir: Path, path: str | Path) -> Path:
+    """The only way to turn a path from the model into a file path: it must stay in the workdir."""
+    root = workdir.resolve()
+    resolved = (root / path).resolve()  # follows symlinks and "..", so both are caught
+    if not resolved.is_relative_to(root):
+        raise InvalidArgument(f"path must stay inside CVAT_MCP_WORKDIR ({root})")
+    return resolved
