@@ -48,6 +48,7 @@ INSTRUCTIONS = f"""\
 Tools for reviewing annotations in CVAT (computer vision annotation tool).
 Mode: {settings.mcp_mode}.
 Typical flow: list_tasks -> get_task_overview (labels, jobs and their frame ranges).
+Issues belong to the job of type "annotation" whose frame range contains the frame.
 All frame numbers are task frame numbers (0-based), not job-relative.
 Deleting or changing tasks, jobs and annotations is not available through this server:
 if the user asks for it, explain that it is disabled here and must be done in the CVAT UI.

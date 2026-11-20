@@ -1,4 +1,5 @@
 from cvat_sdk import Client
+from cvat_sdk.api_client.exceptions import ApiException
 from cvat_sdk.core.exceptions import IncompatibleVersionException
 from cvat_sdk.version import VERSION as SDK_VERSION
 from pydantic import BaseModel
@@ -25,8 +26,12 @@ def check_compatibility(client: Client) -> tuple[bool, str | None]:
 
 def get_server_info(client: Client, mode: str, tools: list[str]) -> ServerInfo:
     compatible, note = check_compatibility(client)
+    try:
+        server_version = str(client.get_server_version())
+    except ApiException:  # already explained by the compatibility note
+        server_version = "unknown"
     return ServerInfo(
-        server_version=str(client.get_server_version()),
+        server_version=server_version,
         sdk_version=SDK_VERSION,
         compatible=compatible,
         compatibility_note=note,

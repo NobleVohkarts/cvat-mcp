@@ -1,4 +1,4 @@
-from cvat_mcp.services.tasks import clamp_limit, count_objects_by_label
+from cvat_mcp.services.tasks import clamp_limit, count_objects_by_label, get_task_overview
 
 
 def test_clamp_limit():
@@ -14,3 +14,33 @@ def test_count_objects_by_label_empty_keeps_all_labels():
 
 def test_count_objects_by_label():
     assert count_objects_by_label([1, 1, 2], {1: "car", 2: "bus"}) == {"car": 2, "bus": 1}
+
+
+class _Obj:
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+class _FakeTask(_Obj):
+    def get_labels(self):
+        return [_Obj(id=1, name="car", type="rectangle", attributes=[])]
+
+    def get_annotations(self):
+        return _Obj(shapes=[_Obj(label_id=1)], tracks=[_Obj(label_id=1)], tags=[_Obj(label_id=1)])
+
+    def get_jobs(self):
+        return []
+
+
+class _NoProjectAccess:
+    def retrieve(self, _id):
+        raise AssertionError("must not request the project: the user may lack access")
+
+
+def test_overview_uses_task_project_name_and_counts_tags():
+    task = _FakeTask(id=3, name="t", project_id=2, project_name="Traffic", size=40)
+    client = _Obj(tasks=_Obj(retrieve=lambda _id: task), projects=_NoProjectAccess())
+    overview = get_task_overview(client, 3)
+    assert overview.project_name == "Traffic"
+    assert overview.objects_per_label == {"car": 3}
+    assert overview.total_objects == 3

@@ -1,6 +1,7 @@
+from cvat_sdk.api_client.exceptions import ApiException
 from cvat_sdk.core.exceptions import IncompatibleVersionException
 
-from cvat_mcp.services.server_info import check_compatibility
+from cvat_mcp.services.server_info import check_compatibility, get_server_info
 
 
 class FakeClient:
@@ -26,3 +27,20 @@ def test_incompatible_server_returns_sdk_message():
         False,
         message,
     )
+
+
+def test_server_info_survives_unreachable_about_endpoint():
+    class Users:
+        def retrieve_current_user(self):
+            return type("U", (), {"username": "admin"})()
+
+    class Broken(FakeClient):
+        users = Users()
+
+        def get_server_version(self):
+            raise ApiException(status=502, reason="Bad Gateway")
+
+    client = Broken(IncompatibleVersionException("Failed to retrieve server API version"))
+    info = get_server_info(client, "read-only", ["server_info"])
+    assert info.server_version == "unknown"
+    assert info.compatible is False

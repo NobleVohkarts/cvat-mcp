@@ -93,14 +93,14 @@ def get_task_overview(client: Client, task_id: int) -> TaskOverview:
     annotations = task.get_annotations()
     label_names = {label.id: label.name for label in labels}
     objects = count_objects_by_label(
-        [s.label_id for s in annotations.shapes] + [t.label_id for t in annotations.tracks],
+        [o.label_id for o in (*annotations.shapes, *annotations.tracks, *annotations.tags)],
         label_names,
     )
     return TaskOverview(
         id=task.id,
         name=task.name,
         project_id=task.project_id,
-        project_name=client.projects.retrieve(task.project_id).name if task.project_id else None,
+        project_name=task.project_name,  # None when the user may not see the project
         frame_count=task.size,
         labels=[
             LabelInfo(
