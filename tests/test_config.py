@@ -56,3 +56,28 @@ def test_symlink_out_of_workdir(tmp_path):
     (tmp_path / "link").symlink_to("/tmp")
     with pytest.raises(InvalidArgument, match="CVAT_MCP_WORKDIR"):
         resolve_in_workdir(tmp_path, "link/x")
+
+
+def test_http_mode_defaults(monkeypatch):
+    monkeypatch.setenv("CVAT_ACCESS_TOKEN", "t")
+    s = Settings()
+    assert s.mcp_transport == "stdio" and s.mcp_port == 8765
+    assert s.redirect_hosts == {"claude.ai", "claude.com", "localhost", "127.0.0.1"}
+
+
+@pytest.mark.parametrize("url", [None, "http://example.com"])
+def test_http_mode_needs_https_public_url(monkeypatch, url):
+    monkeypatch.setenv("CVAT_ACCESS_TOKEN", "t")
+    monkeypatch.setenv("CVAT_MCP_TRANSPORT", "http")
+    if url:
+        monkeypatch.setenv("CVAT_MCP_PUBLIC_URL", url)
+    with pytest.raises(ValidationError, match="mcp_public_url|CVAT_MCP_PUBLIC_URL"):
+        Settings()
+
+
+@pytest.mark.parametrize("url", ["https://x.trycloudflare.com", "http://localhost:8765"])
+def test_http_mode_accepts_https_or_local(monkeypatch, url):
+    monkeypatch.setenv("CVAT_ACCESS_TOKEN", "t")
+    monkeypatch.setenv("CVAT_MCP_TRANSPORT", "http")
+    monkeypatch.setenv("CVAT_MCP_PUBLIC_URL", url)
+    assert Settings().public_url == url
