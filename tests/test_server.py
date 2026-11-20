@@ -101,3 +101,52 @@ def test_tool_errors_lets_unexpected_exceptions_through(tool_errors):
 
     with pytest.raises(RuntimeError):
         tool_errors(broken)()
+
+
+HTTP_CHECKS = """
+import json
+from starlette.testclient import TestClient
+import cvat_mcp.server as s, cvat_mcp.tools
+app = s.mcp.streamable_http_app(transport_security=s.transport_security())
+client = TestClient(app, base_url="http://localhost:8765", follow_redirects=False)  # no lifespan
+paths = [r.path for r in app.routes]
+mcp = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
+print(json.dumps({
+    "as": client.get("/.well-known/oauth-authorization-server").json(),
+    "prm": client.get("/.well-known/oauth-protected-resource/mcp").status_code,
+    "mcp": mcp.status_code,
+    "www": mcp.headers.get("www-authenticate", ""),
+    "login": client.get("/login?request=nope").status_code,
+    "paths": paths,
+}))
+"""
+
+
+def test_http_mode_serves_oauth_and_protects_mcp(monkeypatch):
+    monkeypatch.setenv("CVAT_MCP_TRANSPORT", "http")
+    monkeypatch.setenv("CVAT_MCP_PUBLIC_URL", "http://localhost:8765")
+    result = run(HTTP_CHECKS, monkeypatch)
+    assert result.returncode == 0, result.stderr
+    checks = json.loads(result.stdout)
+    assert checks["as"]["registration_endpoint"] == "http://localhost:8765/register"
+    assert checks["prm"] == 200
+    assert checks["mcp"] == 401 and "resource_metadata" in checks["www"]
+    assert checks["login"] == 400
+
+
+def test_stdio_mode_has_no_oauth_routes(monkeypatch):
+    result = run(
+        "import json, cvat_mcp.server as s, cvat_mcp.tools\n"
+        "print(json.dumps([r.path for r in s.mcp.streamable_http_app().routes]))",
+        monkeypatch,
+    )
+    assert result.returncode == 0, result.stderr
+    paths = json.loads(result.stdout)
+    assert "/login" not in paths and not any(p.startswith("/.well-known") for p in paths)
+
+
+def test_http_mode_without_public_url_fails_at_startup(monkeypatch):
+    monkeypatch.setenv("CVAT_MCP_TRANSPORT", "http")
+    result = run("from cvat_mcp.__main__ import main; main()", monkeypatch)
+    assert result.returncode == 1
+    assert "CVAT_MCP_PUBLIC_URL" in result.stderr and "Traceback" not in result.stderr

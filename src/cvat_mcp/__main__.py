@@ -16,11 +16,29 @@ def main() -> None:
         from cvat_mcp.server import mcp  # pylint: disable=import-outside-toplevel
     except ValidationError as e:
         prefix = Settings.model_config["env_prefix"]
-        names = ", ".join(f"{prefix}{str(err['loc'][0]).upper()}" for err in e.errors())
-        sys.exit(f"cvat-mcp: invalid or missing {names}. See cvat-mcp/.env.example.")
+        problems = [  # field errors name the variable; cross-field checks carry a message
+            f"{prefix}{str(err['loc'][0]).upper()}" if err["loc"] else err["msg"]
+            for err in e.errors()
+        ]
+        sys.exit(f"cvat-mcp: invalid or missing {'; '.join(problems)}. See cvat-mcp/.env.example.")
+
+    from cvat_mcp.server import (  # pylint: disable=import-outside-toplevel
+        HTTP_MODE,
+        settings,
+        transport_security,
+    )
 
     try:
-        mcp.run("stdio")
+        if HTTP_MODE:
+            # Bound to localhost only: the tunnel is the one way in.
+            mcp.run(
+                "streamable-http",
+                host="127.0.0.1",
+                port=settings.mcp_port,
+                transport_security=transport_security(),
+            )
+        else:
+            mcp.run("stdio")
     except BaseExceptionGroup as group:
         # anyio wraps a startup failure in the lifespan; show its one-line message.
         exits, rest = group.split(SystemExit)
