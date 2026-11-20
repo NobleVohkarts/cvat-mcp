@@ -24,9 +24,16 @@ class FrameAnnotations(BaseModel):
     skipped_tracks: int
 
 
-def shape_bbox(points: list[float]) -> list[float]:
+def shape_bbox(shape) -> list[float]:
+    """[x1, y1, x2, y2] around a shape's points."""
     # shortcut: ignores rotation and treats ellipse points as corners; exact for axis-aligned
     # rectangles, upgrade when rotated shapes or ellipses matter.
+    if str(shape.type) == "mask":  # RLE counts followed by [left, top, right, bottom]
+        points = shape.points[-4:]
+    elif str(shape.type) == "skeleton":  # the skeleton itself has no points, its elements do
+        points = [v for element in shape.elements for v in element.points]
+    else:
+        points = shape.points
     xs, ys = points[0::2], points[1::2]
     return [round(v, 1) for v in (min(xs), min(ys), max(xs), max(ys))]
 
@@ -61,7 +68,7 @@ def frame_annotations(task: Task, labels: list, frame: int) -> FrameAnnotations:
                 id=s.id,
                 label=names[s.label_id],
                 type=str(s.type),
-                bbox=shape_bbox(s.points),
+                bbox=shape_bbox(s),
                 attributes={attribute_names[a.spec_id]: a.value for a in s.attributes},
                 source=str(s.source),
                 occluded=s.occluded,

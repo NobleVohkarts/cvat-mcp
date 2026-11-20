@@ -46,5 +46,17 @@ def test_legend_empty_frame():
     assert "no objects" in legend([], 1.0, 0)
 
 
+def test_legend_mentions_tracks_not_drawn():
+    text = legend([], 1.0, 0, skipped_tracks=2)
+    assert "2 tracked objects are not drawn" in text and "no objects" not in text
+
+
+def test_caption_stays_inside_image_at_right_edge():
+    edge = CAR.model_copy(update={"bbox": [780, 100, 799, 250]})
+    out, _ = render(_black(), [edge], {"car": "#ff0000"}, 2048)
+    r, g, _b = out.getpixel((770, 95))  # caption background shifted left of the box
+    assert r > 200 and g < 80
+
+
 def test_clamp_side():
     assert clamp_side(10) == 256 and clamp_side(5000) == 2048 and clamp_side(1280) == 1280

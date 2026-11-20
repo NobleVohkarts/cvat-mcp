@@ -5,11 +5,22 @@ from cvat_mcp.services.annotations import check_frame, get_frame_annotations, sh
 
 
 def test_shape_bbox_rectangle():
-    assert shape_bbox([10, 20, 110, 220]) == [10, 20, 110, 220]
+    assert shape_bbox(shape(1, 1, 0, [10, 20, 110, 220])) == [10, 20, 110, 220]
 
 
 def test_shape_bbox_polygon():
-    assert shape_bbox([5, 50, 30, 10, 60, 40]) == [5, 10, 60, 50]
+    assert shape_bbox(shape(1, 1, 0, [5, 50, 30, 10, 60, 40], type="polygon")) == [5, 10, 60, 50]
+
+
+def test_shape_bbox_mask_uses_trailing_box():
+    rle = [500, 20, 480, 20, 3000]
+    assert shape_bbox(shape(1, 1, 0, rle + [10, 20, 59, 89], type="mask")) == [10, 20, 59, 89]
+
+
+def test_shape_bbox_skeleton_uses_elements():
+    elements = [Obj(points=[10, 50]), Obj(points=[40, 20]), Obj(points=[30, 90])]
+    skeleton = shape(1, 1, 0, [], type="skeleton", elements=elements)
+    assert shape_bbox(skeleton) == [10, 20, 40, 90]
 
 
 @pytest.mark.parametrize("frame", [-1, 40])

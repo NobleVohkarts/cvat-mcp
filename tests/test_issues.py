@@ -56,6 +56,13 @@ def test_argument_errors_need_no_requests():
         create_issue(client, "http://cvat", 3, 25, "msg", None, None)
 
 
+def test_url_without_double_slash():
+    issues = Mock()
+    issues.create.return_value = Obj(id=77)
+    ref = create_issue(_client(issues), "http://cvat/", 3, 25, "m", None, [1, 2, 3, 4])
+    assert ref.url == "http://cvat/tasks/4/jobs/3?frame=25"
+
+
 def test_issue_on_object_box():
     issues = Mock()
     issues.create.return_value = Obj(id=77)

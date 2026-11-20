@@ -36,7 +36,8 @@ def explain(exc: Exception) -> str | None:
         if exc.status in _HINTS:
             return _HINTS[exc.status]
         if exc.status == 400:
-            return f"CVAT rejected the request: {str(exc.body or exc.reason)[:200]}"
+            body = exc.body.decode(errors="replace") if isinstance(exc.body, bytes) else exc.body
+            return f"CVAT rejected the request: {(body or exc.reason or '')[:300]}"
         return (
             f"CVAT answered {exc.status} {exc.reason}. Try again; if it repeats, call server_info."
         )

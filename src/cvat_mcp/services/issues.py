@@ -66,7 +66,7 @@ def create_issue(
                 f"object #{object_id} is not on frame {frame}; "
                 "use get_frame_annotations to see the ids on this frame"
             )
-        position = shape_bbox(shapes[object_id].points)
+        position = shape_bbox(shapes[object_id])
     else:
         position = list(bbox)
 
@@ -79,5 +79,5 @@ def create_issue(
         job_id=job_id,
         frame=frame,
         position=position,
-        url=f"{base_url}/tasks/{job.task_id}/jobs/{job_id}?frame={frame}",
+        url=f"{base_url.rstrip('/')}/tasks/{job.task_id}/jobs/{job_id}?frame={frame}",
     )

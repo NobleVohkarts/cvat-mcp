@@ -34,18 +34,21 @@ def render(
         left, top, right, bottom = draw.textbbox((0, 0), caption, font=font)
         text_w, text_h = right - left + 2 * width, bottom - top + 2 * width
         ty = y1 - text_h if y1 >= text_h else y1  # above the box, or inside at the image top
-        draw.rectangle([x1, ty, x1 + text_w, ty + text_h], fill=color)
+        tx = max(0, min(x1, out.width - text_w))  # keep the caption readable at the right edge
+        draw.rectangle([tx, ty, tx + text_w, ty + text_h], fill=color)
         ink = "black" if ImageColor.getcolor(color, "L") > 140 else "white"
-        draw.text((x1 + width - left, ty + width - top), caption, fill=ink, font=font)
+        draw.text((tx + width - left, ty + width - top), caption, fill=ink, font=font)
     return out, scale
 
 
-def legend(objects: list[FrameObject], scale: float, frame: int) -> str:
+def legend(objects: list[FrameObject], scale: float, frame: int, skipped_tracks: int = 0) -> str:
     head = (
         f"frame {frame}, {len(objects)} objects, image scaled by {scale:.3f} "
         "(coordinates below are original pixels)"
     )
-    if not objects:
+    if skipped_tracks:
+        head += f"\n{skipped_tracks} tracked objects are not drawn (tracks are not supported yet)"
+    if not objects and not skipped_tracks:
         return f"{head}\nno objects"
     return "\n".join([head, *(f"#{o.id} {o.label} {o.bbox}" for o in objects)])
 
@@ -61,4 +64,4 @@ def render_frame(client: Client, task_id: int, frame: int, max_side: int) -> tup
         out, scale = render(image, data.objects, colors, clamp_side(max_side))
     buffer = io.BytesIO()
     out.save(buffer, format="JPEG", quality=85)
-    return buffer.getvalue(), legend(data.objects, scale, frame)
+    return buffer.getvalue(), legend(data.objects, scale, frame, data.skipped_tracks)

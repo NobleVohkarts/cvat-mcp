@@ -28,6 +28,11 @@ def test_api_errors(status, body, words):
     assert all(w in message for w in words)
 
 
+def test_bad_request_body_bytes_are_decoded():
+    message = explain(_api(400, "Bad Request", b'{"position": ["bad"]}'))
+    assert "b'" not in message and '"position"' in message
+
+
 def test_own_validation_message_passes_through():
     assert explain(InvalidArgument("frame 99 is outside 0..39")) == "frame 99 is outside 0..39"
 
