@@ -1,5 +1,6 @@
 import pytest
 from cvat_sdk.api_client.exceptions import ApiException
+from cvat_sdk.core.exceptions import BackgroundRequestException
 
 from cvat_mcp.errors import InvalidArgument, explain
 from cvat_mcp.services.annotations import FrameObject
@@ -28,6 +29,11 @@ def test_api_errors(status, body, words):
 def test_bad_request_body_bytes_are_decoded():
     message = explain(_api(400, "Bad Request", b'{"position": ["bad"]}'))
     assert "b'" not in message and '"position"' in message
+
+
+def test_failed_background_job():
+    message = explain(BackgroundRequestException("Export failed: boom" + "x" * 1000))
+    assert "background job failed" in message and "boom" in message and len(message) < 400
 
 
 def test_own_validation_message_passes_through():
