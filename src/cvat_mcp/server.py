@@ -69,6 +69,7 @@ Typical flow: list_tasks -> get_task_overview (labels, jobs and their frame rang
 -> render_frame for each frame to review (look for missing objects, wrong labels and boxes
 that miss their object) -> get_frame_annotations for exact ids and boxes
 -> report the problems to the user{FILE_ISSUES}.
+export_dataset saves a task as a dataset file in the server's work directory (any mode).
 All frame numbers are task frame numbers (0-based), not job-relative; coordinates are original
 image pixels [x1, y1, x2, y2].
 {READ_ONLY_NOTE}

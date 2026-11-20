@@ -14,6 +14,7 @@ from cvat_sdk.api_client.exceptions import ApiException
 from mcp.server.mcpserver.exceptions import ToolError
 
 READ_TOOLS = [
+    "export_dataset",
     "get_frame_annotations",
     "get_task_overview",
     "list_tasks",

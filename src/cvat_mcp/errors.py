@@ -1,6 +1,7 @@
 """Turn exceptions into short messages the model can act on (no mcp dependency)."""
 
 from cvat_sdk.api_client.exceptions import ApiException
+from cvat_sdk.core.exceptions import BackgroundRequestException
 
 
 class InvalidArgument(ValueError):
@@ -21,6 +22,8 @@ def explain(exc: Exception) -> str | None:
     """A message for the model, or None for an unexpected error."""
     if isinstance(exc, InvalidArgument):
         return str(exc)
+    if isinstance(exc, BackgroundRequestException):
+        return f"the export failed on the server: {exc}"
     if isinstance(exc, ApiException):
         if exc.status in _HINTS:
             return _HINTS[exc.status]
