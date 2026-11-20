@@ -10,13 +10,14 @@ from cvat_mcp.services.exports import (
     check_format,
     default_filename,
     export_dataset,
-    unique_path,
+    reserve_path,
 )
 
 EXPORTERS = [
-    Obj(name="COCO 1.0", enabled=True),
-    Obj(name="Datumaro 1.0", enabled=True),
-    Obj(name="Old 1.0", enabled=False),
+    Obj(name="COCO 1.0", enabled=True, dimension="2d"),
+    Obj(name="Datumaro 1.0", enabled=True, dimension="2d"),
+    Obj(name="Old 1.0", enabled=False, dimension="2d"),
+    Obj(name="Kitti Raw Format 1.0", enabled=True, dimension="3d"),
 ]
 FORMATS = Obj(server_api=Obj(retrieve_annotation_formats=lambda: (Obj(exporters=EXPORTERS), None)))
 
@@ -25,18 +26,24 @@ def test_default_filename_marks_images():
     assert default_filename(7, "YOLO 1.1", True) == "task-7-yolo-1-1-images.zip"
 
 
-def test_unique_path(tmp_path):
-    target = tmp_path / "a.zip"
-    assert unique_path(target) == target
-    target.touch()
+def test_reserve_path_skips_existing_files(tmp_path):
+    (tmp_path / "a.zip").touch()
     (tmp_path / "a-1.zip").touch()
-    assert unique_path(target) == tmp_path / "a-2.zip"
+    with reserve_path(tmp_path / "a.zip") as free:
+        assert free == tmp_path / "a-2.zip"
 
 
-@pytest.mark.parametrize("name", ["coco 1.0", "Old 1.0", "COCO"])
-def test_check_format_lists_valid_names(name):
-    with pytest.raises(InvalidArgument, match="valid: COCO 1.0, Datumaro 1.0"):
-        check_format(Obj(api_client=FORMATS), name)
+@pytest.mark.parametrize("name", ["coco 1.0", "Old 1.0", "COCO", "Kitti Raw Format 1.0"])
+def test_check_format_lists_valid_names_for_the_dimension(name):
+    with pytest.raises(InvalidArgument, match=r"valid for a 2d task: COCO 1.0, Datumaro 1.0$"):
+        check_format(Obj(api_client=FORMATS), name, "2d")
+
+
+def test_reserved_names_differ_while_exports_run(tmp_path):
+    with reserve_path(tmp_path / "a.zip") as first, reserve_path(tmp_path / "a.zip") as second:
+        assert first != second
+    with reserve_path(tmp_path / "a.zip") as again:
+        assert again == tmp_path / "a.zip"  # released after the export
 
 
 def _task():
@@ -44,7 +51,7 @@ def _task():
         Path(path).write_bytes(b"12345")
         return Path(path)  # the SDK returns where it saved the file
 
-    return Obj(export_dataset=Mock(side_effect=write))
+    return Obj(export_dataset=Mock(side_effect=write), dimension="2d")
 
 
 def _export(tmp_path, task, fmt="COCO 1.0", filename=None):
@@ -69,7 +76,13 @@ def test_second_export_never_overwrites(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "filename, expected", [("sub/out", "sub/out.zip"), ("out.json", "out.zip")]
+    "filename, expected",
+    [
+        ("sub/out", "sub/out.zip"),
+        ("task7-COCO-1.0", "task7-COCO-1.0.zip"),
+        ("out.ZIP", "out.ZIP"),
+        ("archive.tar.gz", "archive.tar.gz.zip"),
+    ],
 )
 def test_filename_always_ends_in_zip(tmp_path, filename, expected):
     assert _export(tmp_path, _task(), filename=filename).path == str(tmp_path / expected)
