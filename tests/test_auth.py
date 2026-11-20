@@ -143,7 +143,10 @@ def test_login_page_headers_and_escaping(provider, web):
     _, request_id, _ = start_login(provider)
     page = web.get(f"/login?request={request_id}")
     assert page.status_code == 200
-    assert "default-src 'none'" in page.headers["content-security-policy"]
+    csp = page.headers["content-security-policy"]
+    assert "default-src 'none'" in csp
+    # browsers apply form-action to the redirect after the POST: the client's callback must pass
+    assert "form-action 'self' https://claude.ai;" in csp
     assert page.headers["x-frame-options"] == "DENY"
     assert web.get('/login?request="><script>').status_code == 400
 

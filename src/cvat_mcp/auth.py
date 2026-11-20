@@ -37,13 +37,21 @@ MAX_FAILURES = 10
 LOCKOUT = 600
 LOCAL_HOSTS = {"localhost", "127.0.0.1"}
 
-HEADERS = {
-    "Content-Security-Policy": (
-        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"
-    ),
-    "X-Frame-Options": "DENY",
-    "Cache-Control": "no-store",
-}
+HEADERS = {"X-Frame-Options": "DENY", "Cache-Control": "no-store"}
+
+
+def _headers(redirect_uri: str | None = None) -> dict[str, str]:
+    # Browsers apply form-action to the redirect that follows the POST, so the client's own
+    # callback origin (already limited to the allowed redirect hosts) must be allowed too.
+    form_action = "'self'"
+    if redirect_uri:
+        parts = urlsplit(redirect_uri)
+        form_action += f" {parts.scheme}://{parts.netloc}"
+    csp = (
+        "default-src 'none'; style-src 'unsafe-inline'; "
+        f"form-action {form_action}; frame-ancestors 'none'"
+    )
+    return {**HEADERS, "Content-Security-Policy": csp}
 
 
 def cvat_login_username(cvat_url: str, username: str, password: str) -> str | None:
@@ -213,9 +221,10 @@ class CvatOAuthProvider:  # pylint: disable=too-many-instance-attributes
 
     async def login_form(self, request: Request) -> Response:
         request_id = request.query_params.get("request", "")
-        if self._pending_login(request_id) is None:
+        pending = self._pending_login(request_id)
+        if pending is None:
             return _page("This login link is invalid or expired. Connect again from Claude.", 400)
-        return _page(None, 200, request_id)
+        return _page(None, 200, request_id, str(pending.params.redirect_uri))
 
     async def login_submit(self, request: Request) -> Response:
         form = await request.form()
@@ -224,13 +233,20 @@ class CvatOAuthProvider:  # pylint: disable=too-many-instance-attributes
         if pending is None:
             return _page("This login link is invalid or expired. Connect again from Claude.", 400)
         if self._locked_out():
-            return _page("Too many failed logins. Try again in a few minutes.", 429, request_id)
+            return _page(
+                "Too many failed logins. Try again in a few minutes.",
+                429,
+                request_id,
+                str(pending.params.redirect_uri),
+            )
         username, password = str(form.get("username", "")), str(form.get("password", ""))
         user = await anyio.to_thread.run_sync(self.check_login, username, password)
         if user is None or self.owner is None or user != self.owner:
             self._failures.times.append(self.now())
             await anyio.sleep(self.failure_delay)
-            return _page("Invalid username or password.", 401, request_id)
+            return _page(
+                "Invalid username or password.", 401, request_id, str(pending.params.redirect_uri)
+            )
 
         del self._pending[request_id]  # single use
         code = secrets.token_urlsafe(32)
@@ -250,7 +266,12 @@ class CvatOAuthProvider:  # pylint: disable=too-many-instance-attributes
         return RedirectResponse(target, status_code=302, headers=HEADERS)
 
 
-def _page(message: str | None, status: int, request_id: str | None = None) -> HTMLResponse:
+def _page(
+    message: str | None,
+    status: int,
+    request_id: str | None = None,
+    redirect_uri: str | None = None,
+) -> HTMLResponse:
     form = ""
     if request_id is not None:
         form = f"""
@@ -274,4 +295,4 @@ label {{ display: block; margin: .8rem 0; }} input {{ display: block; width: 100
 <p>Claude wants to use your CVAT server. Sign in with the CVAT account that owns this
 server's access token.</p>{notice}{form}
 </body></html>"""
-    return HTMLResponse(body, status_code=status, headers=HEADERS)
+    return HTMLResponse(body, status_code=status, headers=_headers(redirect_uri))
