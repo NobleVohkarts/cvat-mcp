@@ -21,7 +21,11 @@ class Settings(BaseSettings):
 def resolve_in_workdir(workdir: Path, path: str | Path) -> Path:
     """The only way to turn a path from the model into a file path: it must stay in the workdir."""
     root = workdir.resolve()
-    resolved = (root / path).resolve()  # follows symlinks and "..", so both are caught
-    if not resolved.is_relative_to(root):
-        raise InvalidArgument(f"path must stay inside CVAT_MCP_WORKDIR ({root})")
+    message = f"path must name a file inside CVAT_MCP_WORKDIR ({root})"
+    try:
+        resolved = (root / path).resolve()  # follows symlinks and "..", so both are caught
+    except (OSError, ValueError) as exc:  # e.g. an embedded NUL byte
+        raise InvalidArgument(message) from exc
+    if resolved == root or not resolved.is_relative_to(root):
+        raise InvalidArgument(message)
     return resolved

@@ -31,11 +31,20 @@ def run(code: str, monkeypatch, mode: str | None = None, token: str | None = "te
         monkeypatch.setenv("CVAT_ACCESS_TOKEN", token)
     if mode is not None:
         monkeypatch.setenv("CVAT_MCP_MODE", mode)
-    return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+    return subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=False,
+        stdin=subprocess.DEVNULL,
+        timeout=60,
+    )
 
 
 def registered(monkeypatch, mode):
-    return json.loads(run(LIST_TOOLS, monkeypatch, mode).stdout)
+    result = run(LIST_TOOLS, monkeypatch, mode)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
 
 
 @pytest.mark.parametrize("mode", [None, "read-only"])
@@ -44,12 +53,14 @@ def test_read_only_mode_registers_only_read_tools(monkeypatch, mode):
     assert result["tools"] == READ_TOOLS
     assert "Creating issues is disabled" in result["instructions"]
     assert "create_issue" not in result["instructions"]
+    assert "Issues belong" not in result["instructions"]
 
 
 def test_write_mode_adds_create_issue(monkeypatch):
     result = registered(monkeypatch, "write")
     assert result["tools"] == sorted(READ_TOOLS + ["create_issue"])
     assert "only when the user asks" in result["instructions"]
+    assert "Issues belong to the job" in result["instructions"]
     assert "Creating issues is disabled" not in result["instructions"]
 
 

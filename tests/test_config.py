@@ -46,7 +46,7 @@ def test_path_inside_workdir(tmp_path):
     assert resolve_in_workdir(tmp_path, "a/b.zip") == tmp_path.resolve() / "a" / "b.zip"
 
 
-@pytest.mark.parametrize("path", ["../x", "/etc/passwd", "a/../../x"])
+@pytest.mark.parametrize("path", ["../x", "/etc/passwd", "a/../../x", "", ".", "out\x00.zip"])
 def test_path_escaping_workdir(tmp_path, path):
     with pytest.raises(InvalidArgument, match="CVAT_MCP_WORKDIR"):
         resolve_in_workdir(tmp_path, path)
