@@ -64,3 +64,50 @@ def test_tool_errors_lets_unexpected_exceptions_through(tmp_path):
         tmp_path,
     )
     assert result.returncode == 0, result.stderr
+
+
+READ_TOOLS = [
+    "get_frame_annotations",
+    "get_task_overview",
+    "list_tasks",
+    "render_frame",
+    "server_info",
+]
+LIST_TOOLS = """
+import cvat_mcp.server as s, cvat_mcp.tools
+print(sorted(s.REGISTERED_TOOLS))
+print(s.INSTRUCTIONS)
+"""
+
+
+def test_read_only_mode_registers_only_read_tools(tmp_path):
+    result = run(LIST_TOOLS, tmp_path, mode="read-only")
+    tools, _, instructions = result.stdout.partition("\n")
+    assert tools == str(READ_TOOLS)
+    assert "Creating issues is disabled" in instructions
+    assert "report the problems to the user" in instructions
+
+
+def test_write_mode_adds_create_issue(tmp_path):
+    result = run(LIST_TOOLS, tmp_path, mode="write")
+    tools, _, instructions = result.stdout.partition("\n")
+    assert tools == str(sorted(READ_TOOLS + ["create_issue"]))
+    assert "create_issue, one per problem" in instructions
+    assert "Creating issues is disabled" not in instructions
+
+
+def test_default_mode_is_read_only(tmp_path):
+    tools = run(LIST_TOOLS, tmp_path).stdout.partition("\n")[0]
+    assert tools == str(READ_TOOLS)
+
+
+def test_bad_mode_fails_at_startup(tmp_path):
+    result = run("from cvat_mcp.__main__ import main; main()", tmp_path, mode="full")
+    assert result.returncode == 1
+    assert "CVAT_MCP_MODE" in result.stderr and "Traceback" not in result.stderr
+
+
+def test_missing_token_fails_at_startup(tmp_path):
+    result = run("from cvat_mcp.__main__ import main; main()", tmp_path, token=None)
+    assert result.returncode == 1
+    assert "CVAT_ACCESS_TOKEN" in result.stderr and "Traceback" not in result.stderr
