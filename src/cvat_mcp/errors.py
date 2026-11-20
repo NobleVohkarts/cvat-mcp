@@ -1,17 +1,6 @@
-"""Turn exceptions into short messages the model can act on.
-
-mcp reports any exception other than ToolError as a bare "Error executing tool <name>", so every
-tool is wrapped with tool_errors() and expected failures are re-raised as ToolError with a hint.
-"""
-
-import functools
-from collections.abc import Callable
-from typing import TypeVar
+"""Turn exceptions into short messages the model can act on (no mcp dependency)."""
 
 from cvat_sdk.api_client.exceptions import ApiException
-from mcp.server.mcpserver.exceptions import ToolError
-
-F = TypeVar("F", bound=Callable)
 
 
 class InvalidArgument(ValueError):
@@ -42,17 +31,3 @@ def explain(exc: Exception) -> str | None:
             f"CVAT answered {exc.status} {exc.reason}. Try again; if it repeats, call server_info."
         )
     return None
-
-
-def tool_errors(fn: F) -> F:
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        try:
-            return fn(*args, **kwargs)
-        except Exception as exc:
-            message = explain(exc)
-            if message is None:
-                raise
-            raise ToolError(message) from exc
-
-    return wrapper

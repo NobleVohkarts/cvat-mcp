@@ -1,16 +1,19 @@
+import functools
 import logging
 import sys
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from typing import TypeVar
 
 from cvat_sdk import Client, make_client
 from cvat_sdk.api_client.exceptions import ApiException
 from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from urllib3.exceptions import HTTPError
 
 from cvat_mcp.config import Settings
-from cvat_mcp.errors import F, tool_errors
+from cvat_mcp.errors import explain
 
 logger = logging.getLogger("cvat_mcp")
 
@@ -45,12 +48,19 @@ async def lifespan(_server: MCPServer) -> AsyncIterator[Client]:
 
 
 WRITE_MODE = settings.mcp_mode == "write"
-READ_ONLY_NOTE = (
-    ""
-    if WRITE_MODE
-    else "Creating issues is disabled: the server runs in read-only mode "
-    "(CVAT_MCP_MODE=write enables it)."
-)
+if WRITE_MODE:
+    FILE_ISSUES = (
+        " -> create_issue, one per problem, only when the user asks to file issues "
+        '(reviewing is not such a request). Issues belong to the job of type "annotation" '
+        "whose frame range contains the frame"
+    )
+    READ_ONLY_NOTE = ""
+else:
+    FILE_ISSUES = ""
+    READ_ONLY_NOTE = (
+        "Creating issues is disabled: the server runs in read-only mode "
+        "(CVAT_MCP_MODE=write enables it)."
+    )
 
 INSTRUCTIONS = f"""\
 Tools for reviewing annotations in CVAT (computer vision annotation tool).
@@ -58,8 +68,7 @@ Mode: {settings.mcp_mode}.
 Typical flow: list_tasks -> get_task_overview (labels, jobs and their frame ranges)
 -> render_frame for each frame to review (look for missing objects, wrong labels and boxes
 that miss their object) -> get_frame_annotations for exact ids and boxes
--> {"create_issue, one per problem" if WRITE_MODE else "report the problems to the user"}.
-Issues belong to the job of type "annotation" whose frame range contains the frame.
+-> report the problems to the user{FILE_ISSUES}.
 All frame numbers are task frame numbers (0-based), not job-relative; coordinates are original
 image pixels [x1, y1, x2, y2].
 {READ_ONLY_NOTE}
@@ -70,6 +79,23 @@ mode: if the user asks for it, explain that it is disabled here and must be done
 mcp = MCPServer("cvat", instructions=INSTRUCTIONS, lifespan=lifespan)
 
 REGISTERED_TOOLS: list[str] = []
+F = TypeVar("F", bound=Callable)
+
+
+def tool_errors(fn: F) -> F:
+    """Re-raise expected failures as ToolError so their message reaches the model."""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            message = explain(exc)
+            if message is None:
+                raise
+            raise ToolError(message) from exc
+
+    return wrapper
 
 
 def tool(
