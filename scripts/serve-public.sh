@@ -5,7 +5,9 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-PORT="${CVAT_MCP_PORT:-8765}"
+# the port: shell env first, then .env, then the default (the server reads the same order)
+PORT="${CVAT_MCP_PORT:-$(sed -n 's/^CVAT_MCP_PORT=//p' .env 2>/dev/null | tail -1)}"
+PORT="${PORT:-8765}"
 LOG="$(mktemp -t cvat-mcp-tunnel.XXXXXX)"
 
 cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:${PORT}" >"$LOG" 2>&1 &
@@ -25,7 +27,8 @@ trap 'exit 130' INT TERM HUP  # run the EXIT trap: stop the server and the tunne
 
 URL=""
 for _ in $(seq 60); do
-    URL="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$LOG" | head -1 || true)"
+    # not cloudflared's own API host, which shows up in its error lines
+    URL="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$LOG" | grep -v '//api\.' | head -1 || true)"
     [ -n "$URL" ] && break
     kill -0 "$TUNNEL_PID" 2>/dev/null || { cat "$LOG" >&2; exit 1; }
     sleep 1
