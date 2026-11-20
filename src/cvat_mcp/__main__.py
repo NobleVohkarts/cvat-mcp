@@ -15,6 +15,7 @@ def main() -> None:
         import cvat_mcp.tools  # pylint: disable=import-outside-toplevel,unused-import
         from cvat_mcp.server import (  # pylint: disable=import-outside-toplevel
             HTTP_MODE,
+            check_cvat,
             mcp,
             settings,
             transport_security,
@@ -26,6 +27,8 @@ def main() -> None:
 
     try:
         if HTTP_MODE:
+            # The web server swallows exits from its lifespan, so check CVAT before serving.
+            check_cvat()
             # Bound to localhost only: the tunnel is the one way in.
             mcp.run(
                 "streamable-http",

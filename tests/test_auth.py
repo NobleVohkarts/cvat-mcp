@@ -8,15 +8,23 @@ from urllib.parse import parse_qs, urlsplit
 
 import anyio
 import pytest
+from cvat_sdk.api_client.exceptions import ApiValueError
 from mcp.server.auth.provider import AuthorizationParams, RegistrationError
 from mcp.shared.auth import OAuthClientInformationFull
 from pydantic import AnyUrl
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
+from urllib3.exceptions import HTTPError
 
 from cvat_mcp import auth
-from cvat_mcp.auth import MAX_CLIENTS, MAX_FAILURES, MAX_PENDING, CvatOAuthProvider
+from cvat_mcp.auth import (
+    MAX_CLIENTS,
+    MAX_FAILURES,
+    MAX_PENDING_PER_CLIENT,
+    REFRESH_TTL,
+    CvatOAuthProvider,
+)
 
 CALLBACK = "https://claude.ai/api/mcp/auth_callback"
 PASSWORD = "s3cret-pass"
@@ -228,15 +236,94 @@ def test_registered_clients_are_capped_and_stripped(provider):
     assert anyio.run(provider.get_client, f"c{MAX_CLIENTS - 1}") is not None
 
 
-def test_pending_logins_are_purged_and_capped(provider, clock):
+def test_pending_logins_are_purged_and_capped_per_client(provider, clock):
     start_login(provider)
     clock.t += 601
-    for _ in range(MAX_PENDING + 5):
+    for _ in range(MAX_PENDING_PER_CLIENT + 3):
         start_login(provider)
-    assert len(provider._pending) == MAX_PENDING  # pylint: disable=protected-access
+    assert len(provider._pending) == MAX_PENDING_PER_CLIENT  # pylint: disable=protected-access
 
 
-def test_logins_are_checked_one_at_a_time(clock):
+def test_clients_holding_tokens_survive_a_registration_flood(provider, web):
+    client, tokens = issue_tokens(provider, web)
+    for i in range(MAX_CLIENTS + 10):
+        anyio.run(
+            provider.register_client,
+            OAuthClientInformationFull(client_id=f"flood{i}", redirect_uris=[CALLBACK]),
+        )
+    assert anyio.run(provider.get_client, client.client_id) is not None
+    assert anyio.run(provider.load_refresh_token, client, tokens.refresh_token) is not None
+
+
+def test_too_many_redirect_uris_refused(provider):
+    with pytest.raises(RegistrationError):
+        anyio.run(
+            provider.register_client,
+            OAuthClientInformationFull(client_id="many", redirect_uris=[CALLBACK] * 6),
+        )
+
+
+def test_lockout_is_per_client_ip(provider, web):
+    for _ in range(MAX_FAILURES):
+        _, request_id, _ = start_login(provider)
+        r = web.post(
+            "/login",
+            data={"request": request_id, "username": "admin", "password": "bad"},
+            headers={"cf-connecting-ip": "203.0.113.7"},
+        )
+        assert r.status_code == 401
+    _, request_id, _ = start_login(provider)
+    attacker = web.post(
+        "/login",
+        data={"request": request_id, "username": "admin", "password": PASSWORD},
+        headers={"cf-connecting-ip": "203.0.113.7"},
+    )
+    assert attacker.status_code == 429
+    _, request_id, _ = start_login(provider)
+    owner = web.post(
+        "/login",
+        data={"request": request_id, "username": "admin", "password": PASSWORD},
+        headers={"cf-connecting-ip": "198.51.100.1"},
+    )
+    assert owner.status_code == 302
+
+
+def test_old_token_pairs_are_purged(provider, web, clock):
+    issue_tokens(provider, web)
+    clock.t += REFRESH_TTL + 1
+    issue_tokens(provider, web)
+    assert len(provider._pairs) == 2  # pylint: disable=protected-access
+
+
+def test_cvat_outage_during_login_shows_retry_page(clock):
+    def down(_user, _password):
+        raise HTTPError("cvat down")
+
+    p = CvatOAuthProvider("https://x.trycloudflare.com", {"claude.ai"}, down, now=clock)
+    p.owner = "admin"
+    app = Starlette(routes=[Route("/login", p.login_submit, methods=["POST"])])
+    _, request_id, _ = start_login(p)
+    response = login(TestClient(app), request_id)
+    assert response.status_code == 503 and "try again" in response.text
+
+
+def test_cvat_login_treats_malformed_credentials_as_invalid(monkeypatch):
+    class FakeClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def login(self, _credentials):
+            raise ApiValueError("password too short")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(auth, "Client", FakeClient)
+    assert auth.cvat_login_username("http://cvat", "admin", "") is None
+
+
+def test_logins_are_checked_one_at_a_time(clock, monkeypatch):
+    monkeypatch.setattr(auth, "MAX_PENDING_PER_CLIENT", 20)  # 12 sign-in pages for one client
     active, peak, lock = [0], [0], threading.Lock()
 
     def slow_check(_user, _password):
