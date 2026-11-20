@@ -24,7 +24,7 @@ logger = logging.getLogger("cvat_mcp")
 settings = Settings()
 
 
-def _connect(s: Settings) -> Client:
+def _connect(s: Settings) -> tuple[Client, str]:
     # make_client() also checks the server version and logs a warning if it is unsupported.
     try:
         client = make_client(s.url, access_token=s.access_token.get_secret_value())
@@ -39,15 +39,15 @@ def _connect(s: Settings) -> Client:
             )
         sys.exit(f"cvat-mcp: CVAT at {s.url} answered {e.status} {e.reason} during login.")
     logger.info("connected to CVAT at %s as %s", s.url, user.username)
-    if oauth is not None:
-        oauth.owner = user.username  # only this CVAT user may log in through OAuth
-        logger.info("serving %s/mcp (OAuth login: CVAT user %s)", s.public_url, user.username)
-    return client
+    return client, user.username
 
 
 @asynccontextmanager
 async def lifespan(_server: MCPServer) -> AsyncIterator[Client]:
-    client = _connect(settings)
+    client, username = _connect(settings)
+    if oauth is not None:
+        oauth.owner = username  # only the token's own CVAT user may log in through OAuth
+        logger.info("serving %s/mcp (OAuth login: CVAT user %s)", settings.public_url, username)
     try:
         yield client
     finally:
@@ -84,17 +84,15 @@ mode: if the user asks for it, explain that it is disabled here and must be done
 """
 
 HTTP_MODE = settings.mcp_transport == "http"
-oauth = (
-    CvatOAuthProvider(
+oauth: CvatOAuthProvider | None = None
+auth: AuthSettings | None = None
+if HTTP_MODE:
+    oauth = CvatOAuthProvider(
         settings.public_url,
         settings.redirect_hosts,
         functools.partial(cvat_login_username, settings.url),
     )
-    if HTTP_MODE
-    else None
-)
-auth = (
-    AuthSettings(
+    auth = AuthSettings(
         issuer_url=settings.public_url,
         resource_server_url=f"{settings.public_url}/mcp",
         client_registration_options=ClientRegistrationOptions(
@@ -104,9 +102,6 @@ auth = (
         required_scopes=[SCOPE],
         validate_token_resource=False,  # this issuer only mints tokens for this one server
     )
-    if HTTP_MODE
-    else None
-)
 mcp = MCPServer(
     "cvat", instructions=INSTRUCTIONS, lifespan=lifespan, auth_server_provider=oauth, auth=auth
 )
@@ -118,9 +113,7 @@ if oauth is not None:
 def transport_security() -> TransportSecuritySettings:
     """Accept only the public (tunnel) host and the local address as Host headers."""
     port = settings.mcp_port
-    hosts = [f"127.0.0.1:{port}", f"localhost:{port}"]
-    if settings.public_url:
-        hosts.append(urlsplit(settings.public_url).netloc)
+    hosts = [f"127.0.0.1:{port}", f"localhost:{port}", urlsplit(settings.public_url).netloc]
     return TransportSecuritySettings(enable_dns_rebinding_protection=True, allowed_hosts=hosts)
 
 
