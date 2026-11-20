@@ -2,46 +2,22 @@ import logging
 import sys
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
-from typing import TypeVar
 
 from cvat_sdk import Client, make_client
 from cvat_sdk.api_client.exceptions import ApiException
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.types import ToolAnnotations
-from pydantic import ValidationError
 from urllib3.exceptions import HTTPError
 
 from cvat_mcp.config import Settings
-from cvat_mcp.services.server_info import check_compatibility
 
-logging.basicConfig(stream=sys.stderr, level=logging.INFO)  # stdout belongs to the MCP protocol
-for _name in ("cvat_sdk", "urllib3"):
-    logging.getLogger(_name).setLevel(logging.WARNING)
 logger = logging.getLogger("cvat_mcp")
 
-
-def _load_settings() -> Settings:
-    try:
-        return Settings()
-    except ValidationError as e:
-        fields = ", ".join(f"CVAT_{str(err['loc'][0]).upper()}" for err in e.errors())
-        sys.exit(
-            f"cvat-mcp: invalid or missing {fields}. Create a Personal Access Token in the CVAT UI "
-            "and put CVAT_ACCESS_TOKEN=... into cvat-mcp/.env (see .env.example)."
-        )
-
-
-settings = _load_settings()
-
-
-@dataclass
-class AppContext:
-    client: Client
-    settings: Settings
+settings = Settings()
 
 
 def _connect(s: Settings) -> Client:
+    # make_client() also checks the server version and logs a warning if it is unsupported.
     try:
         client = make_client(s.url, access_token=s.access_token.get_secret_value())
         user = client.users.retrieve_current_user()
@@ -54,18 +30,15 @@ def _connect(s: Settings) -> Client:
                 "CVAT UI and put it into CVAT_ACCESS_TOKEN."
             )
         sys.exit(f"cvat-mcp: CVAT at {s.url} answered {e.status} {e.reason} during login.")
-    compatible, note = check_compatibility(client)
-    if not compatible:
-        logger.warning(note)
-    logger.info("connected to CVAT %s at %s as %s", client.get_server_version(), s.url, user.username)
+    logger.info("connected to CVAT at %s as %s", s.url, user.username)
     return client
 
 
 @asynccontextmanager
-async def lifespan(_server: MCPServer) -> AsyncIterator[AppContext]:
+async def lifespan(_server: MCPServer) -> AsyncIterator[Client]:
     client = _connect(settings)
     try:
-        yield AppContext(client=client, settings=settings)
+        yield client
     finally:
         client.close()
 
@@ -83,16 +56,12 @@ mcp = MCPServer("cvat", instructions=INSTRUCTIONS, lifespan=lifespan)
 
 REGISTERED_TOOLS: list[str] = []
 
-F = TypeVar("F", bound=Callable)
 
-
-def tool(**hints) -> Callable[[F], F]:
+def tool[F: Callable](**hints) -> Callable[[F], F]:
     """Register a read-only tool with MCP annotations. Hints override the read-only defaults."""
 
     def decorator(fn: F) -> F:
-        annotations = ToolAnnotations(
-            **{"read_only_hint": True, "open_world_hint": False, **hints}
-        )
+        annotations = ToolAnnotations(**{"read_only_hint": True, "open_world_hint": False, **hints})
         mcp.tool(annotations=annotations)(fn)
         REGISTERED_TOOLS.append(fn.__name__)
         return fn
@@ -101,4 +70,4 @@ def tool(**hints) -> Callable[[F], F]:
 
 
 def get_client(ctx: Context) -> Client:
-    return ctx.request_context.lifespan_context.client
+    return ctx.request_context.lifespan_context

@@ -63,11 +63,11 @@ def count_objects_by_label(label_ids: Iterable[int], labels: Mapping[int, str]) 
     return {name: counts.get(label_id, 0) for label_id, name in labels.items()}
 
 
-def list_tasks(
-    client: Client, project_id: int | None, search: str | None, limit: int
-) -> TaskList:
+def list_tasks(client: Client, project_id: int | None, search: str | None, limit: int) -> TaskList:
     # client.tasks.list() fetches every page and has no limit/total, so use one paginated call.
-    filters = {k: v for k, v in {"project_id": project_id, "search": search}.items() if v is not None}
+    filters = {
+        k: v for k, v in {"project_id": project_id, "search": search}.items() if v is not None
+    }
     page, _ = client.api_client.tasks_api.list(page_size=clamp_limit(limit), sort="-id", **filters)
     return TaskList(
         total=page.count,
@@ -121,7 +121,7 @@ def get_task_overview(client: Client, task_id: int) -> TaskOverview:
                 state=str(j.state),
                 assignee=j.assignee.username if j.assignee else None,
             )
-            for j in task.get_jobs()
+            for j in sorted(task.get_jobs(), key=lambda j: j.start_frame)
         ],
         objects_per_label=objects,
         total_objects=sum(objects.values()),
