@@ -20,6 +20,7 @@ reports each problem as a CVAT issue on the right frame of the right job.
 | `get_task_overview` | read-only | Understand one task: labels, jobs with frame ranges, stage, state, assignee, objects per label. |
 | `render_frame` | read-only | Look at a frame: JPEG with every box and `#id label` caption drawn, plus a legend with exact boxes in original pixels. |
 | `get_frame_annotations` | read-only | Get exact data for one frame's objects: id, label, type, box, attributes, source. |
+| `export_dataset` | read-only | Save a task as a dataset file in a CVAT format (e.g. `COCO 1.0`) inside `CVAT_MCP_WORKDIR`; waits for CVAT's background export, never overwrites. |
 | `create_issue` | **write** | Report one problem to the annotator: an issue on a frame of a job, at an object's box or a given region. |
 
 Deleting or changing tasks, jobs and annotations is deliberately not available. The server's
@@ -30,9 +31,9 @@ instructions tell the model so, and it points the user to the CVAT UI.
 | Principle | Where it lives |
 | --- | --- |
 | **A tool is a user task, not an endpoint.** Verb + object names; each description says when to use the tool and how it differs from its neighbours. | `tools/*.py` docstrings |
-| **Asynchrony stays inside.** Tools wait for CVAT background work themselves. | cvat-sdk polls imports/exports; today's tools make synchronous requests |
+| **Asynchrony stays inside.** Tools wait for CVAT background work themselves. | `export_dataset` returns only when CVAT's background export (`202` + `rq_id`) is done and downloaded (`services/exports.py`) |
 | **Protect the model's context.** `limit` + `total`, summaries instead of raw data, pydantic responses with only the needed fields, images downscaled to `max_side` and sent as JPEG. | `services/*.py` models, `render.py` |
-| **Security.** What isn't in the mode isn't registered; `ToolAnnotations` hints; Personal Access Token only (no password setting); file paths only inside `CVAT_MCP_WORKDIR`; the token is never logged or returned. | `server.tool()`; `config.resolve_in_workdir` is ready for `export_dataset` (no tool touches files yet) |
+| **Security.** What isn't in the mode isn't registered; `ToolAnnotations` hints; Personal Access Token only (no password setting); file paths only inside `CVAT_MCP_WORKDIR`; the token is never logged or returned. | `server.tool()`; `config.resolve_in_workdir` (used by `export_dataset`) |
 | **Errors are written for the model.** 401/403/404/400 and argument mistakes become one-line hints with the next step. mcp shows only `ToolError` text, so every tool is wrapped. | `errors.explain`, `server.tool_errors` |
 | **The server gives the model eyes, the model judges.** No heuristic checks on the server; rendering and facts only. | `render.py`, `services/annotations.py` |
 
@@ -70,7 +71,7 @@ cp .env.example .env   # then fill in CVAT_ACCESS_TOKEN
 | --- | --- | --- |
 | `CVAT_URL` | `http://localhost:8080` | CVAT server URL |
 | `CVAT_ACCESS_TOKEN` | — (required) | Personal Access Token (CVAT UI → profile → Access tokens). Write mode needs a token **without** "read only". Passwords are deliberately not supported. |
-| `CVAT_MCP_MODE` | `read-only` | `read-only` or `write` (adds `create_issue`) |
+| `CVAT_MCP_MODE` | `read-only` | `read-only` or `write` (adds `create_issue`; `export_dataset` works in both) |
 | `CVAT_MCP_WORKDIR` | `workdir` | The only directory the server may read or write files in |
 
 `.env` is read from the **current working directory**. That's why the client commands below pass
@@ -143,5 +144,4 @@ Learned while building it:
 - **Tracks and frame-level tags in the frame tools.** Tracked objects are counted but not drawn.
 - **Per-frame annotation fetching,** once CVAT supports a frame filter.
 - **Reading `.env` from the project directory,** not the working directory.
-- **`export_dataset(task_id, format, include_images=False)`,** saving through the workdir sandbox.
 
