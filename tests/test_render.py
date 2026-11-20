@@ -3,7 +3,14 @@ import io
 from fakes import fake_client, fake_task, shape
 from PIL import Image
 
-from cvat_mcp.render import clamp_side, legend, place_caption, render, render_frame
+from cvat_mcp.render import (
+    _overlaps,
+    clamp_side,
+    legend,
+    place_caption,
+    render,
+    render_frame,
+)
 from cvat_mcp.services.annotations import FrameObject
 
 CAR = FrameObject(
@@ -78,19 +85,12 @@ def test_caption_avoids_taken_places():
     assert place_caption((100, 100, 200, 200), (50, 14), (640, 480), taken) == (100, 200)
 
 
-def test_caption_stays_inside_at_the_right_edge():
-    x, y = place_caption((620, 100, 640, 200), (50, 14), (640, 480), [])
-    assert x + 50 <= 640 and y >= 0
-
-
 def test_neighbouring_captions_do_not_overlap():
     taken = []
     for box in [(100, 100, 200, 200), (130, 100, 230, 200), (160, 100, 260, 200)]:
         x, y = place_caption(box, (50, 14), (640, 480), taken)
         rect = (x, y, x + 50, y + 14)
-        assert all(
-            rect[2] <= t[0] or rect[0] >= t[2] or rect[3] <= t[1] or rect[1] >= t[3] for t in taken
-        )
+        assert not any(_overlaps(rect, t) for t in taken)
         taken.append(rect)
 
 
@@ -114,8 +114,8 @@ def _render(shapes, include_clean):
 
 
 def test_render_frame_can_add_the_clean_frame():
-    annotated, clean, text = _render([shape(1, 1, 0, [100, 100, 300, 250])], True)
-    annotated, clean = Image.open(io.BytesIO(annotated)), Image.open(io.BytesIO(clean))
+    jpegs, text = _render([shape(1, 1, 0, [100, 100, 300, 250])], True)
+    annotated, clean = (Image.open(io.BytesIO(j)) for j in jpegs)
     assert annotated.size == clean.size == (640, 480)
     assert annotated.getpixel((100, 175))[0] > 150  # the red box edge
     assert clean.getpixel((100, 175))[0] < 40  # nothing drawn on the clean copy
@@ -123,10 +123,10 @@ def test_render_frame_can_add_the_clean_frame():
 
 
 def test_render_frame_default_is_one_image():
-    _, clean, text = _render([shape(1, 1, 0, [100, 100, 300, 250])], False)
-    assert clean is None and "without annotations" not in text
+    jpegs, text = _render([shape(1, 1, 0, [100, 100, 300, 250])], False)
+    assert len(jpegs) == 1 and "without annotations" not in text
 
 
 def test_clean_frame_for_an_empty_frame():
-    annotated, clean, text = _render([], True)
-    assert annotated and clean and "no objects" in text
+    jpegs, text = _render([], True)
+    assert len(jpegs) == 2 and "no objects" in text

@@ -32,8 +32,7 @@ while true; do
     CVAT_MCP_TRANSPORT=http CVAT_MCP_PUBLIC_URL="$URL" CVAT_MCP_PORT="$PORT" uv run cvat-mcp &
     SERVER_PID=$!
     wait "$SERVER_PID" || true
-    # `wait` returns early when the HUP trap fires; let the old server finish exiting.
-    while kill -0 "$SERVER_PID" 2>/dev/null; do sleep 0.2; done
+    wait "$SERVER_PID" || true  # a HUP interrupts the first wait; this one lets the server exit
     [ "$RESTART" = 1 ] || break
     RESTART=0
     echo "cvat-mcp: restarting the server; claude.ai will ask to Connect again" >&2

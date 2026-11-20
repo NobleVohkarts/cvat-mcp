@@ -20,6 +20,10 @@ CAPTION_ALPHA = 140  # ~0.55: the frame stays visible under the caption bars
 Rect = tuple[float, float, float, float]
 
 
+def _overlaps(a: Rect, b: Rect) -> bool:
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
 def place_caption(
     box: Rect, size: tuple[float, float], image: tuple[int, int], taken: list[Rect]
 ) -> tuple[float, float]:
@@ -30,51 +34,52 @@ def place_caption(
     """
     (x1, y1, _, y2), (w, h), (width, height) = box, size, image
     x = max(0.0, min(x1, width - w))
-    fitting = [(x, y) for y in (y1 - h, y1, y2, y2 - h) if 0 <= y and y + h <= height] or [
-        (x, max(0.0, min(y1, height - h)))
-    ]
+    ys = [y for y in (y1 - h, y1, y2, y2 - h) if 0 <= y <= height - h]
+    fitting = [(x, y) for y in ys] or [(x, max(0.0, min(y1, height - h)))]
+    for tx, ty in fitting:
+        if not any(_overlaps((tx, ty, tx + w, ty + h), t) for t in taken):
+            return tx, ty
+    return fitting[0]
 
-    def free(pos):
-        return all(
-            pos[0] + w <= t[0] or pos[0] >= t[2] or pos[1] + h <= t[1] or pos[1] >= t[3]
-            for t in taken
-        )
 
-    return next((pos for pos in fitting if free(pos)), fitting[0])
+def resize(image: Image.Image, max_side: int) -> tuple[Image.Image, float]:
+    out = image.convert("RGB")
+    out.thumbnail((max_side, max_side), Image.LANCZOS)  # only ever shrinks
+    return out, out.width / image.width
+
+
+def annotate(
+    image: Image.Image, objects: list[FrameObject], colors: dict[str, str], scale: float
+) -> Image.Image:
+    """A copy of the (already resized) frame with boxes and semi-transparent captions."""
+    out = image.copy()
+    side = max(out.size)
+    width = max(2, round(side / 400))
+    font = ImageFont.load_default(size=max(12, side // 60))
+    draw = ImageDraw.Draw(out, "RGBA")  # RGBA fills blend into the RGB frame
+    boxes = [(obj, tuple(v * scale for v in obj.bbox)) for obj in objects]
+    for obj, box in boxes:
+        draw.rectangle(box, outline=colors.get(obj.label, FALLBACK_COLOR), width=width)
+    taken: list[Rect] = []
+    for obj, box in boxes:  # captions after all boxes, so no outline crosses a caption
+        color = colors.get(obj.label, FALLBACK_COLOR)
+        caption = f"#{obj.id} {obj.label}"
+        left, top, right, bottom = draw.textbbox((0, 0), caption, font=font)
+        text_w, text_h = right - left + 2 * width, bottom - top + 2 * width
+        tx, ty = place_caption(box, (text_w, text_h), out.size, taken)
+        taken.append((tx, ty, tx + text_w, ty + text_h))
+        draw.rectangle(taken[-1], fill=(*ImageColor.getrgb(color)[:3], CAPTION_ALPHA))
+        ink = "black" if ImageColor.getcolor(color, "L") > 140 else "white"
+        draw.text((tx + width - left, ty + width - top), caption, fill=ink, font=font)
+    return out
 
 
 def render(
     image: Image.Image, objects: list[FrameObject], colors: dict[str, str], max_side: int
 ) -> tuple[Image.Image, float]:
     """Downscale first, then draw at the output size so lines and captions stay readable."""
-    out = image.convert("RGB")
-    out.thumbnail((max_side, max_side), Image.LANCZOS)  # only ever shrinks
-    scale = out.width / image.width
-    side = max(out.size)
-    width = max(2, round(side / 400))
-    font = ImageFont.load_default(size=max(12, side // 60))
-    draw = ImageDraw.Draw(out)
-    bars = Image.new("RGBA", out.size, (0, 0, 0, 0))
-    bars_draw = ImageDraw.Draw(bars)
-    taken: list[Rect] = []
-    texts = []
-    for obj in objects:
-        color = colors.get(obj.label, FALLBACK_COLOR)
-        box = tuple(v * scale for v in obj.bbox)
-        draw.rectangle(box, outline=color, width=width)
-        caption = f"#{obj.id} {obj.label}"
-        left, top, right, bottom = draw.textbbox((0, 0), caption, font=font)
-        text_w, text_h = right - left + 2 * width, bottom - top + 2 * width
-        tx, ty = place_caption(box, (text_w, text_h), out.size, taken)
-        taken.append((tx, ty, tx + text_w, ty + text_h))
-        bars_draw.rectangle(taken[-1], fill=(*ImageColor.getrgb(color)[:3], CAPTION_ALPHA))
-        ink = "black" if ImageColor.getcolor(color, "L") > 140 else "white"
-        texts.append(((tx + width - left, ty + width - top), caption, ink))
-    out = Image.alpha_composite(out.convert("RGBA"), bars).convert("RGB")
-    draw = ImageDraw.Draw(out)
-    for position, caption, ink in texts:  # text stays opaque on top of the bars
-        draw.text(position, caption, fill=ink, font=font)
-    return out, scale
+    resized, scale = resize(image, max_side)
+    return annotate(resized, objects, colors, scale), scale
 
 
 def legend(objects: list[FrameObject], scale: float, frame: int, skipped_tracks: int = 0) -> str:
@@ -97,18 +102,18 @@ def _jpeg(image: Image.Image) -> bytes:
 
 def render_frame(
     client: Client, task_id: int, frame: int, max_side: int, include_clean: bool = False
-) -> tuple[bytes, bytes | None, str]:
-    """The frame with its annotations drawn (JPEG), optionally the same frame clean, and a legend."""
+) -> tuple[list[bytes], str]:
+    """JPEGs of the frame with its annotations drawn (and, optionally, clean), and a legend."""
     task = client.tasks.retrieve(task_id)
     labels = task.get_labels()
     data = frame_annotations(task, labels, frame)
     colors = {label.name: label.color for label in labels if label.color}
     # "compressed" frames are EXIF-rotated like CVAT's coordinates, and smaller than originals.
     with Image.open(task.get_frame(frame, quality="compressed")) as image:
-        side = clamp_side(max_side)
-        out, scale = render(image, data.objects, colors, side)
-        clean = render(image, [], colors, side)[0] if include_clean else None
+        resized, scale = resize(image, clamp_side(max_side))
+    images = [annotate(resized, data.objects, colors, scale)]
     text = legend(data.objects, scale, frame, data.skipped_tracks)
-    if clean is not None:
+    if include_clean:
+        images.append(resized)
         text = "The second image is the same frame without annotations.\n" + text
-    return _jpeg(out), clean and _jpeg(clean), text
+    return [_jpeg(image) for image in images], text

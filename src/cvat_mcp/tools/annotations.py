@@ -24,10 +24,5 @@ def render_frame(
     their object. Set include_clean=True for crowded frames: you also get the same frame
     without annotations, so nothing is hidden under captions. Use get_frame_annotations for
     attributes."""
-    jpeg, clean, text = render.render_frame(
-        get_client(ctx), task_id, frame, max_side, include_clean
-    )
-    images = [Image(data=jpeg, format="jpeg")]
-    if clean is not None:
-        images.append(Image(data=clean, format="jpeg"))
-    return [*images, text]
+    jpegs, text = render.render_frame(get_client(ctx), task_id, frame, max_side, include_clean)
+    return [*(Image(data=jpeg, format="jpeg") for jpeg in jpegs), text]
