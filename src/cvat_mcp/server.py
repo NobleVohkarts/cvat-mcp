@@ -16,8 +16,8 @@ from cvat_mcp.config import Settings
 from cvat_mcp.services.server_info import check_compatibility
 
 logging.basicConfig(stream=sys.stderr, level=logging.INFO)  # stdout belongs to the MCP protocol
-logging.getLogger("cvat_sdk").setLevel(logging.WARNING)
-logging.getLogger("urllib3").setLevel(logging.ERROR)  # retry warnings repeat our one-line error
+for _name in ("cvat_sdk", "urllib3"):
+    logging.getLogger(_name).setLevel(logging.WARNING)
 logger = logging.getLogger("cvat_mcp")
 
 
