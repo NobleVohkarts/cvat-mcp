@@ -2,7 +2,6 @@ import logging
 import sys
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from typing import TypeVar
 
 from cvat_sdk import Client, make_client
 from cvat_sdk.api_client.exceptions import ApiException
@@ -11,6 +10,7 @@ from mcp.types import ToolAnnotations
 from urllib3.exceptions import HTTPError
 
 from cvat_mcp.config import Settings
+from cvat_mcp.errors import F, tool_errors
 
 logger = logging.getLogger("cvat_mcp")
 
@@ -44,14 +44,27 @@ async def lifespan(_server: MCPServer) -> AsyncIterator[Client]:
         client.close()
 
 
+WRITE_MODE = settings.mcp_mode == "write"
+READ_ONLY_NOTE = (
+    ""
+    if WRITE_MODE
+    else "Creating issues is disabled: the server runs in read-only mode "
+    "(CVAT_MCP_MODE=write enables it)."
+)
+
 INSTRUCTIONS = f"""\
 Tools for reviewing annotations in CVAT (computer vision annotation tool).
 Mode: {settings.mcp_mode}.
-Typical flow: list_tasks -> get_task_overview (labels, jobs and their frame ranges).
+Typical flow: list_tasks -> get_task_overview (labels, jobs and their frame ranges)
+-> render_frame for each frame to review (look for missing objects, wrong labels and boxes
+that miss their object) -> get_frame_annotations for exact ids and boxes
+-> {"create_issue, one per problem" if WRITE_MODE else "report the problems to the user"}.
 Issues belong to the job of type "annotation" whose frame range contains the frame.
-All frame numbers are task frame numbers (0-based), not job-relative.
-Deleting or changing tasks, jobs and annotations is not available through this server:
-if the user asks for it, explain that it is disabled here and must be done in the CVAT UI.
+All frame numbers are task frame numbers (0-based), not job-relative; coordinates are original
+image pixels [x1, y1, x2, y2].
+{READ_ONLY_NOTE}
+Deleting or changing tasks, jobs and annotations is not available through this server in any
+mode: if the user asks for it, explain that it is disabled here and must be done in the CVAT UI.
 """
 
 mcp = MCPServer("cvat", instructions=INSTRUCTIONS, lifespan=lifespan)
@@ -59,15 +72,22 @@ mcp = MCPServer("cvat", instructions=INSTRUCTIONS, lifespan=lifespan)
 REGISTERED_TOOLS: list[str] = []
 
 
-F = TypeVar("F", bound=Callable)
+def tool(
+    *, write: bool = False, structured_output: bool | None = None, **hints
+) -> Callable[[F], F]:
+    """Register a tool, wrapped with model-facing error messages.
 
-
-def tool(**hints) -> Callable[[F], F]:
-    """Register a read-only tool with MCP annotations. Hints override the read-only defaults."""
+    Write tools are registered only in write mode: what isn't in the mode doesn't exist.
+    """
 
     def decorator(fn: F) -> F:
-        annotations = ToolAnnotations(**{"read_only_hint": True, "open_world_hint": False, **hints})
-        mcp.tool(annotations=annotations)(fn)
+        if write and not WRITE_MODE:
+            return fn
+        defaults = {"read_only_hint": not write, "open_world_hint": False}
+        if write:
+            defaults |= {"destructive_hint": False, "idempotent_hint": False}
+        annotations = ToolAnnotations(**(defaults | hints))
+        mcp.tool(annotations=annotations, structured_output=structured_output)(tool_errors(fn))
         REGISTERED_TOOLS.append(fn.__name__)
         return fn
 
