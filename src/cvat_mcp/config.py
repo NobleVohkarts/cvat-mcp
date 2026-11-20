@@ -1,0 +1,16 @@
+from pathlib import Path
+from typing import Literal
+
+from pydantic import SecretStr
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Server configuration. Only environment variables (or `.env`); passwords are not supported."""
+
+    model_config = SettingsConfigDict(env_prefix="CVAT_", env_file=".env", extra="ignore")
+
+    url: str = "http://localhost:8080"
+    access_token: SecretStr
+    mcp_mode: Literal["read-only", "write"] = "read-only"
+    mcp_workdir: Path = Path("workdir")
