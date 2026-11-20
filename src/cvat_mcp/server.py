@@ -42,6 +42,12 @@ def _connect(s: Settings) -> tuple[Client, str]:
     return client, user.username
 
 
+def check_cvat() -> None:
+    """Exit with one line if CVAT is unreachable or rejects the token."""
+    client, _ = _connect(settings)
+    client.close()
+
+
 @asynccontextmanager
 async def lifespan(_server: MCPServer) -> AsyncIterator[Client]:
     client, username = _connect(settings)
@@ -114,7 +120,11 @@ def transport_security() -> TransportSecuritySettings:
     """Accept only the public (tunnel) host and the local address as Host headers."""
     port = settings.mcp_port
     hosts = [f"127.0.0.1:{port}", f"localhost:{port}", urlsplit(settings.public_url).netloc]
-    return TransportSecuritySettings(enable_dns_rebinding_protection=True, allowed_hosts=hosts)
+    # browser-based clients (e.g. MCP Inspector) send an Origin header
+    origins = [settings.public_url, "http://localhost:*", "http://127.0.0.1:*"]
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True, allowed_hosts=hosts, allowed_origins=origins
+    )
 
 
 REGISTERED_TOOLS: list[str] = []

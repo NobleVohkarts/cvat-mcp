@@ -39,8 +39,12 @@ class Settings(BaseSettings):
     @field_validator("mcp_public_url")
     @classmethod
     def _check_public_url(cls, url: str | None, info: ValidationInfo) -> str | None:
-        if info.data.get("mcp_transport") == "http" and not is_secure_url(url or ""):
-            raise ValueError("must be the https URL clients use (http only for localhost)")
+        if info.data.get("mcp_transport") == "http" and (
+            not is_secure_url(url or "") or urlsplit(url).path not in ("", "/")
+        ):
+            raise ValueError(
+                "must be the server's https base URL, without a path (http only for localhost)"
+            )
         return url
 
     @property

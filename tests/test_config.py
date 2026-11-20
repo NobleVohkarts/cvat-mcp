@@ -65,7 +65,7 @@ def test_http_mode_defaults(monkeypatch):
     assert s.redirect_hosts == {"claude.ai", "claude.com", "localhost", "127.0.0.1"}
 
 
-@pytest.mark.parametrize("url", [None, "http://example.com"])
+@pytest.mark.parametrize("url", [None, "http://example.com", "https://x.trycloudflare.com/mcp"])
 def test_http_mode_needs_https_public_url(monkeypatch, url):
     monkeypatch.setenv("CVAT_ACCESS_TOKEN", "t")
     monkeypatch.setenv("CVAT_MCP_TRANSPORT", "http")

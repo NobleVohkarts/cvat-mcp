@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from urllib.parse import parse_qs
 
 import anyio
-from cvat_sdk.api_client.exceptions import ApiException
+from cvat_sdk.api_client.exceptions import ApiException, ApiValueError
 from cvat_sdk.core.client import Client
 from mcp.server.auth.provider import (
     AccessToken,
@@ -28,6 +28,7 @@ from mcp.server.auth.provider import (
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
+from urllib3.exceptions import HTTPError
 
 from cvat_mcp.config import is_secure_url
 
@@ -38,8 +39,11 @@ ACCESS_TTL = 3600
 REFRESH_TTL = 30 * 24 * 3600
 MAX_FAILURES = 10
 LOCKOUT = 600
-MAX_CLIENTS = 100  # open dynamic registration: keep the newest, drop the oldest
-MAX_PENDING = 50
+MAX_CLIENTS = 1000  # open dynamic registration; clients holding live tokens are never dropped
+MAX_REDIRECT_URIS = 5
+MAX_PENDING = 1000
+MAX_PENDING_PER_CLIENT = 5
+MAX_TRACKED_IPS = 1000
 MAX_FORM_BYTES = 16 * 1024
 # Free-form client metadata we never use; not kept, so registrations stay small.
 UNUSED_CLIENT_FIELDS = (
@@ -60,6 +64,8 @@ def cvat_login_username(cvat_url: str, username: str, password: str) -> str | No
             return client.users.retrieve_current_user().username
         finally:
             client.logout()  # don't leave a CVAT session behind
+    except (ApiValueError, AssertionError):  # malformed input (e.g. empty password)
+        return None
     except ApiException as e:
         if e.status in (400, 401, 403):
             return None
@@ -100,8 +106,8 @@ class CvatOAuthProvider(
         self._access: dict[str, AccessToken] = {}
         self._refresh: dict[str, RefreshToken] = {}
         self._pairs: dict[str, tuple[str, str]] = {}  # either token -> (access, refresh)
-        self._failures: list[float] = []
-        self._login_lock = anyio.Lock()  # one login at a time: exact lockout, no thread pile-up
+        self._failures: dict[str, list[float]] = {}  # client IP -> recent failure times
+        self._login_lock = anyio.Lock()  # one CVAT check at a time: exact counts, no thread pile-up
 
     def _live(self, store: dict, key: str):
         """The item, or None if it's missing or expired (expired items are dropped)."""
@@ -130,8 +136,17 @@ class CvatOAuthProvider(
                     error="invalid_redirect_uri",
                     error_description=f"redirect URI not allowed: {uri}",
                 )
-        while len(self._clients) >= MAX_CLIENTS:
-            self._clients.pop(next(iter(self._clients)))
+        if len(client_info.redirect_uris or []) > MAX_REDIRECT_URIS:
+            raise RegistrationError(
+                error="invalid_redirect_uri", error_description="too many redirect URIs"
+            )
+        if len(self._clients) >= MAX_CLIENTS:
+            # drop the oldest client that holds no live token (a flood can't evict a session)
+            self._purge(self._access)
+            self._purge(self._refresh)
+            active = {t.client_id for t in [*self._access.values(), *self._refresh.values()]}
+            idle = next((c for c in self._clients if c not in active), next(iter(self._clients)))
+            del self._clients[idle]
         self._clients[client_info.client_id] = client_info.model_copy(
             update=dict.fromkeys(UNUSED_CLIENT_FIELDS)
         )
@@ -142,6 +157,9 @@ class CvatOAuthProvider(
         self, client: OAuthClientInformationFull, params: AuthorizationParams
     ) -> str:
         self._purge(self._pending, MAX_PENDING)
+        mine = [k for k, v in self._pending.items() if v.client_id == client.client_id]
+        for key in mine[: max(0, len(mine) - MAX_PENDING_PER_CLIENT + 1)]:
+            del self._pending[key]  # a client keeps its newest few sign-in pages
         request_id = secrets.token_urlsafe(32)
         self._pending[request_id] = _PendingLogin(client.client_id, params, self.now() + LOGIN_TTL)
         return f"{self.public_url}/login?request={request_id}"
@@ -163,6 +181,8 @@ class CvatOAuthProvider(
     def _issue(self, client_id: str, scopes: list[str], subject: str | None) -> OAuthToken:
         self._purge(self._access)
         self._purge(self._refresh)
+        for key in [k for k in self._pairs if k not in self._access and k not in self._refresh]:
+            del self._pairs[key]
         now = int(self.now())
         access, refresh = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
         common = {"client_id": client_id, "scopes": scopes, "subject": subject}
@@ -224,17 +244,25 @@ class CvatOAuthProvider(
             _page, request_id=request_id, redirect_uri=str(pending.params.redirect_uri)
         )
 
+        # Behind the tunnel every request comes from 127.0.0.1; Cloudflare names the real client.
+        ip = request.headers.get("cf-connecting-ip") or getattr(request.client, "host", "")
         async with self._login_lock:
-            self._failures = [t for t in self._failures if t > self.now() - LOCKOUT]
-            if len(self._failures) >= MAX_FAILURES:
+            recent = [t for t in self._failures.get(ip, []) if t > self.now() - LOCKOUT]
+            if len(recent) >= MAX_FAILURES:
                 return retry("Too many failed logins. Try again in a few minutes.", 429)
-            user = await anyio.to_thread.run_sync(
-                self.check_login, form.get("username", ""), form.get("password", "")
-            )
+            try:
+                user = await anyio.to_thread.run_sync(
+                    self.check_login, form.get("username", ""), form.get("password", "")
+                )
+            except (HTTPError, ApiException, OSError):
+                return retry("CVAT could not check the login right now; try again.", 503)
             if user is None or user != self.owner:
-                self._failures.append(self.now())
-                await anyio.sleep(self.failure_delay)
-                return retry("Invalid username or password.", 401)
+                self._failures[ip] = [*recent, self.now()]
+                while len(self._failures) > MAX_TRACKED_IPS:
+                    self._failures.pop(next(iter(self._failures)))
+        if user is None or user != self.owner:
+            await anyio.sleep(self.failure_delay)  # outside the lock: others aren't queued
+            return retry("Invalid username or password.", 401)
 
         if self._pending.pop(request_id, None) is None:  # single use, even across a race
             return _page(EXPIRED, 400)

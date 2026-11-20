@@ -168,3 +168,13 @@ anyio.run(main)
     result = run(code, monkeypatch)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "admin"
+
+
+def test_http_mode_reports_unreachable_cvat_in_one_line(monkeypatch):
+    monkeypatch.setenv("CVAT_MCP_TRANSPORT", "http")
+    monkeypatch.setenv("CVAT_MCP_PUBLIC_URL", "http://localhost:8799")
+    monkeypatch.setenv("CVAT_MCP_PORT", "8799")
+    monkeypatch.setenv("CVAT_URL", "http://localhost:9")
+    result = run("from cvat_mcp.__main__ import main; main()", monkeypatch)
+    assert result.returncode == 1
+    assert "cannot reach CVAT" in result.stderr and "Traceback" not in result.stderr
