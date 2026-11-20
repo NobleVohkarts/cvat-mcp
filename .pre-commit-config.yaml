@@ -19,3 +19,4 @@ repos:
         entry: uv run --project cvat-mcp pylint --rcfile=.pylintrc
         language: system
         files: ^cvat-mcp/.*\.py$
+        require_serial: true  # one process: .pylintrc already parallelises (jobs=0)

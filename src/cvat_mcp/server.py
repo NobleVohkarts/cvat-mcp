@@ -3,6 +3,7 @@ import logging
 import sys
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from typing import TypeVar
 
 from cvat_sdk import Client, make_client
 from cvat_sdk.api_client.exceptions import ApiException
@@ -12,7 +13,7 @@ from mcp.types import ToolAnnotations
 from urllib3.exceptions import HTTPError
 
 from cvat_mcp.config import Settings
-from cvat_mcp.errors import F, explain
+from cvat_mcp.errors import explain
 
 logger = logging.getLogger("cvat_mcp")
 
@@ -47,18 +48,18 @@ async def lifespan(_server: MCPServer) -> AsyncIterator[Client]:
 
 
 WRITE_MODE = settings.mcp_mode == "write"
-FILE_ISSUES = (
-    " -> create_issue, one per problem, only when the user asks to file issues "
-    "(reviewing is not such a request)"
-    if WRITE_MODE
-    else ""
-)
-READ_ONLY_NOTE = (
-    ""
-    if WRITE_MODE
-    else "Creating issues is disabled: the server runs in read-only mode "
-    "(CVAT_MCP_MODE=write enables it)."
-)
+if WRITE_MODE:
+    FILE_ISSUES = (
+        " -> create_issue, one per problem, only when the user asks to file issues "
+        "(reviewing is not such a request)"
+    )
+    READ_ONLY_NOTE = ""
+else:
+    FILE_ISSUES = ""
+    READ_ONLY_NOTE = (
+        "Creating issues is disabled: the server runs in read-only mode "
+        "(CVAT_MCP_MODE=write enables it)."
+    )
 
 INSTRUCTIONS = f"""\
 Tools for reviewing annotations in CVAT (computer vision annotation tool).
@@ -78,6 +79,7 @@ mode: if the user asks for it, explain that it is disabled here and must be done
 mcp = MCPServer("cvat", instructions=INSTRUCTIONS, lifespan=lifespan)
 
 REGISTERED_TOOLS: list[str] = []
+F = TypeVar("F", bound=Callable)
 
 
 def tool_errors(fn: F) -> F:

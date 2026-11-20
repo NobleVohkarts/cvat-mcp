@@ -1,19 +1,16 @@
+import pkgutil
 import subprocess
 import sys
 
-CODE = """
-import sys
-import cvat_mcp.render
-import cvat_mcp.services.annotations
-import cvat_mcp.services.issues
-import cvat_mcp.services.server_info
-import cvat_mcp.services.tasks
-assert "mcp" not in sys.modules, "services must not depend on mcp"
-"""
+import cvat_mcp.services
+
+SERVICES = [m.name for m in pkgutil.iter_modules(cvat_mcp.services.__path__, "cvat_mcp.services.")]
 
 
 def test_services_and_render_do_not_import_mcp():
+    imports = "; ".join(f"import {name}" for name in [*SERVICES, "cvat_mcp.render"])
+    code = f"import sys; {imports}; assert 'mcp' not in sys.modules, 'services must not use mcp'"
     result = subprocess.run(
-        [sys.executable, "-c", CODE], capture_output=True, text=True, check=False
+        [sys.executable, "-c", code], capture_output=True, text=True, check=False
     )
     assert result.returncode == 0, result.stderr

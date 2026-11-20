@@ -1,15 +1,6 @@
-"""Turn exceptions into short messages the model can act on (no mcp dependency).
-
-server.tool_errors() re-raises them as ToolError: mcp reports any other exception as a bare
-"Error executing tool <name>".
-"""
-
-from collections.abc import Callable
-from typing import TypeVar
+"""Turn exceptions into short messages the model can act on (no mcp dependency)."""
 
 from cvat_sdk.api_client.exceptions import ApiException
-
-F = TypeVar("F", bound=Callable)
 
 
 class InvalidArgument(ValueError):

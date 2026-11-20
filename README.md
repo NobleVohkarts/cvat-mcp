@@ -32,7 +32,7 @@ instructions tell the model so, and it points the user to the CVAT UI.
 | **A tool is a user task, not an endpoint.** Verb + object names; each description says when to use the tool and how it differs from its neighbours. | `tools/*.py` docstrings |
 | **Asynchrony stays inside.** Tools wait for CVAT background work themselves. | cvat-sdk polls imports/exports; today's tools make synchronous requests |
 | **Protect the model's context.** `limit` + `total`, summaries instead of raw data, pydantic responses with only the needed fields, images downscaled to `max_side` and sent as JPEG. | `services/*.py` models, `render.py` |
-| **Security.** What isn't in the mode isn't registered; `ToolAnnotations` hints; Personal Access Token only (no password setting); file paths only inside `CVAT_MCP_WORKDIR`; the token is never logged or returned. | `server.tool()`, `config.py` (`resolve_in_workdir`) |
+| **Security.** What isn't in the mode isn't registered; `ToolAnnotations` hints; Personal Access Token only (no password setting); file paths only inside `CVAT_MCP_WORKDIR`; the token is never logged or returned. | `server.tool()`; `config.resolve_in_workdir` is ready for `export_dataset` (no tool touches files yet) |
 | **Errors are written for the model.** 401/403/404/400 and argument mistakes become one-line hints with the next step. mcp shows only `ToolError` text, so every tool is wrapped. | `errors.explain`, `server.tool_errors` |
 | **The server gives the model eyes, the model judges.** No heuristic checks on the server; rendering and facts only. | `render.py`, `services/annotations.py` |
 
@@ -138,7 +138,8 @@ Not done yet:
 Learned while building it:
 
 - **A `region` (zoom) parameter for `render_frame`.** Given a shell, the model wrote its own crop
-  script to look closer at small objects.
+  script to look closer at small objects. In very crowded frames (35+ captions) it can miss a
+  wrong label.
 - **Tracks and frame-level tags in the frame tools.** Tracked objects are counted but not drawn.
 - **Per-frame annotation fetching,** once CVAT supports a frame filter.
 - **Reading `.env` from the project directory,** not the working directory.

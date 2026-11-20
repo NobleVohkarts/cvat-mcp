@@ -7,13 +7,6 @@ from cvat_mcp.config import Settings, resolve_in_workdir
 from cvat_mcp.errors import InvalidArgument
 
 
-@pytest.fixture(autouse=True)
-def clean_env(monkeypatch, tmp_path):
-    for name in ("CVAT_URL", "CVAT_ACCESS_TOKEN", "CVAT_MCP_MODE", "CVAT_MCP_WORKDIR"):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.chdir(tmp_path)  # no real .env is read
-
-
 def test_defaults(monkeypatch):
     monkeypatch.setenv("CVAT_ACCESS_TOKEN", "secret-value")
     s = Settings()

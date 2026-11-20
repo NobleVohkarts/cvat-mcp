@@ -17,8 +17,9 @@ def create_issue(
     object_id: int | None = None,
     bbox: Annotated[list[float], Field(min_length=4, max_length=4)] | None = None,
 ) -> IssueRef:
-    """Use to report one annotation problem to the annotator: creates an issue on a frame of a
-    job, shown in the CVAT UI at the given place. Pass object_id to mark an existing object's
+    """Use to report one annotation problem to the annotator, only when the user asks to file
+    issues (a request to review is not one): creates an issue on a frame of a job, shown in the
+    CVAT UI at the given place. Pass object_id to mark an existing object's
     box, or bbox [x1, y1, x2, y2] (original pixels, e.g. from render_frame's legend) to mark a
     region, e.g. where an object is missing. The job must be the annotation job whose frame
     range contains the frame (see get_task_overview). One issue per problem; the message should
