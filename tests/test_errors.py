@@ -31,9 +31,9 @@ def test_bad_request_body_bytes_are_decoded():
     assert "b'" not in message and '"position"' in message
 
 
-def test_failed_background_export():
-    message = explain(BackgroundRequestException("Export failed: boom"))
-    assert "export failed on the server" in message and "boom" in message
+def test_failed_background_job():
+    message = explain(BackgroundRequestException("Export failed: boom" + "x" * 1000))
+    assert "background job failed" in message and "boom" in message and len(message) < 400
 
 
 def test_own_validation_message_passes_through():

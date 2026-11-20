@@ -13,14 +13,14 @@ reports each problem as a CVAT issue on the right frame of the right job.
 
 ## Tools
 
-| Tool | Mode | Use it to |
+| Tool | Modes | Use it to |
 | --- | --- | --- |
-| `server_info` | read-only | See CVAT and SDK versions, compatibility, the current user, the mode and the available tools. Call first or when something fails. |
-| `list_tasks` | read-only | Find tasks (newest first, `limit` ≤ 100) with frame count, status, job progress and the `total` of all matches. |
-| `get_task_overview` | read-only | Understand one task: labels, jobs with frame ranges, stage, state, assignee, objects per label. |
-| `render_frame` | read-only | Look at a frame: JPEG with every box and `#id label` caption drawn, plus a legend with exact boxes in original pixels. |
-| `get_frame_annotations` | read-only | Get exact data for one frame's objects: id, label, type, box, attributes, source. |
-| `export_dataset` | read-only | Save a task as a dataset file in a CVAT format (e.g. `COCO 1.0`) inside `CVAT_MCP_WORKDIR`; waits for CVAT's background export, never overwrites. |
+| `server_info` | both | See CVAT and SDK versions, compatibility, the current user, the mode and the available tools. Call first or when something fails. |
+| `list_tasks` | both | Find tasks (newest first, `limit` ≤ 100) with frame count, status, job progress and the `total` of all matches. |
+| `get_task_overview` | both | Understand one task: labels, jobs with frame ranges, stage, state, assignee, objects per label. |
+| `render_frame` | both | Look at a frame: JPEG with every box and `#id label` caption drawn, plus a legend with exact boxes in original pixels. |
+| `get_frame_annotations` | both | Get exact data for one frame's objects: id, label, type, box, attributes, source. |
+| `export_dataset` | both | Save a task as a dataset file in a CVAT format (e.g. `COCO 1.0`) inside `CVAT_MCP_WORKDIR`; waits for CVAT's background export, never overwrites. |
 | `create_issue` | **write** | Report one problem to the annotator: an issue on a frame of a job, at an object's box or a given region. |
 
 Deleting or changing tasks, jobs and annotations is deliberately not available. The server's
@@ -71,7 +71,7 @@ cp .env.example .env   # then fill in CVAT_ACCESS_TOKEN
 | --- | --- | --- |
 | `CVAT_URL` | `http://localhost:8080` | CVAT server URL |
 | `CVAT_ACCESS_TOKEN` | — (required) | Personal Access Token (CVAT UI → profile → Access tokens). Write mode needs a token **without** "read only". Passwords are deliberately not supported. |
-| `CVAT_MCP_MODE` | `read-only` | `read-only` or `write` (adds `create_issue`; `export_dataset` works in both) |
+| `CVAT_MCP_MODE` | `read-only` | `read-only` or `write` (adds `create_issue`) |
 | `CVAT_MCP_WORKDIR` | `workdir` | The only directory the server may read or write files in |
 
 `.env` is read from the **current working directory**. That's why the client commands below pass

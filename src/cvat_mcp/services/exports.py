@@ -12,10 +12,7 @@ from cvat_mcp.errors import InvalidArgument
 
 class ExportResult(BaseModel):
     path: str
-    absolute_path: str
     size_bytes: int
-    format: str
-    include_images: bool
     seconds: float
 
 
@@ -52,22 +49,22 @@ def export_dataset(
     target = resolve_in_workdir(
         workdir, filename or default_filename(task_id, format_name, include_images)
     )
-    if not target.suffix:
-        target = target.with_suffix(".zip")
+    target = target.with_suffix(".zip")  # CVAT always exports a zip archive
     target.parent.mkdir(parents=True, exist_ok=True)
     target = unique_path(target)
 
     started = time.monotonic()
     # The SDK starts the export, waits for CVAT's background request and downloads the file;
     # LOCAL overrides a task configured to export to cloud storage.
-    client.tasks.retrieve(task_id).export_dataset(
-        format_name, target, include_images=include_images, location=Location.LOCAL
+    saved = client.tasks.retrieve(task_id).export_dataset(
+        format_name,
+        target,
+        include_images=include_images,
+        location=Location.LOCAL,
+        status_check_period=1,  # the SDK default (5 s) makes even a tiny export take 5 s
     )
     return ExportResult(
-        path=str(target.relative_to(workdir.resolve())),
-        absolute_path=str(target),
-        size_bytes=target.stat().st_size,
-        format=format_name,
-        include_images=include_images,
+        path=str(saved),
+        size_bytes=saved.stat().st_size,
         seconds=round(time.monotonic() - started, 1),
     )

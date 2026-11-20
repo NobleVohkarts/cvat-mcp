@@ -23,7 +23,7 @@ def explain(exc: Exception) -> str | None:
     if isinstance(exc, InvalidArgument):
         return str(exc)
     if isinstance(exc, BackgroundRequestException):
-        return f"the export failed on the server: {exc}"
+        return f"CVAT's background job failed: {str(exc)[:300]}"
     if isinstance(exc, ApiException):
         if exc.status in _HINTS:
             return _HINTS[exc.status]
