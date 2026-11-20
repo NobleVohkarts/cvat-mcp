@@ -4,14 +4,18 @@ import sys
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import TypeVar
+from urllib.parse import urlsplit
 
 from cvat_sdk import Client, make_client
 from cvat_sdk.api_client.exceptions import ApiException
+from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from urllib3.exceptions import HTTPError
 
+from cvat_mcp.auth import SCOPE, CvatOAuthProvider, cvat_login_username
 from cvat_mcp.config import Settings
 from cvat_mcp.errors import explain
 
@@ -20,7 +24,7 @@ logger = logging.getLogger("cvat_mcp")
 settings = Settings()
 
 
-def _connect(s: Settings) -> Client:
+def _connect(s: Settings) -> tuple[Client, str]:
     # make_client() also checks the server version and logs a warning if it is unsupported.
     try:
         client = make_client(s.url, access_token=s.access_token.get_secret_value())
@@ -35,12 +39,21 @@ def _connect(s: Settings) -> Client:
             )
         sys.exit(f"cvat-mcp: CVAT at {s.url} answered {e.status} {e.reason} during login.")
     logger.info("connected to CVAT at %s as %s", s.url, user.username)
-    return client
+    return client, user.username
+
+
+def check_cvat() -> None:
+    """Exit with one line if CVAT is unreachable or rejects the token."""
+    client, _ = _connect(settings)
+    client.close()
 
 
 @asynccontextmanager
 async def lifespan(_server: MCPServer) -> AsyncIterator[Client]:
-    client = _connect(settings)
+    client, username = _connect(settings)
+    if oauth is not None:
+        oauth.owner = username  # only the token's own CVAT user may log in through OAuth
+        logger.info("serving %s/mcp (OAuth login: CVAT user %s)", settings.public_url, username)
     try:
         yield client
     finally:
@@ -76,7 +89,43 @@ Deleting or changing tasks, jobs and annotations is not available through this s
 mode: if the user asks for it, explain that it is disabled here and must be done in the CVAT UI.
 """
 
-mcp = MCPServer("cvat", instructions=INSTRUCTIONS, lifespan=lifespan)
+HTTP_MODE = settings.mcp_transport == "http"
+oauth: CvatOAuthProvider | None = None
+auth: AuthSettings | None = None
+if HTTP_MODE:
+    oauth = CvatOAuthProvider(
+        settings.public_url,
+        settings.redirect_hosts,
+        functools.partial(cvat_login_username, settings.url),
+    )
+    auth = AuthSettings(
+        issuer_url=settings.public_url,
+        resource_server_url=f"{settings.public_url}/mcp",
+        client_registration_options=ClientRegistrationOptions(
+            enabled=True, valid_scopes=[SCOPE], default_scopes=[SCOPE]
+        ),
+        revocation_options=RevocationOptions(enabled=True),
+        required_scopes=[SCOPE],
+        validate_token_resource=False,  # this issuer only mints tokens for this one server
+    )
+mcp = MCPServer(
+    "cvat", instructions=INSTRUCTIONS, lifespan=lifespan, auth_server_provider=oauth, auth=auth
+)
+if oauth is not None:
+    mcp.custom_route("/login", ["GET"])(oauth.login_form)
+    mcp.custom_route("/login", ["POST"])(oauth.login_submit)
+
+
+def transport_security() -> TransportSecuritySettings:
+    """Accept only the public (tunnel) host and the local address as Host headers."""
+    port = settings.mcp_port
+    hosts = [f"127.0.0.1:{port}", f"localhost:{port}", urlsplit(settings.public_url).netloc]
+    # browser-based clients (e.g. MCP Inspector) send an Origin header
+    origins = [settings.public_url, "http://localhost:*", "http://127.0.0.1:*"]
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True, allowed_hosts=hosts, allowed_origins=origins
+    )
+
 
 REGISTERED_TOOLS: list[str] = []
 F = TypeVar("F", bound=Callable)

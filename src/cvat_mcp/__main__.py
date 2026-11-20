@@ -13,14 +13,31 @@ def main() -> None:
     # Imported here so a bad configuration becomes a one-line message instead of a traceback.
     try:
         import cvat_mcp.tools  # pylint: disable=import-outside-toplevel,unused-import
-        from cvat_mcp.server import mcp  # pylint: disable=import-outside-toplevel
+        from cvat_mcp.server import (  # pylint: disable=import-outside-toplevel
+            HTTP_MODE,
+            check_cvat,
+            mcp,
+            settings,
+            transport_security,
+        )
     except ValidationError as e:
         prefix = Settings.model_config["env_prefix"]
         names = ", ".join(f"{prefix}{str(err['loc'][0]).upper()}" for err in e.errors())
         sys.exit(f"cvat-mcp: invalid or missing {names}. See cvat-mcp/.env.example.")
 
     try:
-        mcp.run("stdio")
+        if HTTP_MODE:
+            # The web server swallows exits from its lifespan, so check CVAT before serving.
+            check_cvat()
+            # Bound to localhost only: the tunnel is the one way in.
+            mcp.run(
+                "streamable-http",
+                host="127.0.0.1",
+                port=settings.mcp_port,
+                transport_security=transport_security(),
+            )
+        else:
+            mcp.run("stdio")
     except BaseExceptionGroup as group:
         # anyio wraps a startup failure in the lifespan; show its one-line message.
         exits, rest = group.split(SystemExit)
