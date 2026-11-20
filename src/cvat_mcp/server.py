@@ -11,6 +11,7 @@ from mcp.types import ToolAnnotations
 from urllib3.exceptions import HTTPError
 
 from cvat_mcp.config import Settings
+from cvat_mcp.errors import tool_errors
 
 logger = logging.getLogger("cvat_mcp")
 
@@ -44,14 +45,22 @@ async def lifespan(_server: MCPServer) -> AsyncIterator[Client]:
         client.close()
 
 
+WRITE_MODE = settings.mcp_mode == "write"
+
 INSTRUCTIONS = f"""\
 Tools for reviewing annotations in CVAT (computer vision annotation tool).
 Mode: {settings.mcp_mode}.
-Typical flow: list_tasks -> get_task_overview (labels, jobs and their frame ranges).
+Typical flow: list_tasks -> get_task_overview (labels, jobs and their frame ranges)
+-> render_frame for each frame to review (look for missing objects, wrong labels and boxes
+that miss their object) -> get_frame_annotations for exact ids and boxes
+-> create_issue, one per problem.
 Issues belong to the job of type "annotation" whose frame range contains the frame.
-All frame numbers are task frame numbers (0-based), not job-relative.
-Deleting or changing tasks, jobs and annotations is not available through this server:
-if the user asks for it, explain that it is disabled here and must be done in the CVAT UI.
+All frame numbers are task frame numbers (0-based), not job-relative; coordinates are original
+image pixels [x1, y1, x2, y2].
+{"" if WRITE_MODE else "Creating issues is disabled: the server runs in read-only mode "
+ "(CVAT_MCP_MODE=write enables it)."}
+Deleting or changing tasks, jobs and annotations is not available through this server in any
+mode: if the user asks for it, explain that it is disabled here and must be done in the CVAT UI.
 """
 
 mcp = MCPServer("cvat", instructions=INSTRUCTIONS, lifespan=lifespan)
@@ -62,12 +71,21 @@ REGISTERED_TOOLS: list[str] = []
 F = TypeVar("F", bound=Callable)
 
 
-def tool(**hints) -> Callable[[F], F]:
-    """Register a read-only tool with MCP annotations. Hints override the read-only defaults."""
+def tool(*, write: bool = False, structured_output: bool | None = None) -> Callable[[F], F]:
+    """Register a tool, wrapped with model-facing error messages.
+
+    Write tools are registered only in write mode: what isn't in the mode doesn't exist.
+    """
 
     def decorator(fn: F) -> F:
-        annotations = ToolAnnotations(**{"read_only_hint": True, "open_world_hint": False, **hints})
-        mcp.tool(annotations=annotations)(fn)
+        if write and not WRITE_MODE:
+            return fn
+        hints = {"read_only_hint": not write, "open_world_hint": False}
+        if write:
+            hints |= {"destructive_hint": False, "idempotent_hint": False}
+        mcp.tool(annotations=ToolAnnotations(**hints), structured_output=structured_output)(
+            tool_errors(fn)
+        )
         REGISTERED_TOOLS.append(fn.__name__)
         return fn
 
