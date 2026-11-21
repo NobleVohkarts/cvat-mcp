@@ -6,8 +6,8 @@ from urllib.parse import urlsplit
 
 from cvat_sdk import Client
 from cvat_sdk.api_client import models
-from cvat_sdk.core.proxies.tasks import ResourceType
 from cvat_sdk.attributes import attribute_value_validator
+from cvat_sdk.core.proxies.tasks import ResourceType
 from pydantic import BaseModel, ConfigDict, Field
 
 from cvat_mcp.config import resolve_in_workdir

@@ -58,13 +58,16 @@ def registered(monkeypatch, mode):
 def test_read_only_mode_registers_only_read_tools(monkeypatch, mode):
     result = registered(monkeypatch, mode)
     assert result["tools"] == READ_TOOLS
-    assert "Creating issues and changing annotations are disabled" in result["instructions"]
+    assert (
+        "Creating issues and changing annotations and tasks are disabled" in result["instructions"]
+    )
     assert "create_issue" not in result["instructions"]
     assert "Issues belong" not in result["instructions"]
     assert "delete_issue" not in result["instructions"]
     assert "update_annotations" not in result["instructions"]
     assert "Deleting or changing tasks, jobs and annotations" not in result["instructions"]
-    assert "Deleting or changing tasks and jobs is not available" in result["instructions"]
+    assert "Deleting or changing jobs is not available" in result["instructions"]
+    assert "tasks and jobs is not available" not in result["instructions"]
 
 
 def test_write_mode_adds_write_tools(monkeypatch):
@@ -72,19 +75,25 @@ def test_write_mode_adds_write_tools(monkeypatch):
     write_tools = [
         "create_annotations",
         "create_issue",
+        "create_task",
         "delete_annotations",
         "delete_issue",
+        "delete_task",
         "update_annotations",
+        "update_task",
     ]
     assert result["tools"] == sorted(READ_TOOLS + write_tools)
     assert "only when the user asks" in result["instructions"]
     assert "Issues belong to the job" in result["instructions"]
     assert "create_issue the new ones, then delete_issue the old ones" in result["instructions"]
     assert "only when the user asks to fix" in result["instructions"]
-    assert sorted(result["destructive"]) == ["delete_annotations", "delete_issue"]
+    assert sorted(result["destructive"]) == ["delete_annotations", "delete_issue", "delete_task"]
+    assert "create_task" in result["instructions"]
+    assert "only tasks owned by" in result["instructions"]
     assert "disabled" not in result["instructions"]
     assert "Deleting or changing tasks, jobs and annotations" not in result["instructions"]
-    assert "Deleting or changing tasks and jobs is not available" in result["instructions"]
+    assert "Deleting or changing jobs is not available" in result["instructions"]
+    assert "tasks and jobs is not available" not in result["instructions"]
 
 
 def test_bad_mode_fails_at_startup(monkeypatch):

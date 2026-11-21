@@ -71,14 +71,16 @@ if WRITE_MODE:
         "frame, create_issue the new ones, then delete_issue the old ones"
         ". Fix annotations with create_annotations / update_annotations / delete_annotations "
         "only when the user asks to fix them (reviewing or filing issues is not such a request), "
-        "then render_frame again to check"
+        "then render_frame again to check. Create, change or delete tasks (create_task, "
+        "update_task, delete_task) only when the user asks; delete_task removes only tasks owned "
+        "by this server's CVAT account"
     )
     READ_ONLY_NOTE = ""
 else:
     WRITE_STEPS = ""
     READ_ONLY_NOTE = (
-        "Creating issues and changing annotations are disabled: the server runs in read-only "
-        "mode (CVAT_MCP_MODE=write enables them)."
+        "Creating issues and changing annotations and tasks are disabled: the server runs in "
+        "read-only mode (CVAT_MCP_MODE=write enables them)."
     )
 
 INSTRUCTIONS = f"""\
@@ -91,7 +93,7 @@ that miss their object) -> get_frame_annotations for exact ids and boxes
 All frame numbers are task frame numbers (0-based), not job-relative; coordinates are original
 image pixels [x1, y1, x2, y2].
 {READ_ONLY_NOTE}
-Deleting or changing tasks and jobs is not available through this server: if the user asks for it,
+Deleting or changing jobs is not available through this server: if the user asks for it,
 explain that it must be done in the CVAT UI.
 """
 
