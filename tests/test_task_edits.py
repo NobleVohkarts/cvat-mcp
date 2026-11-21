@@ -3,7 +3,7 @@ from unittest.mock import Mock
 import pytest
 from cvat_sdk.core.exceptions import BackgroundRequestException
 from cvat_sdk.core.proxies.tasks import ResourceType
-from fakes import Obj
+from fakes import Obj, fake_client
 
 from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.services.task_edits import (
@@ -16,6 +16,10 @@ from cvat_mcp.services.task_edits import (
 )
 
 COLOR = AttributeSpec(name="color", input_type="select", values=["red", "blue"])
+
+
+def _with_attr(**kw):
+    return [LabelSpec(name="car", attributes=[AttributeSpec(**kw)])]
 
 
 def test_label_requests_build_cvat_labels():
@@ -45,43 +49,10 @@ def test_checkbox_and_text_get_default_values():
         ([LabelSpec(name="car"), LabelSpec(name="car")], (), "twice"),
         ([LabelSpec(name="car")], ("car",), "already has"),
         ([LabelSpec(name=" ")], (), "name"),
-        (
-            [LabelSpec(name="car", attributes=[AttributeSpec(name="c", input_type="select")])],
-            (),
-            "'c'",
-        ),
-        (
-            [
-                LabelSpec(
-                    name="car",
-                    attributes=[AttributeSpec(name="n", input_type="number", values=["0", "10"])],
-                )
-            ],
-            (),
-            "'n'",
-        ),
-        (
-            [
-                LabelSpec(
-                    name="car",
-                    attributes=[
-                        AttributeSpec(name="n", input_type="number", values=["0", "10", "3"])
-                    ],
-                )
-            ],
-            (),
-            "'n'",
-        ),
-        (
-            [
-                LabelSpec(
-                    name="car",
-                    attributes=[AttributeSpec(name="p", input_type="checkbox", values=["yes"])],
-                )
-            ],
-            (),
-            "'p'",
-        ),
+        (_with_attr(name="c", input_type="select"), (), "'c'"),
+        (_with_attr(name="n", input_type="number", values=["0", "10"]), (), "'n'"),
+        (_with_attr(name="n", input_type="number", values=["0", "10", "3"]), (), "'n'"),
+        (_with_attr(name="p", input_type="checkbox", values=["yes"]), (), "'p'"),
     ],
 )
 def test_label_requests_refuse(specs, existing, match):
@@ -104,7 +75,6 @@ def _create_client(upload_error=None, remove_error=None):
     task = Obj(id=5, name="Scratch", size=3, get_jobs=lambda: [JOB])
     task.upload_data = Mock(side_effect=upload_error)
     task.remove = Mock(side_effect=remove_error)
-    task.fetch = Mock()
     return Obj(tasks=Obj(create=Mock(return_value=task))), task
 
 
@@ -135,6 +105,7 @@ def test_create_from_files_uploads_sorted_and_returns_jobs(tmp_path):
         resource_type=ResourceType.LOCAL,
         params={"sorting_method": "natural"},
         wait_for_completion=True,
+        status_check_period=1,
     )
     assert (result.task_id, result.name, result.frame_count) == (5, "Scratch", 3)
     assert [(j.id, j.start_frame, j.stop_frame) for j in result.jobs] == [(8, 0, 2)]
@@ -206,13 +177,8 @@ def _task_client(owner=ADMIN, users=()):
     task = Obj(id=5, name="Scratch", size=3, owner=owner, project_id=None, assignee=None)
     task.get_labels = lambda: [CAR_LABEL]
     task.update, task.remove = Mock(), Mock()
-    users_api = Obj(list=Mock(return_value=(Obj(results=list(users)), None)))
-    client = Obj(
-        tasks=Obj(retrieve=lambda _id: task),
-        users=Obj(retrieve_current_user=lambda: ADMIN),
-        api_client=Obj(users_api=users_api),
-    )
-    return client, task
+    users = Obj(retrieve_current_user=lambda: ADMIN, list=Mock(return_value=list(users)))
+    return fake_client(task, users=users), task
 
 
 def _update(client, **kw):
@@ -235,14 +201,14 @@ def test_update_sends_only_given_fields():
 def test_update_assignee_by_username():
     client, task = _task_client(users=[Obj(id=7, username="bob")])
     _update(client, assignee="bob")
-    client.api_client.users_api.list.assert_called_once_with(username="bob")
+    client.users.list.assert_called_once_with(username="bob")
     assert _sent(task) == {"assignee_id": 7}
 
 
 def test_update_empty_assignee_unassigns():
     client, task = _task_client()
     _update(client, assignee="")
-    client.api_client.users_api.list.assert_not_called()
+    client.users.list.assert_not_called()
     assert _sent(task) == {"assignee_id": None}
 
 

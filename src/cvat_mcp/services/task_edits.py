@@ -12,8 +12,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from cvat_mcp.config import resolve_in_workdir
 from cvat_mcp.errors import InvalidArgument
-from cvat_mcp.services.issues import is_own, job_url
-from cvat_mcp.services.tasks import JobInfo, job_info
+from cvat_mcp.services.annotation_edits import check_value
+from cvat_mcp.services.issues import job_url, require_own
+from cvat_mcp.services.tasks import JobInfo, jobs_of
 
 logger = logging.getLogger("cvat_mcp")
 
@@ -51,11 +52,11 @@ def _attribute_request(spec: AttributeSpec) -> models.AttributeRequest:
         mutable=spec.mutable,
     )
     try:
-        valid = attribute_value_validator(request)  # raises for bad number/select specs
+        attribute_value_validator(request)  # raises for bad number/select specs
     except ValueError as exc:
         raise InvalidArgument(f"attribute {spec.name!r}: {exc}") from exc
-    if spec.input_type == "checkbox" and not valid(request.values[0]):
-        raise InvalidArgument(f"attribute {spec.name!r}: a checkbox default is true or false")
+    if spec.input_type == "checkbox":
+        check_value(request, request.values[0])  # the default
     return request
 
 
@@ -65,18 +66,15 @@ def label_requests(
     """CVAT label requests for new labels; names must be new to the task and unique."""
     if not specs:
         raise InvalidArgument("pass at least one label")
-    seen = set(existing)
+    existing, seen = set(existing), set()
     requests = []
     for spec in specs:
         if not spec.name.strip():
             raise InvalidArgument("a label name must not be empty")
+        if spec.name in existing:
+            raise InvalidArgument(f"the task already has a label {spec.name!r}")
         if spec.name in seen:
-            already = spec.name in set(existing)
-            raise InvalidArgument(
-                f"the task already has a label {spec.name!r}"
-                if already
-                else f"label {spec.name!r} is listed twice"
-            )
+            raise InvalidArgument(f"label {spec.name!r} is listed twice")
         seen.add(spec.name)
         requests.append(
             models.PatchedLabelRequest(
@@ -144,7 +142,7 @@ def create_task(
         resources, resource_type = resolve_files(workdir, files), ResourceType.LOCAL
     else:
         _check_urls(urls)
-        resources, resource_type = list(urls), ResourceType.REMOTE
+        resources, resource_type = urls, ResourceType.REMOTE
     spec = {"name": name, "project_id": project_id, "segment_size": segment_size}
     if labels is not None:
         spec["labels"] = label_requests(labels)
@@ -158,7 +156,8 @@ def create_task(
             resources=resources,
             resource_type=resource_type,
             params={"sorting_method": "natural"},
-            wait_for_completion=True,
+            wait_for_completion=True,  # also refreshes the task (size)
+            status_check_period=1,  # the default 5 s makes even a one-image task take 5 s
         )
     except BaseException:
         try:
@@ -166,12 +165,11 @@ def create_task(
         except Exception:  # pylint: disable=broad-exception-caught
             logger.exception("could not remove task %s after its upload failed", task.id)
         raise
-    task.fetch()
     return CreatedTask(
         task_id=task.id,
         name=task.name,
         frame_count=task.size,
-        jobs=[job_info(j) for j in sorted(task.get_jobs(), key=lambda j: j.start_frame)],
+        jobs=jobs_of(task),
         url=job_url(base_url, task.id),
     )
 
@@ -194,8 +192,7 @@ def _user_id(client: Client, username: str) -> int | None:
     """The CVAT user id for a username; "" unassigns (None)."""
     if username == "":
         return None
-    page, _ = client.api_client.users_api.list(username=username)
-    user = next((u for u in page.results if u.username == username), None)
+    user = next((u for u in client.users.list(username=username) if u.username == username), None)
     if user is None:
         raise InvalidArgument(f'no CVAT user {username!r}; pass an existing username or ""')
     return user.id
@@ -213,32 +210,29 @@ def update_task(
         raise InvalidArgument("nothing to change: pass name, assignee, project_id or add_labels")
     if name is not None and not name.strip():
         raise InvalidArgument("the task name must not be empty")
-    task = client.tasks.retrieve(task_id)
     changes = {k: v for k, v in {"name": name, "project_id": project_id}.items() if v is not None}
-    if assignee is not None:
-        changes["assignee_id"] = _user_id(client, assignee)
     if add_labels:
         # Labels are only added: removing one deletes its annotations.
-        changes["labels"] = label_requests(add_labels, [l.name for l in task.get_labels()])
+        changes["labels"] = label_requests(add_labels)  # checks that need no requests first
+    task = client.tasks.retrieve(task_id)
+    labels = [l.name for l in task.get_labels()]
+    if add_labels:
+        label_requests(add_labels, labels)  # names new to the task
+    if assignee is not None:
+        changes["assignee_id"] = _user_id(client, assignee)
     task.update(models.PatchedTaskWriteRequest(**changes))
     return UpdatedTask(
         task_id=task.id,
         name=task.name,
         project_id=task.project_id,
         assignee=task.assignee.username if task.assignee else None,
-        labels=[l.name for l in task.get_labels()],
+        labels=labels + [s.name for s in add_labels or []],
     )
 
 
 def delete_task(client: Client, task_id: int) -> DeletedTask:
     """Delete a task with everything in it, only if this server's user owns it."""
     task = client.tasks.retrieve(task_id)
-    me = client.users.retrieve_current_user()
-    if not is_own(task, me.id):
-        owner = task.owner.username if task.owner else "a deleted user"
-        raise InvalidArgument(
-            f"task #{task_id} is owned by {owner}, not by this server's user {me.username}; "
-            "only its own tasks can be deleted here, others in the CVAT UI"
-        )
+    require_own(client, task, f"task #{task_id}", "tasks")
     task.remove()
     return DeletedTask(task_id=task_id, name=task.name, frame_count=task.size)

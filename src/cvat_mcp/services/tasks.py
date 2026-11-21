@@ -54,6 +54,11 @@ class TaskOverview(BaseModel):
     total_objects: int
 
 
+def jobs_of(task) -> list[JobInfo]:
+    """The task's jobs in frame order (callers pick a job by frame)."""
+    return [job_info(j) for j in sorted(task.get_jobs(), key=lambda j: j.start_frame)]
+
+
 def job_info(job) -> JobInfo:
     return JobInfo(
         id=job.id,
@@ -123,7 +128,7 @@ def get_task_overview(client: Client, task_id: int) -> TaskOverview:
             )
             for label in labels
         ],
-        jobs=[job_info(j) for j in sorted(task.get_jobs(), key=lambda j: j.start_frame)],
+        jobs=jobs_of(task),
         objects_per_label=objects,
         total_objects=sum(objects.values()),
     )

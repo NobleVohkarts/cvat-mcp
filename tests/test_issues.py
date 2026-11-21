@@ -191,6 +191,6 @@ def test_delete_own_issue():
 def test_delete_refuses_foreign_issue(owner, author):
     remove = Mock()
     issue = _issue(40, 2, 5, owner, remove=remove)
-    with pytest.raises(InvalidArgument, match=f"filed by {author}.*CVAT UI"):
+    with pytest.raises(InvalidArgument, match=f"belongs to {author}.*CVAT UI"):
         delete_issue(_delete_client(issue), 40)
     remove.assert_not_called()
