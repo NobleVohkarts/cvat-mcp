@@ -20,67 +20,66 @@ def _job(**kw):
         "state": "new",
         "assignee": None,
     }
-    job = Obj(**(defaults | kw))
-    job.update = Mock()
-    return job
+    return Obj(**(defaults | kw))
 
 
 def _client(job, users=()):
     users = Obj(retrieve_current_user=lambda: ADMIN, list=Mock(return_value=list(users)))
-    return fake_client(Obj(id=5), jobs=Obj(retrieve=lambda _id: job), users=users)
+    jobs_api = Obj(partial_update=Mock(return_value=(job, None)))
+    return fake_client(Obj(id=5), users=users, api_client=Obj(jobs_api=jobs_api))
 
 
 def _update(client, **kw):
     return update_job(client, 20, **({"assignee": None, "stage": None, "state": None} | kw))
 
 
-def _sent(job):
-    (request,), _ = job.update.call_args
-    return request.to_dict()
+def _sent(client):
+    partial_update = client.api_client.jobs_api.partial_update
+    (job_id,), kwargs = partial_update.call_args
+    assert job_id == 20
+    return kwargs["patched_job_write_request"].to_dict()
 
 
 def test_update_job_sends_only_given_fields():
-    job = _job()
-    result = _update(_client(job), stage="validation")
-    assert _sent(job) == {"stage": "validation"}
+    client = _client(_job())
+    result = _update(client, stage="validation")
+    assert _sent(client) == {"stage": "validation"}
     assert (result.id, result.type) == (20, "annotation")
 
 
 def test_update_job_assignee_by_username():
-    job = _job()
-    client = _client(job, users=[Obj(id=7, username="bob")])
+    client = _client(_job(), users=[Obj(id=7, username="bob")])
     _update(client, assignee="bob")
-    assert _sent(job) == {"assignee": 7}
+    assert _sent(client) == {"assignee": 7}
 
 
 def test_update_job_empty_assignee_unassigns():
-    job = _job()
-    client = _client(job)
+    client = _client(_job())
     _update(client, assignee="")
     client.users.list.assert_not_called()
-    assert _sent(job) == {"assignee": None}
+    assert _sent(client) == {"assignee": None}
 
 
 def test_update_job_unknown_user():
-    job = _job()
+    client = _client(_job())
     with pytest.raises(InvalidArgument, match="no CVAT user"):
-        _update(_client(job), assignee="nobody")
-    job.update.assert_not_called()
+        _update(client, assignee="nobody")
+    client.api_client.jobs_api.partial_update.assert_not_called()
 
 
 def test_update_job_needs_a_field():
-    job = _job()
+    client = _client(_job())
     with pytest.raises(InvalidArgument, match="nothing to change"):
-        _update(_client(job))
-    job.update.assert_not_called()
+        _update(client)
+    client.api_client.jobs_api.partial_update.assert_not_called()
 
 
 def _gt_client(included=(0, 2)):
-    jobs_api = Obj(create=Mock(return_value=(Obj(id=30), None)), destroy=Mock())
-    gt = Obj(id=30, get_meta=lambda: Obj(included_frames=list(included)))
-    client = fake_client(
-        Obj(id=5, size=3), jobs=Obj(retrieve=lambda _id: gt), api_client=Obj(jobs_api=jobs_api)
+    jobs_api = Obj(
+        create=Mock(return_value=(Obj(id=30), None)),
+        retrieve_data_meta=Mock(return_value=(Obj(included_frames=list(included)), None)),
     )
+    client = fake_client(Obj(id=5, size=3), api_client=Obj(jobs_api=jobs_api))
     return client, jobs_api
 
 

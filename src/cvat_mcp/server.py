@@ -96,7 +96,6 @@ that miss their object) -> get_frame_annotations for exact ids and boxes
 All frame numbers are task frame numbers (0-based), not job-relative; coordinates are original
 image pixels [x1, y1, x2, y2].
 {READ_ONLY_NOTE}
-Annotation jobs can't be created or deleted: CVAT makes them from the task's segments.
 """
 
 HTTP_MODE = settings.mcp_transport == "http"
