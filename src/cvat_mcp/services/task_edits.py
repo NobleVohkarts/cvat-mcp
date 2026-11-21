@@ -210,7 +210,7 @@ class DeletedTask(BaseModel):
     frame_count: int | None
 
 
-def _user_id(client: Client, username: str) -> int | None:
+def user_id(client: Client, username: str) -> int | None:
     """The CVAT user id for a username; "" unassigns (None)."""
     if username == "":
         return None
@@ -248,7 +248,7 @@ def update_task(
     if add_labels:
         label_requests(add_labels, [l.name for l in task.get_labels()])  # names new to the task
     if assignee is not None:
-        changes["assignee_id"] = _user_id(client, assignee)
+        changes["assignee_id"] = user_id(client, assignee)
     task.update(models.PatchedTaskWriteRequest(**changes))
     return UpdatedTask(
         task_id=task.id,
