@@ -165,6 +165,15 @@ def _not_found(kind: str, ids) -> InvalidArgument:
     )
 
 
+def _by_id(task) -> dict[str, dict]:
+    """The task's shapes and tags by id; the two id sequences are separate in CVAT."""
+    annotations = task.get_annotations()
+    return {
+        "shape": {s.id: s for s in annotations.shapes},
+        "tag": {t.id: t for t in annotations.tags},
+    }
+
+
 def _attribute_requests(values: list[dict]) -> list[models.AttributeValRequest]:
     return [models.AttributeValRequest(**v) for v in values]
 
@@ -241,11 +250,7 @@ def update_annotations(client: Client, task_id: int, objects: list[ObjectChange]
     check_editable(task)
     labels = task.get_labels()
     by_id = {label.id: label for label in labels}
-    annotations = task.get_annotations()
-    found = {
-        "shape": {s.id: s for s in annotations.shapes},
-        "tag": {t.id: t for t in annotations.tags},
-    }
+    found = _by_id(task)
     _check_unique([(c.kind, c.id) for c in objects])
     sent = []
     for index, change in enumerate(objects):
@@ -279,6 +284,39 @@ def update_annotations(client: Client, task_id: int, objects: list[ObjectChange]
     return AnnotationEdit(
         task_id=task_id,
         action="updated",
+        objects=[
+            EditedObject(id=r.id, kind=kind, frame=r.frame, label=names[r.label_id])
+            for kind, r in sent
+        ],
+    )
+
+
+def delete_annotations(
+    client: Client, task_id: int, shape_ids: list[int], tag_ids: list[int]
+) -> AnnotationEdit:
+    """Delete objects named by explicit ids, all or none.
+
+    Never uses the SDK's remove_annotations(): an empty id list there deletes every annotation.
+    """
+    if not shape_ids and not tag_ids:
+        raise InvalidArgument("pass at least one id in shape_ids or tag_ids")
+    refs = [("shape", i) for i in shape_ids] + [("tag", i) for i in tag_ids]
+    _check_unique(refs)
+    task = client.tasks.retrieve(task_id)
+    check_editable(task)
+    found = _by_id(task)
+    for kind, ids in (("shape", shape_ids), ("tag", tag_ids)):
+        missing = [i for i in ids if i not in found[kind]]
+        if missing:
+            raise _not_found(kind, missing)
+    model = {"shape": models.LabeledShapeRequest, "tag": models.LabeledImageRequest}
+    sent = [(kind, model[kind](**found[kind][i].to_dict())) for kind, i in refs]
+
+    _patch(client, "delete", task_id, *_split(sent))
+    names = {label.id: label.name for label in task.get_labels()}
+    return AnnotationEdit(
+        task_id=task_id,
+        action="deleted",
         objects=[
             EditedObject(id=r.id, kind=kind, frame=r.frame, label=names[r.label_id])
             for kind, r in sent

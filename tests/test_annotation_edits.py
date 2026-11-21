@@ -11,6 +11,7 @@ from cvat_mcp.services.annotation_edits import (
     check_editable,
     check_geometry,
     create_annotations,
+    delete_annotations,
     label_for,
     update_annotations,
 )
@@ -247,4 +248,56 @@ def test_update_refusals(changes, match):
     client, api = _client(shapes=shapes, tags=[tag(7, 3, 3)])
     with pytest.raises(InvalidArgument, match=match):
         update_annotations(client, 1, changes)
+    api.partial_update_annotations.assert_not_called()
+
+
+def _delete_client():
+    client, api = _client(shapes=[shape(1, 1, 3, [1, 1, 4, 4])], tags=[tag(7, 3, 3)])
+    client.tasks.retrieve(1).remove_annotations = Mock()
+    return client, api
+
+
+def test_delete_sends_fetched_objects():
+    client, api = _delete_client()
+    result = delete_annotations(client, 1, [1], [7])
+    sent = _sent(api, "delete")
+    assert [s.id for s in sent.shapes] == [1] and [t.id for t in sent.tags] == [7]
+    assert [(o.id, o.kind, o.frame, o.label) for o in result.objects] == [
+        (1, "shape", 3, "car"),
+        (7, "tag", 3, "night"),
+    ]
+    client.tasks.retrieve(1).remove_annotations.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "shape_ids, tag_ids, match",
+    [
+        ([], [], "at least one"),
+        ([1, 2, 3], [], "2, 3"),
+        ([1, 1], [], "twice"),
+        ([7], [], "not among this task's shapes"),  # 7 is only a tag id
+        ([], [1], "not among this task's tags"),  # 1 is only a shape id
+    ],
+)
+def test_delete_refusals(shape_ids, tag_ids, match):
+    client, api = _delete_client()
+    with pytest.raises(InvalidArgument, match=match):
+        delete_annotations(client, 1, shape_ids, tag_ids)
+    api.partial_update_annotations.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda c: create_annotations(
+            c, "http://cvat", 1, [NewObject(frame=3, label="car", bbox=[1, 1, 4, 4])]
+        ),
+        lambda c: update_annotations(c, 1, [ObjectChange(id=1, occluded=True)]),
+        lambda c: delete_annotations(c, 1, [1], []),
+    ],
+)
+def test_overlap_task_refused(edit):
+    client, api = _client(shapes=[shape(1, 1, 3, [1, 1, 4, 4])], overlap=5)
+    with pytest.raises(InvalidArgument, match="overlap"):
+        edit(client)
     api.partial_update_annotations.assert_not_called()
