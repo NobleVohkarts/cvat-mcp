@@ -69,13 +69,16 @@ if WRITE_MODE:
         '(reviewing is not such a request). Issues belong to the job of type "annotation" '
         "whose frame range contains the frame. To rewrite or replace issues, list_issues for the "
         "frame, create_issue the new ones, then delete_issue the old ones"
+        ". Fix annotations with create_annotations / update_annotations / delete_annotations "
+        "only when the user asks to fix them (reviewing or filing issues is not such a request), "
+        "then render_frame again to check"
     )
     READ_ONLY_NOTE = ""
 else:
     FILE_ISSUES = ""
     READ_ONLY_NOTE = (
-        "Creating issues is disabled: the server runs in read-only mode "
-        "(CVAT_MCP_MODE=write enables it)."
+        "Creating issues and changing annotations are disabled: the server runs in read-only "
+        "mode (CVAT_MCP_MODE=write enables them)."
     )
 
 INSTRUCTIONS = f"""\
@@ -88,8 +91,8 @@ that miss their object) -> get_frame_annotations for exact ids and boxes
 All frame numbers are task frame numbers (0-based), not job-relative; coordinates are original
 image pixels [x1, y1, x2, y2].
 {READ_ONLY_NOTE}
-Deleting or changing tasks, jobs and annotations is not available through this server in any
-mode: if the user asks for it, explain that it is disabled here and must be done in the CVAT UI.
+Changing tasks and jobs is not available through this server: if the user asks for it,
+explain that it must be done in the CVAT UI.
 """
 
 HTTP_MODE = settings.mcp_transport == "http"
