@@ -18,7 +18,7 @@ def _conflict(frame, type_, *ids):
     return Obj(frame=frame, type=type_, annotation_ids=list(ids))
 
 
-def _summary(conflict_count=2, score=0.5):
+def _summary(conflict_count=2, score=0.5, enabled=1):
     item = Obj(
         name="default",
         metric="accuracy",
@@ -33,11 +33,11 @@ def _summary(conflict_count=2, score=0.5):
         error_count=conflict_count,
         conflicts_by_type={"missing_annotation": 1, "mismatching_label": 1},
         jobs=Obj(to_dict=lambda: {"total": 2, "not_checkable": 0}),
-        requirements=Obj(items=[item]),
+        requirements=Obj(enabled=enabled, items=[item] if enabled else []),
     )
 
 
-def _client(conflicts=(), count=None, jobs=JOBS, summary=None):
+def _client(conflicts=(), count=None, jobs=JOBS, summary=None, organization=None):
     report = Obj(id=9, created_date=datetime(2026, 11, 21), summary=summary or _summary())
     quality_api = Obj(
         create_report=Mock(return_value=(None, Obj(data=b'{"rq_id": "rq-1"}'))),
@@ -50,7 +50,7 @@ def _client(conflicts=(), count=None, jobs=JOBS, summary=None):
         ),
     )
     return fake_client(
-        fake_task(jobs=jobs, organization=None),
+        fake_task(jobs=jobs, organization=organization),
         api_client=Obj(quality_api=quality_api),
         wait_for_completion=Mock(return_value=(Obj(result_id=9), None)),
     )
@@ -134,3 +134,21 @@ def test_no_gt_job_refused():
     with pytest.raises(InvalidArgument, match="no ground-truth job.*create_gt_job"):
         create_report(client, "http://cvat", 1, 100)
     client.api_client.quality_api.create_report.assert_not_called()
+
+
+@pytest.mark.parametrize("organization", [None, 7])
+def test_conflicts_org_only_when_set(organization):
+    # the raw SDK endpoint refuses org_id=None, so it is sent only for a task in an organization
+    client = _client([_conflict(1, "missing_annotation", _ann(21, 4))], organization=organization)
+    create_report(client, "http://cvat", 1, 100)
+    _, kwargs = client.api_client.quality_api.list_conflicts.call_args
+    assert kwargs.get("org_id") == organization
+    assert ("org_id" in kwargs) is (organization is not None)
+
+
+def test_no_enabled_requirement_refused():
+    # CVAT starts every quality requirement disabled; then a report compares nothing
+    client = _client(summary=_summary(conflict_count=0, enabled=0))
+    with pytest.raises(InvalidArgument, match="no quality requirement is enabled.*Base rectangle"):
+        create_report(client, "http://cvat", 1, 100)
+    client.api_client.quality_api.list_conflicts.assert_not_called()

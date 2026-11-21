@@ -18,7 +18,9 @@ def create_report(
     """Use to compare a task's annotation jobs with its ground-truth job (CVAT quality control):
     computes a fresh report, waits for it (seconds for small tasks) and returns the counts, the
     scores and up to max_conflicts conflicts by frame. The GT job must hold the reference
-    annotations. shape_ids are ids from get_frame_annotations; gt_shape_ids are inside the GT
-    job, which render_frame does not draw. Creates a report record in CVAT; never changes
-    annotations."""
+    annotations in the same shape type as the jobs (a COCO file with segmentation imports as
+    polygons), and the task's quality settings must enable a requirement for that type (CVAT
+    starts with all disabled; the error says how to enable one). shape_ids are ids from
+    get_frame_annotations; gt_shape_ids are inside the GT job, which render_frame does not draw.
+    Creates a report record in CVAT; never changes annotations."""
     return quality.create_report(get_client(ctx), settings.url, task_id, max_conflicts)

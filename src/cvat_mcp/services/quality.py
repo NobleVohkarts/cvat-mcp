@@ -62,11 +62,22 @@ def create_report(client: Client, base_url: str, task_id: int, max_conflicts: in
     )
     report, _ = quality_api.retrieve_report(request.result_id)
     summary = report.summary
+    requirements = getattr(summary, "requirements", None)  # optional in CVAT's summary
+    if requirements is not None and requirements.enabled == 0:
+        # CVAT starts with every requirement disabled; such a report compares nothing
+        raise InvalidArgument(
+            f"no quality requirement is enabled for task {task_id}, so CVAT compared nothing: "
+            "in the CVAT UI open the task's Quality control > Settings and enable the "
+            "requirement for the GT shapes' type (e.g. 'Base rectangle' for boxes; in the "
+            "project's settings if the task inherits them), then call create_report again"
+        )
 
     conflicts, truncated = [], summary.conflict_count > 0
     if max_conflicts > 0:
+        # Explicit org context, as for issue comments; the raw endpoint refuses org_id=None.
+        org = {"org_id": task.organization} if task.organization is not None else {}
         page, _ = quality_api.list_conflicts(
-            report_id=report.id, page_size=max_conflicts, sort="frame", org_id=task.organization
+            report_id=report.id, page_size=max_conflicts, sort="frame", **org
         )
         conflicts = [_conflict(c, gt_job_id) for c in page.results]
         truncated = page.count > len(conflicts)
@@ -83,15 +94,10 @@ def create_report(client: Client, base_url: str, task_id: int, max_conflicts: in
         error_count=summary.error_count,
         conflicts_by_type=dict(summary.conflicts_by_type),
         jobs=summary.jobs.to_dict() if getattr(summary, "jobs", None) else None,
-        scores=[_score(item) for item in _requirement_items(summary)],
+        scores=[_score(item) for item in (requirements.items if requirements else [])],
         conflicts=conflicts,
         conflicts_truncated=truncated,
     )
-
-
-def _requirement_items(summary) -> list:
-    requirements = getattr(summary, "requirements", None)  # optional in CVAT's summary
-    return list(requirements.items) if requirements else []
 
 
 def _score(item) -> Score:
