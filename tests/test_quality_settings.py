@@ -11,9 +11,11 @@ PROJECT_REQS = [req(154, "Base tag", "tag"), req(155, "Base rectangle", "rectang
 TASK_REQS = [req(253, "Base tag", "tag"), req(254, "Base rectangle", "rectangle")]
 
 
-def _client(project_id=9, project_reqs=None):
+def _client(project_id=9, project_reqs=None, **settings_kw):
     quality_api = Obj(
-        list_settings=fake_list_settings(21, list(TASK_REQS), project_reqs or list(PROJECT_REQS)),
+        list_settings=fake_list_settings(
+            21, list(TASK_REQS), project_reqs or list(PROJECT_REQS), **settings_kw
+        ),
         partial_update_settings=Mock(),
         partial_update_settings_requirements=Mock(),
     )
@@ -33,12 +35,11 @@ def _state(result):
 
 
 def test_state_inherited_from_project():
-    client, task, api = _client()
+    client, task, _ = _client()
     state = settings_state(client, task)
     assert (state.task_id, state.source, state.project_id) == (21, "project", 9)
     assert _state(state) == [("Base tag", "tag", False), ("Base rectangle", "rectangle", False)]
-    assert state.shared_with_tasks == 2
-    assert api.list_settings.call_count == 1  # the project listing holds the task's own row too
+    assert state.shared_with_tasks == 2  # CVAT's count of inheriting tasks
 
 
 def test_state_own_without_project():
@@ -67,9 +68,6 @@ def test_own_settings_then_enable():
     assert ("Base rectangle", "rectangle", True) in _state(result)
 
 
-DUPLICATE_TAG = [req(154, "Base tag", "tag"), req(156, "Base tag", "tag")]
-
-
 @pytest.mark.parametrize(
     "client_kw, args, match",
     [
@@ -77,7 +75,7 @@ DUPLICATE_TAG = [req(154, "Base tag", "tag"), req(156, "Base tag", "tag")]
         ({}, (["Base tag"], ["Base tag"], None), "both"),
         ({}, ([], [], None), "nothing to change"),
         ({"project_id": None}, ([], [], True), "not in a project"),
-        ({"project_reqs": DUPLICATE_TAG}, (["Base tag"], [], None), "ambiguous"),
+        ({"visible": False}, (["Base tag"], [], None), "not visible.*use_project_settings=false"),
     ],
 )
 def test_refusals_write_nothing(client_kw, args, match):
@@ -100,3 +98,30 @@ def test_already_in_state_skipped():
     result = update_quality_settings(client, 21, [], ["Base tag"], None)
     api.partial_update_settings_requirements.assert_not_called()
     assert ("Base tag", "tag", False) in _state(result)
+
+
+def test_own_settings_skip_the_project():
+    # switching to its own settings needs nothing of the project, which may be invisible
+    client, _, api = _client(visible=False)
+    result = update_quality_settings(client, 21, ["Base rectangle"], [], False)
+    assert all(kw.get("parent_type") != "project" for _, kw in api.list_settings.call_args_list)
+    assert result.source == "task"
+
+
+def test_requirements_written_before_inherit():
+    # a failed requirement write must not leave the task already switched
+    client, _, api = _client(inherit=False)
+    order = []
+    api.partial_update_settings.side_effect = lambda *a, **k: order.append("inherit")
+    api.partial_update_settings_requirements.side_effect = lambda *a, **k: order.append("req")
+    result = update_quality_settings(client, 21, ["Base rectangle"], [], True)
+    assert order == ["req", "inherit"]
+    assert _patched_requirements(api) == [(155, True)]
+    assert result.shared_with_tasks == 3  # counted before the switch, plus this task
+
+
+def test_child_requirement_type_is_null():
+    # CVAT stores no annotation type on child requirements (they take the parent's)
+    reqs = [req(154, "Base rectangle", "rectangle"), req(157, "Strict boxes", None)]
+    client, task, _ = _client(project_reqs=reqs)
+    assert _state(settings_state(client, task))[1] == ("Strict boxes", None, False)

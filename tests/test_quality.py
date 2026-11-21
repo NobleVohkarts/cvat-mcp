@@ -201,3 +201,11 @@ def test_not_computed_score_shows_status():
     summary.requirements.items[0].calculation = Obj(status="not_computed", reason="no_annotations")
     [score] = create_report(_client(summary=summary), "http://cvat", 1, 100).scores
     assert (score.score, score.status, score.reason) == (None, "not_computed", "no_annotations")
+
+
+def test_refusal_survives_unreadable_settings():
+    # the settings are only details: the refusal must still say nothing is enabled
+    client = _client(summary=_summary(conflict_count=0, enabled=0))
+    client.api_client.quality_api.list_settings.side_effect = ApiException(status=403)
+    with pytest.raises(InvalidArgument, match="no quality requirement is enabled.*update_quality"):
+        create_report(client, "http://cvat", 1, 100)

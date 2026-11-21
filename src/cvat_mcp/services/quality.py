@@ -70,16 +70,9 @@ def create_report(client: Client, base_url: str, task_id: int, max_conflicts: in
     requirements = getattr(summary, "requirements", None)  # optional in CVAT's summary
     if requirements is not None and requirements.enabled == 0:
         # CVAT starts with every requirement disabled; such a report compares nothing
-        state = settings_state(client, task)
-        where = (
-            f"uses project #{state.project_id}'s settings"
-            if state.source == "project"
-            else "uses its own settings"
-        )
-        names = ", ".join(f"{r.name} ({r.annotation_type})" for r in state.requirements)
         raise InvalidArgument(
-            f"no quality requirement is enabled for task {task_id} (it {where}: {names}), so "
-            "CVAT compared nothing: switch on the one for the GT shapes' type with "
+            f"no quality requirement is enabled for task {task_id}{_settings_detail(client, task)}"
+            ", so CVAT compared nothing: switch on the one for the GT shapes' type with "
             "update_quality_settings (write mode) or in the CVAT UI (Quality control > "
             "Settings), then call create_report again"
         )
@@ -113,6 +106,24 @@ def create_report(client: Client, base_url: str, task_id: int, max_conflicts: in
         conflicts=conflicts,
         conflicts_truncated=truncated,
     )
+
+
+def _settings_detail(client: Client, task) -> str:
+    """Where the task's requirements live and which exist, or "" when they can't be read."""
+    try:
+        state = settings_state(client, task)
+    except (ApiException, InvalidArgument):  # the refusal matters more than these details
+        return ""
+    where = (
+        f"uses project #{state.project_id}'s settings"
+        if state.source == "project"
+        else "uses its own settings"
+    )
+    names = ", ".join(
+        r.name if r.annotation_type is None else f"{r.name} ({r.annotation_type})"
+        for r in state.requirements
+    )
+    return f" (it {where}: {names})"
 
 
 def _start_report(quality_api, task_id: int) -> str:
