@@ -4,6 +4,8 @@ from pydantic import BaseModel
 
 from cvat_mcp.errors import InvalidArgument
 
+POINT_TYPES = ("polygon", "polyline", "points")  # shapes whose points are x, y vertices
+
 
 class FrameObject(BaseModel):
     id: int
@@ -13,6 +15,14 @@ class FrameObject(BaseModel):
     attributes: dict[str, str]
     source: str
     occluded: bool
+    points: list[float] | None = None  # vertices of polygons, polylines and points only
+
+
+class FrameTag(BaseModel):
+    id: int
+    label: str
+    attributes: dict[str, str]
+    source: str
 
 
 class FrameAnnotations(BaseModel):
@@ -21,6 +31,7 @@ class FrameAnnotations(BaseModel):
     width: int
     height: int
     objects: list[FrameObject]
+    tags: list[FrameTag]
     skipped_tracks: int
 
 
@@ -72,9 +83,20 @@ def frame_annotations(task: Task, labels: list, frame: int) -> FrameAnnotations:
                 attributes={attribute_names[a.spec_id]: a.value for a in s.attributes},
                 source=str(s.source),
                 occluded=s.occluded,
+                points=list(s.points) if str(s.type) in POINT_TYPES else None,
             )
             for s in annotations.shapes
             if s.frame == frame
+        ],
+        tags=[
+            FrameTag(
+                id=t.id,
+                label=names[t.label_id],
+                attributes={attribute_names[a.spec_id]: a.value for a in t.attributes},
+                source=str(t.source),
+            )
+            for t in annotations.tags
+            if t.frame == frame
         ],
         skipped_tracks=sum(_track_visible(t, frame) for t in annotations.tracks),
     )

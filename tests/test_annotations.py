@@ -1,5 +1,5 @@
 import pytest
-from fakes import Obj, fake_client, fake_task, shape
+from fakes import Obj, fake_client, fake_task, shape, tag
 
 from cvat_mcp.services.annotations import check_frame, get_frame_annotations, shape_bbox
 
@@ -71,3 +71,32 @@ def test_video_task_has_one_meta_entry():
     task = fake_task([], meta_frames=[Obj(width=1920, height=1080)])
     result = get_frame_annotations(fake_client(task), 1, 25)
     assert (result.width, result.height) == (1920, 1080)
+
+
+def test_polygon_has_points_rectangle_has_none():
+    polygon = shape(1, 1, 3, [5, 50, 30, 10, 60, 40], type="polygon")
+    task = fake_task([polygon, shape(2, 1, 3, [10, 20, 110, 220])])
+    first, second = get_frame_annotations(fake_client(task), 1, 3).objects
+    assert first.points == [5, 50, 30, 10, 60, 40]
+    assert second.points is None
+
+
+def test_tags_of_that_frame():
+    tags = [tag(7, 1, 3, attributes=[Obj(spec_id=10, value="true")]), tag(8, 2, 4)]
+    result = get_frame_annotations(fake_client(fake_task([], tags=tags)), 1, 3)
+    assert [t.id for t in result.tags] == [7]
+    assert result.tags[0].label == "car"
+    assert result.tags[0].attributes == {"parked": "true"}
+
+
+@pytest.mark.parametrize("type_", ["mask", "ellipse", "cuboid", "skeleton"])
+def test_points_only_for_editable_types(type_):
+    elements = [Obj(points=[1, 2]), Obj(points=[3, 4])]
+    task = fake_task([shape(1, 1, 3, [1, 2, 3, 4, 5, 6, 7, 8], type=type_, elements=elements)])
+    assert get_frame_annotations(fake_client(task), 1, 3).objects[0].points is None
+
+
+def test_polyline_and_points_have_points():
+    shapes = [shape(1, 1, 3, [0, 0, 5, 5], type="polyline"), shape(2, 1, 3, [1, 1], type="points")]
+    result = get_frame_annotations(fake_client(fake_task(shapes)), 1, 3)
+    assert [o.points for o in result.objects] == [[0, 0, 5, 5], [1, 1]]
