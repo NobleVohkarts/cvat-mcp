@@ -187,16 +187,29 @@ import anyio, json
 from types import SimpleNamespace as Obj
 import cvat_mcp.server as s, cvat_mcp.tools
 from mcp import Client
+from mcp.shared.exceptions import MCPError
 s._connect = lambda _settings: (Obj(close=lambda: None), "admin")
 
+async def outcome(client, name, arguments):
+    try:
+        result = await client.call_tool(name, arguments)
+        return ["result", result.is_error, result.content[0].text]
+    except MCPError as error:
+        return ["error", error.error.code, error.error.message]
+
+async def passed_on(ctx):
+    return "passed on to mcp"
+
 async def main():
+    raw = Obj(method="tools/call", params={"name": "render_frame", "arguments": [{"x": 1}]})
+    not_object = await s.reject_unknown_arguments(raw, passed_on)
     async with Client(s.mcp) as client:
-        unknown = await client.call_tool("render_frame", {"task_id": 1, "frame": 0, "clean": True})
-        known = await client.call_tool("get_frame_annotations", {"task_id": 1, "frame": 0})
         print(json.dumps({
             "version": client.server_info.version,
-            "unknown": [unknown.is_error, unknown.content[0].text],
-            "known": [known.is_error, known.content[0].text],
+            "not_object": not_object,
+            "unknown": await outcome(client, "render_frame", {"task_id": 1, "frame": 0, "clean": 1}),
+            "no_args": await outcome(client, "server_info", {"verbose": True}),
+            "known": await outcome(client, "get_frame_annotations", {"task_id": 1, "frame": 0}),
         }))
 
 anyio.run(main)
@@ -208,7 +221,11 @@ def test_strict_arguments_and_version_in_process(monkeypatch):
     assert result.returncode == 0, result.stderr
     checks = json.loads(result.stdout.strip().splitlines()[-1])
     assert checks["version"] == cvat_mcp.__version__  # the MCP handshake reports the build
-    is_error, text = checks["unknown"]
-    assert is_error and "unknown argument" in text and "clean" in text
-    assert "include_clean" in text and "reconnect" in text
-    assert "unknown argument" not in checks["known"][1]  # known arguments reach the tool
+    kind, code, message = checks["unknown"]
+    assert (kind, code) == ("error", -32602)  # JSON-RPC invalid params, shaped by mcp's runner
+    assert "unknown argument(s) clean for render_frame" in message
+    assert "include_clean" in message and "reconnect" in message
+    assert "takes no arguments" in checks["no_args"][2]
+    assert checks["not_object"] == "passed on to mcp"  # mcp's own validation answers
+    # known arguments reach the tool body (which fails on the fake client)
+    assert checks["known"] == ["result", True, "Error executing tool get_frame_annotations"]
