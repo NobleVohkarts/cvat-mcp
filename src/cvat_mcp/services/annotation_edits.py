@@ -1,4 +1,5 @@
 import json
+import logging
 from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -185,6 +186,8 @@ def _by_id(task) -> dict[str, dict]:
     }
 
 
+logger = logging.getLogger("cvat_mcp")
+
 Sent = list[tuple[str, object]]  # (kind, request) in item order
 
 
@@ -201,9 +204,18 @@ def _patch(client: Client, action: str, scope: Scope, sent: Sent):
             tracks=[],
         ),
     )
-    if on_job:  # the SDK's schema has no body for the job PATCH, but CVAT sends one
-        data = json.loads(response.data, object_hook=lambda d: SimpleNamespace(**d))
-    return data
+    if not on_job:
+        return data
+    if action != "create":  # only a create needs the answer (the new ids)
+        return None
+    # The SDK's schema has no body for the job PATCH, but CVAT sends one. The write is done, so
+    # an unreadable answer must not fail the call: the model would retry and duplicate objects.
+    try:
+        body = json.loads(response.data, object_hook=lambda d: SimpleNamespace(**d))
+    except ValueError:
+        logger.warning("unreadable answer to a job annotations PATCH", exc_info=True)
+        body = None
+    return SimpleNamespace(shapes=getattr(body, "shapes", []), tags=getattr(body, "tags", []))
 
 
 def _result(

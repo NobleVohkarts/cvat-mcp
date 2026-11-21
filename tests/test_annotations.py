@@ -146,3 +146,10 @@ def test_without_job_id_nothing_changes():
     task = fake_task([shape(1, 1, 2, [0, 0, 5, 5])])
     result = get_frame_annotations(fake_client(task), 1, 2)
     assert [o.id for o in result.objects] == [1] and result.job_id is None
+
+
+def test_disabled_gt_frames_are_not_job_frames():
+    # CVAT lists disabled validation frames as the GT job's deleted frames (task frame numbers)
+    client = job_client(fake_task(), gt_job(included=(0, 2), deleted=(2,)))
+    with pytest.raises(ValueError, match="frame 2 is not in job 30.*its frames: 0$"):
+        get_frame_annotations(client, 1, 2, job_id=30)

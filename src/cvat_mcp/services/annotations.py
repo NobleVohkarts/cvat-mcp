@@ -89,7 +89,11 @@ class Scope:
             return
         if self._job_frames is None:  # fetched only when a frame has to be checked
             if str(self.job.type) == "ground_truth":
-                self._job_frames = task_frames(self.meta, self.job.get_meta().included_frames)
+                job_meta = self.job.get_meta()
+                # deleted_frames (task frame numbers) include disabled validation frames
+                self._job_frames = set(task_frames(self.meta, job_meta.included_frames)) - set(
+                    job_meta.deleted_frames or []
+                )
             else:
                 self._job_frames = range(self.job.start_frame, self.job.stop_frame + 1)
         # CVAT doesn't check this on job writes: an object could land outside the job's frames

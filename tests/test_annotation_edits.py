@@ -367,7 +367,11 @@ def _gt_client(
 ):
     tasks_api, jobs_api = Mock(), Mock()
     # like the SDK: no parsed body for the job PATCH (its schema has none), only the raw response
-    raw = json.dumps(response or {"shapes": [], "tags": []}).encode()
+    raw = (
+        response
+        if isinstance(response, bytes)
+        else json.dumps(response or {"shapes": [], "tags": []}).encode()
+    )
     jobs_api.partial_update_annotations.return_value = (None, Obj(data=raw))
     task = fake_task(
         task_shapes,
@@ -459,3 +463,18 @@ def test_job_path_allows_overlap_but_not_gt_pool():
     with pytest.raises(InvalidArgument, match="ground-truth pool"):
         create_annotations(client, "http://cvat", 1, [BOX], job_id=30)
     jobs_api.partial_update_annotations.assert_not_called()
+
+
+@pytest.mark.parametrize("body", [b"", b"not json", b"{}"])
+def test_job_create_survives_an_unreadable_answer(body):
+    # the objects exist: failing now would make the model retry and duplicate them
+    client, _, jobs_api = _gt_client(body)
+    result = create_annotations(client, "http://cvat", 1, [BOX], job_id=30)
+    jobs_api.partial_update_annotations.assert_called_once()
+    assert result.objects[0].id is None
+
+
+def test_job_update_ignores_the_answer():
+    client, _, _ = _gt_client(b"", gt_shapes=[shape(7, 1, 2, [1, 1, 4, 4])])
+    result = update_annotations(client, 1, [ObjectChange(id=7, occluded=True)], job_id=30)
+    assert result.objects[0].id == 7
