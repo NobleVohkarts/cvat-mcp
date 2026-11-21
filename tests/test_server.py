@@ -29,9 +29,10 @@ import anyio, json, cvat_mcp.server as s, cvat_mcp.tools
 tools = anyio.run(s.mcp.list_tools)
 destructive = [t.name for t in tools if t.annotations.destructive_hint]
 open_world = [t.name for t in tools if t.annotations.open_world_hint]
+with_job_id = [t.name for t in tools if "job_id" in t.input_schema.get("properties", {})]
 print(json.dumps({
     "tools": sorted(s.REGISTERED_TOOLS), "instructions": s.INSTRUCTIONS, "destructive": destructive,
-    "open_world": open_world
+    "open_world": open_world, "with_job_id": with_job_id
 }))
 """
 
@@ -97,6 +98,15 @@ def test_write_mode_adds_write_tools(monkeypatch):
     ]
     assert "update_job" in result["instructions"]
     assert "ground-truth jobs of tasks owned by" in result["instructions"]
+    assert "edit ground truth only when the user explicitly asks" in result["instructions"]
+    annotation_tools = {
+        "create_annotations",
+        "delete_annotations",
+        "get_frame_annotations",
+        "render_frame",
+        "update_annotations",
+    }
+    assert annotation_tools <= set(result["with_job_id"])
     assert "create_task" in result["instructions"]
     assert "only tasks owned by" in result["instructions"]
     assert result["open_world"] == ["create_task"]  # urls make CVAT fetch from any host

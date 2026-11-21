@@ -75,7 +75,9 @@ if WRITE_MODE:
         "update_task, delete_task) only when the user asks; delete_task removes only tasks owned "
         "by this server's CVAT account. Change jobs (update_job) or create and delete "
         "ground-truth jobs (create_gt_job, delete_gt_job) only when the user asks; delete_gt_job "
-        "removes only ground-truth jobs of tasks owned by this server's CVAT account"
+        "removes only ground-truth jobs of tasks owned by this server's CVAT account. "
+        "Ground-truth annotations: pass job_id of the ground-truth job to the annotation tools; "
+        "edit ground truth only when the user explicitly asks"
     )
     READ_ONLY_NOTE = ""
 else:
