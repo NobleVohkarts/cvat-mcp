@@ -281,3 +281,34 @@ def delete_cloud_storage(client: Client, cloud_storage_id: int) -> DeletedCloudS
         )
     api.destroy(cloud_storage_id)
     return DeletedCloudStorage(cloud_storage_id=cloud_storage_id, display_name=storage.display_name)
+
+
+class CloudSource(NamedTuple):
+    resources: list[str]  # CVAT's server_files: object keys
+    filename_pattern: str | None
+
+
+def cloud_source(key: str) -> CloudSource:
+    """What a link's key part selects: a glob, one object, or a folder (recursively)."""
+    if any(c in key for c in "*?["):
+        return CloudSource([], key)
+    if "." in key.rsplit("/", 1)[-1]:  # a file name; "street" (no extension) is a folder
+        return CloudSource([key], None)
+    folder = key.rstrip("/")
+    return CloudSource([], f"{folder}/*" if folder else "*")  # fnmatch's * also matches "/"
+
+
+def resolve_storage(client: Client, base_url: str, url: str) -> tuple[int, bool]:
+    """The storage serving this link, and whether this call registered it (without keys)."""
+    ref = parse_bucket_url(url)
+    me = client.users.retrieve_current_user()
+    if storage := find_storage(client, ref, me.id):
+        return storage.id, False
+    try:
+        created = create_cloud_storage(client, base_url, url, None, None, None, None)
+    except InvalidArgument as exc:
+        raise InvalidArgument(
+            f"bucket {ref.bucket!r} needs keys: register it with create_cloud_storage(url, "
+            f"access_key_id, secret_access_key), then call create_task again ({exc})"
+        ) from None
+    return created.id, True
