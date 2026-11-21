@@ -54,6 +54,13 @@ class TaskOverview(BaseModel):
     total_objects: int
 
 
+def task_frames(meta, data_frames) -> list[int]:
+    """Task frame numbers (0-based) for data frame numbers, as CVAT stores GT frames;
+    `meta` is the task's data meta (start frame and frame filter)."""
+    step = int(meta.frame_filter.split("=")[1]) if meta.frame_filter.startswith("step=") else 1
+    return sorted((f - meta.start_frame) // step for f in data_frames)
+
+
 def jobs_of(task) -> list[JobInfo]:
     """The task's jobs in frame order (callers pick a job by frame)."""
     return [job_info(j) for j in sorted(task.get_jobs(), key=lambda j: j.start_frame)]

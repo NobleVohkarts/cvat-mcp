@@ -1,12 +1,8 @@
 import pytest
-from fakes import Obj, fake_client, fake_task, gt_job, shape, tag
+from fakes import Obj, fake_client, fake_task, gt_job, job_client, shape, tag
 
-from cvat_mcp.services.annotations import (
-    check_frame,
-    get_frame_annotations,
-    job_scope,
-    shape_bbox,
-)
+from cvat_mcp.services.annotations import check_frame, get_frame_annotations, shape_bbox
+from cvat_mcp.services.tasks import task_frames
 
 
 def test_shape_bbox_rectangle():
@@ -107,47 +103,43 @@ def test_polyline_and_points_have_points():
     assert [o.points for o in result.objects] == [[0, 0, 5, 5], [1, 1]]
 
 
-def _job_client(task, job):
-    return fake_client(task, jobs=Obj(retrieve=lambda _id: job))
-
-
-def _task_with_data_meta(shapes=(), start_frame=0, frame_filter=""):
-    task = fake_task(shapes)
-    frames = task.get_meta().frames
-    task.get_meta = lambda: Obj(frames=frames, start_frame=start_frame, frame_filter=frame_filter)
-    return task
-
-
 def test_job_annotations_of_a_gt_job():
-    task = _task_with_data_meta([shape(1, 1, 2, [0, 0, 5, 5])])
+    task = fake_task([shape(1, 1, 2, [0, 0, 5, 5])])
     job = gt_job([shape(2, 2, 2, [10, 10, 50, 50])])
-    result = get_frame_annotations(_job_client(task, job), 1, 2, job_id=30)
+    result = get_frame_annotations(job_client(task, job), 1, 2, job_id=30)
     assert [o.id for o in result.objects] == [2] and result.job_id == 30
 
 
 def test_job_frame_outside_gt_job():
-    task = _task_with_data_meta()
+    task = fake_task()
     with pytest.raises(ValueError, match="frame 1 is not in job 30.*0, 2"):
-        get_frame_annotations(_job_client(task, gt_job()), 1, 1, job_id=30)
+        get_frame_annotations(job_client(task, gt_job()), 1, 1, job_id=30)
 
 
 def test_job_of_another_task():
-    task = _task_with_data_meta()
+    task = fake_task()
     with pytest.raises(ValueError, match="belongs to task 9"):
-        get_frame_annotations(_job_client(task, gt_job(task_id=9)), 1, 2, job_id=30)
+        get_frame_annotations(job_client(task, gt_job(task_id=9)), 1, 2, job_id=30)
 
 
 def test_annotation_job_frames_are_its_range():
-    task = _task_with_data_meta()
+    task = fake_task()
     job = Obj(id=20, task_id=1, type="annotation", start_frame=20, stop_frame=39)
     with pytest.raises(ValueError, match="frame 5 is not in job 20"):
-        get_frame_annotations(_job_client(task, job), 1, 5, job_id=20)
+        get_frame_annotations(job_client(task, job), 1, 5, job_id=20)
 
 
-def test_job_scope_converts_gt_frames():
-    task = _task_with_data_meta(start_frame=10, frame_filter="step=2")
-    _, frames = job_scope(_job_client(task, gt_job(included=(10, 14))), task, 30)
-    assert frames == {0, 2}
+def test_task_frames_convert_data_frames():
+    meta = Obj(start_frame=10, frame_filter="step=2")
+    assert task_frames(meta, [14, 10]) == [0, 2]
+
+
+def test_gt_job_frames_are_task_frames():
+    # data frames 10, 14 of a task starting at data frame 10 with step 2 are task frames 0, 2
+    task = fake_task(start_frame=10, frame_filter="step=2")
+    client = job_client(task, gt_job(included=(10, 14)))
+    with pytest.raises(ValueError, match="its frames: 0, 2"):
+        get_frame_annotations(client, 1, 1, job_id=30)
 
 
 def test_without_job_id_nothing_changes():

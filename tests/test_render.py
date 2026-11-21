@@ -1,6 +1,6 @@
 import io
 
-from fakes import Obj, fake_client, fake_task, gt_job, shape
+from fakes import fake_client, fake_task, gt_job, job_client, shape
 from PIL import Image
 
 from cvat_mcp.render import (
@@ -150,10 +150,7 @@ def test_overlapping_fallback_caption_is_opaque():
 
 def test_render_frame_uses_the_job():
     task = fake_task([shape(1, 1, 0, [0, 0, 5, 5])], get_frame=_frame_png)
-    task.get_meta = lambda: Obj(
-        frames=[Obj(width=640, height=480)] * 40, start_frame=0, frame_filter=""
-    )
     job = gt_job([shape(2, 2, 0, [10, 10, 50, 50])], included=(0, 2))
-    client = fake_client(task, jobs=Obj(retrieve=lambda _id: job))
+    client = job_client(task, job)
     _, text = render_frame(client, 1, 0, 1280, job_id=30)
     assert "#2" in text and "#1 " not in text

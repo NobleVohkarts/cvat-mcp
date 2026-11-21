@@ -2,7 +2,7 @@ import json
 from unittest.mock import Mock
 
 import pytest
-from fakes import LABELS, Obj, fake_client, fake_task, gt_job, shape, tag
+from fakes import LABELS, Obj, fake_client, fake_task, gt_job, job_client, shape, tag
 
 from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.services.annotation_edits import (
@@ -16,6 +16,7 @@ from cvat_mcp.services.annotation_edits import (
     label_for,
     update_annotations,
 )
+from cvat_mcp.services.annotations import Scope
 
 CAR = LABELS[0]
 TAG_LABEL = Obj(id=3, name="night", type="tag", attributes=[])
@@ -122,12 +123,12 @@ def test_attribute_values_keep_current_and_drop_foreign():
 
 def test_check_editable_refuses_overlap():
     with pytest.raises(InvalidArgument, match="overlap"):
-        check_editable(fake_task(overlap=5))
+        check_editable(Scope(fake_task(overlap=5)))
 
 
 @pytest.mark.parametrize("overlap", [0, None])
 def test_check_editable_without_overlap(overlap):
-    check_editable(fake_task(overlap=overlap))
+    check_editable(Scope(fake_task(overlap=overlap)))
 
 
 JOBS = [
@@ -307,7 +308,7 @@ def test_overlap_task_refused(edit):
 
 def test_check_editable_refuses_gt_pool():
     with pytest.raises(InvalidArgument, match="ground-truth pool"):
-        check_editable(fake_task(validation_mode="gt_pool"))
+        check_editable(Scope(fake_task(validation_mode="gt_pool")))
 
 
 def test_update_refuses_skeleton_relabel():
@@ -376,11 +377,7 @@ def _gt_client(
         labels=(*LABELS, TAG_LABEL),
     )
     job = job or gt_job(gt_shapes)
-    client = fake_client(
-        task,
-        jobs=Obj(retrieve=lambda _id: job),
-        api_client=Obj(tasks_api=tasks_api, jobs_api=jobs_api),
-    )
+    client = job_client(task, job, api_client=Obj(tasks_api=tasks_api, jobs_api=jobs_api))
     return client, tasks_api, jobs_api
 
 

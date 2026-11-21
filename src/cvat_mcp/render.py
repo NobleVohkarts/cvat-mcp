@@ -5,7 +5,7 @@ import io
 from cvat_sdk import Client
 from PIL import Image, ImageColor, ImageDraw, ImageFont, ImageStat
 
-from cvat_mcp.services.annotations import FrameObject, frame_annotations, frame_source
+from cvat_mcp.services.annotations import FrameObject, frame_annotations, scope_of
 from cvat_mcp.services.tasks import clamp_limit
 
 FALLBACK_COLOR = "#ffffff"
@@ -118,7 +118,7 @@ def render_frame(
     """JPEGs of the frame with its annotations drawn (and, optionally, clean), and a legend."""
     task = client.tasks.retrieve(task_id)
     labels = task.get_labels()
-    data = frame_annotations(task, labels, frame, frame_source(client, task, frame, job_id))
+    data = frame_annotations(scope_of(client, task, job_id), labels, frame)
     colors = {label.name: label.color for label in labels if label.color}
     # "compressed" frames are EXIF-rotated like CVAT's coordinates, and smaller than originals.
     with Image.open(task.get_frame(frame, quality="compressed")) as image:

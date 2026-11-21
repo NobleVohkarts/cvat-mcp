@@ -6,8 +6,8 @@ from cvat_sdk.api_client import models
 from pydantic import BaseModel
 
 from cvat_mcp.errors import InvalidArgument
-from cvat_mcp.services.annotations import check_frame, task_frames
-from cvat_mcp.services.tasks import JobInfo, job_info
+from cvat_mcp.services.annotations import check_frame
+from cvat_mcp.services.tasks import JobInfo, job_info, task_frames
 from cvat_mcp.services.users import require_own, user_id
 
 logger = logging.getLogger("cvat_mcp")
@@ -81,7 +81,7 @@ def create_gt_job(
         return GtJob(job_id=created.id, task_id=task_id, frames=sorted(frames))
     try:
         meta, _ = jobs_api.retrieve_data_meta(created.id)
-        chosen = task_frames(task, meta.included_frames)
+        chosen = task_frames(task.get_meta(), meta.included_frames)
     except Exception:  # pylint: disable=broad-exception-caught
         # the job exists: failing now would make the model retry into "only one GT job"
         logger.warning("could not read the frames of new GT job %s", created.id, exc_info=True)

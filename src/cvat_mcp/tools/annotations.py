@@ -14,7 +14,8 @@ JobId = Annotated[
     int | None,
     Field(
         description="a job of the task: use its annotations instead of the task's; ground-truth "
-        "jobs (see get_task_overview) are only reachable this way, and frames must be the job's"
+        "jobs (see get_task_overview) are only reachable this way, and frames must be the job's. "
+        "Edit ground truth only when the user explicitly asks: annotators are measured against it"
     ),
 ]
 
@@ -27,8 +28,7 @@ def get_frame_annotations(
     pixels (plus points for polygons, polylines and points), attributes and source, and the frame's tags.
     Shape and tag ids are separate: a shape and a tag can share a number. Use render_frame to see
     the frame; use these ids and boxes for create_issue, update_annotations and
-    delete_annotations. With job_id, the job's annotations (e.g. ground truth) instead of the
-    task's."""
+    delete_annotations."""
     return annotations.get_frame_annotations(get_client(ctx), task_id, frame, job_id)
 
 
@@ -46,7 +46,7 @@ def render_frame(
     in original pixels. Check visually for missing objects, wrong labels and boxes that miss
     their object. Set include_clean=True for crowded frames: you also get the same frame
     without annotations, so nothing is hidden under captions. Use get_frame_annotations for
-    attributes. With job_id, the job's annotations (e.g. ground truth) are drawn."""
+    attributes."""
     jpegs, text = render.render_frame(
         get_client(ctx), task_id, frame, max_side, include_clean, job_id
     )
@@ -65,9 +65,7 @@ def create_annotations(
     polylines and points by flat points, or frame tags, with a label of the task and optional
     attributes. Every object is checked first; then all are added in one step, or none. Returns
     the new ids and a CVAT UI link (an id of null means the object was added but its id could not
-    be matched: do not retry, use get_frame_annotations). Render the frame again to check.
-    Pass job_id of a ground-truth job to edit ground truth, only when the user explicitly asks:
-    annotators are measured against it."""
+    be matched: do not retry, use get_frame_annotations). Render the frame again to check."""
     return annotation_edits.create_annotations(
         get_client(ctx), settings.url, task_id, objects, job_id
     )
@@ -84,9 +82,7 @@ def update_annotations(
     label, the box (rectangles) or points (polygons, polylines, points), attributes (merged into
     the current values) or occluded, giving only what changes. Ids come from
     get_frame_annotations; set kind="tag" for a tag id. All changes apply in one step, or none.
-    Tracks are read-only here.
-    Pass job_id of a ground-truth job to edit ground truth, only when the user explicitly asks:
-    annotators are measured against it."""
+    Tracks are read-only here."""
     return annotation_edits.update_annotations(get_client(ctx), task_id, objects, job_id)
 
 
@@ -101,9 +97,7 @@ def delete_annotations(
     """Use to remove wrong objects (e.g. a duplicate or a box around nothing), only when the user
     asks to fix annotations. Deletes exactly the given ids, all or none: shape ids and tag ids
     are separate (a shape and a tag can share a number), so pass each in its own list. Ids come
-    from get_frame_annotations; unknown ids are refused and nothing is deleted.
-    Pass job_id of a ground-truth job to edit ground truth, only when the user explicitly asks:
-    annotators are measured against it."""
+    from get_frame_annotations; unknown ids are refused and nothing is deleted."""
     return annotation_edits.delete_annotations(
         get_client(ctx), task_id, shape_ids or [], tag_ids or [], job_id
     )
