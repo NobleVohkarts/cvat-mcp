@@ -12,9 +12,11 @@ from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, Re
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp.types import ToolAnnotations
+from mcp.shared.exceptions import MCPError
+from mcp.types import INVALID_PARAMS, ToolAnnotations
 from urllib3.exceptions import HTTPError
 
+from cvat_mcp import __version__
 from cvat_mcp.auth import SCOPE, CvatOAuthProvider, cvat_login_username
 from cvat_mcp.config import Settings
 from cvat_mcp.errors import explain
@@ -108,8 +110,43 @@ if HTTP_MODE:
         required_scopes=[SCOPE],
         validate_token_resource=False,  # this issuer only mints tokens for this one server
     )
+
+
+async def reject_unknown_arguments(ctx, call_next):
+    """mcp drops unknown tool arguments silently; a client with a stale tool list would then
+    never learn that its call didn't do what it asked. Refuse them with the valid names.
+
+    Raised as JSON-RPC invalid params (what the MCP spec calls invalid arguments): mcp's runner
+    shapes errors for every protocol version, which a result built here would bypass.
+    """
+    params = ctx.params if isinstance(ctx.params, dict) else {}
+    arguments = params.get("arguments")
+    if ctx.method == "tools/call" and isinstance(arguments, dict):  # else mcp validates
+        name = params.get("name")
+        # list_tools() is public; mcp's by-name lookup is private, and this costs microseconds
+        tool = next((t for t in await mcp.list_tools() if t.name == name), None)
+        valid = set(tool.input_schema.get("properties", {})) if tool else set()
+        unknown = sorted(set(arguments) - valid)
+        if tool and unknown:
+            takes = f"valid: {', '.join(sorted(valid))}" if valid else "it takes no arguments"
+            raise MCPError(
+                code=INVALID_PARAMS,
+                message=(
+                    f"unknown argument(s) {', '.join(unknown)} for {name}; {takes}. "
+                    "Your tool list may be out of date: reconnect the connector to refresh it."
+                ),
+            )
+    return await call_next(ctx)
+
+
 mcp = MCPServer(
-    "cvat", instructions=INSTRUCTIONS, lifespan=lifespan, auth_server_provider=oauth, auth=auth
+    "cvat",
+    version=__version__,
+    instructions=INSTRUCTIONS,
+    lifespan=lifespan,
+    auth_server_provider=oauth,
+    auth=auth,
+    middleware=[reject_unknown_arguments],
 )
 if oauth is not None:
     mcp.custom_route("/login", ["GET"])(oauth.login_form)

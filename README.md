@@ -34,7 +34,7 @@ instructions tell the model so, and it points the user to the CVAT UI.
 | **Asynchrony stays inside.** Tools wait for CVAT background work themselves. | `export_dataset` returns only when CVAT's background export (`202` + `rq_id`) is done and downloaded (`services/exports.py`) |
 | **Protect the model's context.** `limit` + `total`, summaries instead of raw data, pydantic responses with only the needed fields, images downscaled to `max_side` and sent as JPEG. | `services/*.py` models, `render.py` |
 | **Security.** What isn't in the mode isn't registered; `ToolAnnotations` hints; Personal Access Token only (the server never stores or acts with a password); file paths only inside `CVAT_MCP_WORKDIR`; the token is never logged or returned. | `server.tool()`; `config.resolve_in_workdir` (used by `export_dataset`); remote access: `auth.py` |
-| **Errors are written for the model.** 401/403/404/400 and argument mistakes become one-line hints with the next step. mcp shows only `ToolError` text, so every tool is wrapped. | `errors.explain`, `server.tool_errors` |
+| **Errors are written for the model.** 401/403/404/400 and argument mistakes become one-line hints with the next step. mcp shows only `ToolError` text, so every tool is wrapped. | `errors.explain`, `server.tool_errors`, `server.reject_unknown_arguments` |
 | **The server gives the model eyes, the model judges.** No heuristic checks on the server; rendering and facts only. | `render.py`, `services/annotations.py` |
 
 ## Architecture
@@ -136,6 +136,9 @@ How it is protected:
 - **Brute force:** about 1 s delay per failed login; 10 failures lock logins for 10 minutes.
 - **Bound to 127.0.0.1;** the tunnel is the only way in. The login page sends a strict CSP that
   allows the form to post to the server and to the client's callback only.
+
+Agent says a tool lacks a documented option? claude.ai has a stale tool list: remove and re-add
+the connector (a refresh isn't enough). `server_info` reports `cvat_mcp_version`.
 
 Limits: the quick-tunnel URL is new every time the script starts (re-add the connector then);
 tokens live in memory, so after a server restart claude.ai asks you to **Connect** again (the

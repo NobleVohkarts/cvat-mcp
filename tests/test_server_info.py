@@ -1,6 +1,7 @@
 from cvat_sdk.api_client.exceptions import ApiException
 from cvat_sdk.core.exceptions import IncompatibleVersionException
 
+from cvat_mcp import __version__
 from cvat_mcp.services.server_info import check_compatibility, get_server_info
 
 
@@ -43,4 +44,5 @@ def test_server_info_survives_unreachable_about_endpoint():
     client = Broken(IncompatibleVersionException("Failed to retrieve server API version"))
     info = get_server_info(client, "read-only", ["server_info"])
     assert info.server_version == "unknown"
+    assert info.cvat_mcp_version == __version__
     assert info.compatible is False
