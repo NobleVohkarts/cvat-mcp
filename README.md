@@ -21,7 +21,7 @@ reports each problem as a CVAT issue on the right frame of the right job.
 | `render_frame` | both | Look at a frame: JPEG with every box and a semi-transparent `#id label` caption drawn, plus a legend with exact boxes in original pixels. `include_clean=True` adds the same frame without annotations, for crowded frames. |
 | `get_frame_annotations` | both | Get exact data for one frame's objects and tags: id, label, type, box (plus points for polygons, polylines and points), attributes, source. |
 | `export_dataset` | both | Save a task as a dataset file in a CVAT format (e.g. `COCO 1.0`) inside `CVAT_MCP_WORKDIR`; waits for CVAT's background export, never overwrites. |
-| `create_report` | both | Measure a task's annotation jobs against its ground-truth job (CVAT quality control): waits for a fresh report, returns counts, scores and conflicts by frame with the shape ids involved. |
+| `create_report` | both | Measure a task's annotation jobs against its ground-truth job (CVAT quality control): waits for a fresh report, returns counts, scores and conflicts by frame with the ids involved; needs a token that can write. |
 | `list_issues` | both | See the issues already filed on a task or one frame: message, position, author, resolved, replies, and `own` (filed under the token's CVAT account). |
 | `create_issue` | **write** | Report one problem to the annotator: an issue on a frame of a job, at an object's box or a given region. |
 | `delete_issue` | **write** | Remove one of the token account's own issues (with its comments), e.g. to rewrite issues: list → create the new → delete the old. |

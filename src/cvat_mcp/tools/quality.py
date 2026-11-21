@@ -20,7 +20,9 @@ def create_report(
     scores and up to max_conflicts conflicts by frame. The GT job must hold the reference
     annotations in the same shape type as the jobs (a COCO file with segmentation imports as
     polygons), and the task's quality settings must enable a requirement for that type (CVAT
-    starts with all disabled; the error says how to enable one). shape_ids are ids from
-    get_frame_annotations; gt_shape_ids are inside the GT job, which render_frame does not draw.
-    Creates a report record in CVAT; never changes annotations."""
+    starts with all disabled; the error says how to enable one). A score null with status
+    "not_computed" means nothing was compared. ids are the jobs' objects with their kind (shape,
+    tag or track; get_frame_annotations shows shapes and tags); gt_ids are inside the GT job,
+    which render_frame does not draw. Creates a report record in CVAT (so the token must allow
+    writes, even in read-only mode); never changes annotations."""
     return quality.create_report(get_client(ctx), settings.url, task_id, max_conflicts)
