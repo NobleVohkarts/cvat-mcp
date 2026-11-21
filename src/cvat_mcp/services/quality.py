@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.services.issues import job_url
+from cvat_mcp.services.quality_settings import settings_state
 
 
 class Ref(BaseModel):
@@ -69,11 +70,18 @@ def create_report(client: Client, base_url: str, task_id: int, max_conflicts: in
     requirements = getattr(summary, "requirements", None)  # optional in CVAT's summary
     if requirements is not None and requirements.enabled == 0:
         # CVAT starts with every requirement disabled; such a report compares nothing
+        state = settings_state(client, task)
+        where = (
+            f"uses project #{state.project_id}'s settings"
+            if state.source == "project"
+            else "uses its own settings"
+        )
+        names = ", ".join(f"{r.name} ({r.annotation_type})" for r in state.requirements)
         raise InvalidArgument(
-            f"no quality requirement is enabled for task {task_id}, so CVAT compared nothing: "
-            "in the CVAT UI open the task's Quality control > Settings and enable the "
-            "requirement for the GT shapes' type (e.g. 'Base rectangle' for boxes; in the "
-            "project's settings if the task inherits them), then call create_report again"
+            f"no quality requirement is enabled for task {task_id} (it {where}: {names}), so "
+            "CVAT compared nothing: switch on the one for the GT shapes' type with "
+            "update_quality_settings (write mode) or in the CVAT UI (Quality control > "
+            "Settings), then call create_report again"
         )
 
     conflicts, truncated = [], summary.conflict_count > 0

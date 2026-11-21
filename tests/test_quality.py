@@ -39,6 +39,18 @@ def _summary(conflict_count=2, score=0.5, enabled=1):
     )
 
 
+def _list_settings(task_id=None, project_id=None, **_):
+    reqs = [
+        Obj(id=1, name="Base tag", annotation_type="tag", enabled=False),
+        Obj(id=2, name="Base rectangle", annotation_type="rectangle", enabled=False),
+    ]
+    task = Obj(id=30, task_id=1, project_id=None, inherit=True, requirements=reqs)
+    if task_id is not None:
+        return Obj(results=[task]), None
+    project = Obj(id=18, task_id=None, project_id=9, inherit=True, requirements=reqs)
+    return Obj(results=[project, task]), None
+
+
 def _client(conflicts=(), jobs=JOBS, summary=None, organization=None, count=None):
     report = Obj(id=9, created_date=datetime(2026, 11, 21), summary=summary or _summary())
     quality_api = Obj(
@@ -50,9 +62,10 @@ def _client(conflicts=(), jobs=JOBS, summary=None, organization=None, count=None
                 None,
             )
         ),
+        list_settings=Mock(side_effect=_list_settings),
     )
     return fake_client(
-        fake_task(jobs=jobs, organization=organization),
+        fake_task(jobs=jobs, organization=organization, project_id=9),
         api_client=Obj(quality_api=quality_api),
         wait_for_completion=Mock(return_value=(Obj(result_id=9), None)),
     )
@@ -158,8 +171,13 @@ def test_conflicts_org_context(organization, org_args):
 def test_no_enabled_requirement_refused():
     # CVAT starts every quality requirement disabled; then a report compares nothing
     client = _client(summary=_summary(conflict_count=0, enabled=0))
-    with pytest.raises(InvalidArgument, match="no quality requirement is enabled.*Base rectangle"):
+    with pytest.raises(InvalidArgument, match="no quality requirement is enabled") as refused:
         create_report(client, "http://cvat", 1, 100)
+    message = str(refused.value)
+    # the state the agent needs to decide: where the settings live and what exists
+    assert "uses project #9's settings" in message
+    assert "Base rectangle (rectangle)" in message
+    assert "update_quality_settings" in message
     client.api_client.quality_api.list_conflicts.assert_not_called()
 
 

@@ -78,6 +78,8 @@ if WRITE_MODE:
         "removes only ground-truth jobs of tasks owned by this server's CVAT account. "
         "Ground-truth annotations: pass job_id of the ground-truth job to the annotation tools; "
         "edit ground truth only when the user explicitly asks"
+        "; switch quality requirements on (update_quality_settings) only when the user asks or "
+        "create_report says nothing is enabled and the user wants the report"
     )
     READ_ONLY_NOTE = ""
 else:

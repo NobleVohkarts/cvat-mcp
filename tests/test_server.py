@@ -86,6 +86,7 @@ def test_write_mode_adds_write_tools(monkeypatch):
         "delete_task",
         "update_annotations",
         "update_job",
+        "update_quality_settings",
         "update_task",
     ]
     assert result["tools"] == sorted(READ_TOOLS + write_tools)
@@ -100,6 +101,7 @@ def test_write_mode_adds_write_tools(monkeypatch):
         "delete_task",
     ]
     assert "update_job" in result["instructions"]
+    assert "update_quality_settings" in result["instructions"]
     assert "ground-truth jobs of tasks owned by" in result["instructions"]
     assert "call create_report, then\nrender_frame the conflict frames" in result["instructions"]
     assert "job_id of the ground-truth job to see the ground truth" in result["instructions"]
