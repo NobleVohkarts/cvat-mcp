@@ -1,4 +1,5 @@
 import logging
+from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Literal
@@ -19,6 +20,7 @@ from cvat_mcp.services.tasks import JobInfo, jobs_of
 logger = logging.getLogger("cvat_mcp")
 
 DEFAULT_VALUES = {"checkbox": ["false"], "text": [""]}
+MAX_FILES = 1000
 
 
 class AttributeSpec(BaseModel):
@@ -69,16 +71,17 @@ def label_requests(
     existing, seen = set(existing), set()
     requests = []
     for spec in specs:
-        if not spec.name.strip():
+        name = spec.name.strip()  # "car " next to "car" would look like one label
+        if not name:
             raise InvalidArgument("a label name must not be empty")
-        if spec.name in existing:
-            raise InvalidArgument(f"the task already has a label {spec.name!r}")
-        if spec.name in seen:
-            raise InvalidArgument(f"label {spec.name!r} is listed twice")
-        seen.add(spec.name)
+        if name in existing:
+            raise InvalidArgument(f"the task already has a label {name!r}")
+        if name in seen:
+            raise InvalidArgument(f"label {name!r} is listed twice")
+        seen.add(name)
         requests.append(
             models.PatchedLabelRequest(
-                name=spec.name,
+                name=name,
                 type=spec.type,
                 attributes=[_attribute_request(a) for a in spec.attributes],
             )
@@ -94,13 +97,23 @@ class CreatedTask(BaseModel):
     url: str
 
 
+def _listed(directory: Path, workdir: Path) -> list[Path]:
+    """A directory's files, recursively and sorted, without hidden ones (.DS_Store, .git/...)."""
+    found = []
+    for p in sorted(directory.rglob("*")):
+        if any(part.startswith(".") for part in p.relative_to(directory).parts) or not p.is_file():
+            continue
+        found.append(resolve_in_workdir(workdir, p))  # a symlink may point out of the workdir
+    return found
+
+
 def resolve_files(workdir: Path, files: list[str]) -> list[Path]:
     """Files inside the workdir; a directory stands for its files, recursively and sorted."""
     resolved = []
     for name in files:
         path = resolve_in_workdir(workdir, name)
         if path.is_dir():
-            found = sorted(p for p in path.rglob("*") if p.is_file())
+            found = _listed(path, workdir)
             if not found:
                 raise InvalidArgument(f"directory {name!r} has no files")
             resolved += found
@@ -108,6 +121,15 @@ def resolve_files(workdir: Path, files: list[str]) -> list[Path]:
             resolved.append(path)
         else:
             raise InvalidArgument(f"no such file in the work directory: {name!r}")
+    if len(resolved) > MAX_FILES:
+        raise InvalidArgument(f"that is {len(resolved)} files; a task takes at most {MAX_FILES}")
+    # CVAT stores uploads by bare file name: same-named files would be merged into one.
+    twins = sorted(n for n, count in Counter(p.name for p in resolved).items() if count > 1)
+    if twins:
+        raise InvalidArgument(
+            f"several files are named {', '.join(twins)}; CVAT keeps only file names, "
+            "so rename them or create one task per folder"
+        )
     return resolved
 
 
@@ -210,14 +232,21 @@ def update_task(
         raise InvalidArgument("nothing to change: pass name, assignee, project_id or add_labels")
     if name is not None and not name.strip():
         raise InvalidArgument("the task name must not be empty")
+    if project_id is not None and (name is not None or assignee is not None or add_labels):
+        # CVAT applies only the move when project_id is in the same request
+        raise InvalidArgument("pass project_id alone; change the other fields in another call")
     changes = {k: v for k, v in {"name": name, "project_id": project_id}.items() if v is not None}
     if add_labels:
         # Labels are only added: removing one deletes its annotations.
         changes["labels"] = label_requests(add_labels)  # checks that need no requests first
     task = client.tasks.retrieve(task_id)
-    labels = [l.name for l in task.get_labels()]
+    if add_labels and task.project_id is not None:
+        raise InvalidArgument(
+            f"task {task_id} uses the labels of project {task.project_id}; add labels to the "
+            "project in the CVAT UI"
+        )
     if add_labels:
-        label_requests(add_labels, labels)  # names new to the task
+        label_requests(add_labels, [l.name for l in task.get_labels()])  # names new to the task
     if assignee is not None:
         changes["assignee_id"] = _user_id(client, assignee)
     task.update(models.PatchedTaskWriteRequest(**changes))
@@ -226,7 +255,7 @@ def update_task(
         name=task.name,
         project_id=task.project_id,
         assignee=task.assignee.username if task.assignee else None,
-        labels=labels + [s.name for s in add_labels or []],
+        labels=[l.name for l in task.get_labels()],  # what CVAT kept, not what was asked
     )
 
 

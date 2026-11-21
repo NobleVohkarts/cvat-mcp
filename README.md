@@ -37,10 +37,10 @@ geometry) before it writes, then applies the whole list in one CVAT request, or 
 take explicit ids only; the SDK's `remove_annotations()`, which deletes everything when given an
 empty list, is never used. Tracks, ground-truth annotations and tasks with overlapping jobs stay
 read-only here. Tasks can be created and edited; `delete_task` and `delete_issue` are limited to
-what the token's CVAT account owns. Deleting or changing jobs is not available yet; the model
-points the user to the CVAT UI. `delete_issue` is limited to issues filed under the token's CVAT account; anyone else's
-issues stay untouched. Issues you filed in the UI with that same account count as its own, so give the server
-a token of a separate reviewer account if those must be protected too.
+what the token's CVAT account owns, so anyone else's tasks and issues stay untouched. Deleting or
+changing jobs is not available yet; the model points the user to the CVAT UI. Tasks and issues
+you created in the UI with that same account count as its own, so give the server a token of a
+separate reviewer account if those must be protected too.
 
 ## Design
 

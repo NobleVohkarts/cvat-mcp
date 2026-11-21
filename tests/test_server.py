@@ -26,9 +26,12 @@ READ_TOOLS = [
 ]
 LIST_TOOLS = """
 import anyio, json, cvat_mcp.server as s, cvat_mcp.tools
-destructive = [t.name for t in anyio.run(s.mcp.list_tools) if t.annotations.destructive_hint]
+tools = anyio.run(s.mcp.list_tools)
+destructive = [t.name for t in tools if t.annotations.destructive_hint]
+open_world = [t.name for t in tools if t.annotations.open_world_hint]
 print(json.dumps({
-    "tools": sorted(s.REGISTERED_TOOLS), "instructions": s.INSTRUCTIONS, "destructive": destructive
+    "tools": sorted(s.REGISTERED_TOOLS), "instructions": s.INSTRUCTIONS, "destructive": destructive,
+    "open_world": open_world
 }))
 """
 
@@ -90,6 +93,7 @@ def test_write_mode_adds_write_tools(monkeypatch):
     assert sorted(result["destructive"]) == ["delete_annotations", "delete_issue", "delete_task"]
     assert "create_task" in result["instructions"]
     assert "only tasks owned by" in result["instructions"]
+    assert result["open_world"] == ["create_task"]  # urls make CVAT fetch from any host
     assert "disabled" not in result["instructions"]
     assert "Deleting or changing tasks, jobs and annotations" not in result["instructions"]
     assert "Deleting or changing jobs is not available" in result["instructions"]

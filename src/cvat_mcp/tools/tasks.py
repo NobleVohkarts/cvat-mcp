@@ -5,10 +5,10 @@ from pydantic import Field
 
 from cvat_mcp.server import get_client, settings, tool
 from cvat_mcp.services import task_edits, tasks
-from cvat_mcp.services.task_edits import CreatedTask, DeletedTask, LabelSpec, UpdatedTask
+from cvat_mcp.services.task_edits import MAX_FILES, CreatedTask, DeletedTask, LabelSpec, UpdatedTask
 from cvat_mcp.services.tasks import TaskList, TaskOverview
 
-Paths = Annotated[list[str], Field(min_length=1, max_length=1000)]
+Paths = Annotated[list[str], Field(min_length=1, max_length=MAX_FILES)]
 
 
 @tool()
@@ -31,7 +31,8 @@ def get_task_overview(ctx: Context, task_id: int) -> TaskOverview:
     return tasks.get_task_overview(get_client(ctx), task_id)
 
 
-@tool(write=True)
+# open world: with urls, CVAT downloads from any host
+@tool(write=True, open_world_hint=True)
 def create_task(
     ctx: Context,
     name: str,
@@ -42,7 +43,8 @@ def create_task(
     segment_size: int | None = None,
 ) -> CreatedTask:
     """Use to create a task, only when the user asks: images from files or folders inside the
-    server's work directory (folders expand in natural order) or from http(s) URLs, with labels
+    server's work directory (folders expand recursively, hidden files skipped; all images are
+    sorted by name in natural order, file names must be unique) or from http(s) URLs, with labels
     given inline or taken from a project (project_id). Waits until CVAT has processed the data;
     if the upload fails, no task is left behind. Returns the task id, frame count, jobs and a
     CVAT UI link."""
@@ -69,8 +71,9 @@ def update_task(
     add_labels: list[LabelSpec] | None = None,
 ) -> UpdatedTask:
     """Use to rename a task, assign it (a CVAT username; "" unassigns), move it into a project
-    or add labels, only when the user asks. Give only what changes. Labels can be added, never
-    removed here (removing a label deletes its annotations)."""
+    or add labels, only when the user asks. Give only what changes; a project move goes alone in
+    its own call. Labels can be added to tasks outside a project, never removed here (removing a
+    label deletes its annotations)."""
     return task_edits.update_task(get_client(ctx), task_id, name, assignee, project_id, add_labels)
 
 

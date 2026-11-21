@@ -12,6 +12,7 @@ from cvat_mcp.services.task_edits import (
     create_task,
     delete_task,
     label_requests,
+    resolve_files,
     update_task,
 )
 
@@ -254,3 +255,71 @@ def test_delete_refuses_foreign_or_ownerless(owner, match):
     with pytest.raises(InvalidArgument, match=match):
         delete_task(client, 5)
     task.remove.assert_not_called()
+
+
+def test_label_names_are_stripped():
+    (label,) = label_requests([LabelSpec(name=" bus ")])
+    assert label.name == "bus"
+    with pytest.raises(InvalidArgument, match="already has"):
+        label_requests([LabelSpec(name="car ")], ["car"])
+
+
+def test_resolve_files_refuses_a_symlink_out_of_the_workdir(tmp_path):
+    outside = tmp_path / "secret.txt"
+    outside.write_text("key")
+    workdir = tmp_path / "work"
+    (workdir / "d").mkdir(parents=True)
+    (workdir / "d" / "ok.jpg").write_bytes(b"x")
+    (workdir / "d" / "link.jpg").symlink_to(outside)
+    with pytest.raises(InvalidArgument, match="CVAT_MCP_WORKDIR"):
+        resolve_files(workdir, ["d"])
+
+
+def test_resolve_files_skips_hidden_files(tmp_path):
+    (tmp_path / "d" / ".cache").mkdir(parents=True)
+    for name in ("d/1.jpg", "d/.DS_Store", "d/.cache/x.jpg"):
+        (tmp_path / name).write_bytes(b"x")
+    assert resolve_files(tmp_path, ["d"]) == [tmp_path / "d/1.jpg"]
+
+
+def test_resolve_files_refuses_duplicate_names(tmp_path):
+    for name in ("d/cam1/0001.jpg", "d/cam2/0001.jpg"):
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_bytes(b"x")
+    with pytest.raises(InvalidArgument, match="0001.jpg"):
+        resolve_files(tmp_path, ["d"])
+
+
+def test_resolve_files_limits_the_expanded_count(tmp_path, monkeypatch):
+    monkeypatch.setattr("cvat_mcp.services.task_edits.MAX_FILES", 2)
+    for i in range(3):
+        (tmp_path / "d").mkdir(exist_ok=True)
+        (tmp_path / "d" / f"{i}.jpg").write_bytes(b"x")
+    with pytest.raises(InvalidArgument, match="3 files"):
+        resolve_files(tmp_path, ["d"])
+
+
+@pytest.mark.parametrize(
+    "kw", [{"name": "New", "project_id": 3}, {"assignee": "", "project_id": 3}]
+)
+def test_update_refuses_project_move_with_other_changes(kw):
+    client, task = _task_client()
+    with pytest.raises(InvalidArgument, match="project_id alone"):
+        _update(client, **kw)
+    task.update.assert_not_called()
+
+
+def test_update_refuses_labels_for_a_task_in_a_project():
+    client, task = _task_client()
+    task.project_id = 3
+    with pytest.raises(InvalidArgument, match="project"):
+        _update(client, add_labels=[LabelSpec(name="bus")])
+    task.update.assert_not_called()
+
+
+def test_update_reports_labels_read_back():
+    client, task = _task_client()
+    labels = iter([[CAR_LABEL], [CAR_LABEL]])  # CVAT kept only car
+    task.get_labels = lambda: next(labels)
+    result = _update(client, add_labels=[LabelSpec(name="bus")])
+    assert result.labels == ["car"]
