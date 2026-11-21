@@ -143,9 +143,10 @@ def _crud_client(storages=(), tasks=()):
     client = _client(
         storages,
         users=Obj(retrieve_current_user=lambda: ME),
-        tasks=Obj(list=lambda: list(tasks)),
+        tasks=Obj(list=lambda **_: list(tasks)),
     )
     api = client.api_client.cloudstorages_api
+    api.partial_update.side_effect = lambda id, **_: api.retrieve(id)
 
     def create(request):
         sent = request.to_dict()
@@ -232,7 +233,7 @@ def test_error_never_contains_keys():
     refused = ApiException(status=400)
     refused.body = b'{"secret_key": "SK is invalid", "key": "AK"}'
     api.create.side_effect = refused
-    with pytest.raises(InvalidArgument, match="CVAT refused") as error:
+    with pytest.raises(InvalidArgument, match="CVAT rejected the request") as error:
         create_cloud_storage(client, BASE, f"{R2}/cvat/", "AK", "SK", None, None)
     message = str(error.value)
     assert "AK" not in message and "SK" not in message and "***" in message

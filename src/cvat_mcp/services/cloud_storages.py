@@ -8,8 +8,9 @@ from cvat_sdk.api_client import models
 from cvat_sdk.api_client.exceptions import ApiException
 from pydantic import BaseModel
 
-from cvat_mcp.errors import InvalidArgument
-from cvat_mcp.services.users import require_own
+from cvat_mcp.errors import InvalidArgument, explain
+from cvat_mcp.services.tasks import clamp_limit
+from cvat_mcp.services.users import is_own, require_own
 
 S3 = "AWS_S3_BUCKET"
 NOT_S3 = (
@@ -42,7 +43,7 @@ def parse_bucket_url(url: str) -> BucketRef:
     path = unquote(parts.path).lstrip("/")
     endpoint, region = None, None
     if parts.scheme == "s3":
-        bucket, _, key = f"{host}/{path}".partition("/") if host else ("", "", "")
+        bucket, key = host, path
     elif m := AWS_VIRTUAL.match(host):
         bucket, key, region = m["bucket"], path, m["region"]
     else:
@@ -104,11 +105,15 @@ def _matches(storage, ref: BucketRef, whole_bucket: bool) -> bool:
     )
 
 
-def find_storage(client: Client, ref: BucketRef, owner_id: int, *, whole_bucket: bool = False):
+def find_storage(
+    client: Client, ref: BucketRef, owner_id: int | None, *, whole_bucket: bool = False
+):
     """The CVAT storage serving this bucket and key: our own first, then the oldest."""
-    page, _ = client.api_client.cloudstorages_api.list(resource=ref.bucket, page_size=100)
+    page, _ = client.api_client.cloudstorages_api.list(
+        resource=ref.bucket, provider_type=S3, page_size=100
+    )
     found = [s for s in page.results if _matches(s, ref, whole_bucket)]
-    return min(found, key=lambda s: (s.owner is None or s.owner.id != owner_id, s.id), default=None)
+    return min(found, key=lambda s: (not is_own(s, owner_id), s.id), default=None)
 
 
 class CloudStorageList(BaseModel):
@@ -130,7 +135,7 @@ def list_cloud_storages(
 ) -> CloudStorageList:
     kwargs = {"search": search} if search else {}
     page, _ = client.api_client.cloudstorages_api.list(
-        sort="-id", page_size=max(1, min(limit, 100)), **kwargs
+        sort="-id", page_size=clamp_limit(limit), **kwargs
     )
     return CloudStorageList(
         storages=[storage_info(s, base_url) for s in page.results], total=page.count
@@ -153,23 +158,17 @@ def _credentials(access_key_id: str | None, secret_access_key: str | None) -> di
     }
 
 
-def _scrubbed(text: str, *secrets: str | None) -> str:
-    for secret in secrets:
-        if secret:
-            text = text.replace(secret, "***")
-    return text
-
-
 def _sent(call, *secrets: str | None):
     """Run a create/update request; CVAT's refusal comes back without the keys in it."""
     try:
         return call()
     except ApiException as exc:
         if exc.status != 400:
-            raise
-        body = exc.body.decode(errors="replace") if isinstance(exc.body, bytes) else exc.body
-        reason = _scrubbed(body or exc.reason or "", *secrets)
-        raise InvalidArgument(f"CVAT refused the storage: {reason[:300]}") from None
+            raise  # explain() shows no body for these
+        message = explain(exc)
+        for secret in filter(None, secrets):
+            message = message.replace(secret, "***")
+        raise InvalidArgument(message) from None  # no chained exception carrying the body
 
 
 def _with_status(client: Client, storage, base_url: str) -> CloudStorageStatus:
@@ -201,10 +200,7 @@ def create_cloud_storage(
     credentials = _credentials(access_key_id, secret_access_key) or {
         "credentials_type": models.CredentialsTypeEnum("ANONYMOUS_ACCESS")
     }
-    if display_name is not None and not display_name.strip():
-        raise InvalidArgument("the display name must not be empty")
-    me = client.users.retrieve_current_user()
-    if existing := find_storage(client, ref, me.id, whole_bucket=True):
+    if existing := find_storage(client, ref, None, whole_bucket=True):
         raise InvalidArgument(
             f"bucket {ref.bucket!r} is already registered as cloud storage #{existing.id}: use "
             "it, or change its keys with update_cloud_storage"
@@ -213,7 +209,7 @@ def create_cloud_storage(
     request = models.CloudStorageWriteRequest(
         provider_type=models.ProviderTypeEnum(S3),
         resource=ref.bucket,
-        display_name=(display_name or f"{ref.bucket} ({_label(ref)})")[:63],  # CVAT's limit
+        display_name=display_name or f"{ref.bucket} ({_label(ref)})"[:63],  # CVAT's limit
         specific_attributes="&".join(f"{k}={v}" for k, v in attrs.items() if v),
         **credentials,
     )
@@ -232,19 +228,16 @@ def update_cloud_storage(
 ) -> CloudStorageStatus:
     changes = _credentials(access_key_id, secret_access_key)
     if display_name is not None:
-        if not display_name.strip():
-            raise InvalidArgument("the display name must not be empty")
-        changes["display_name"] = display_name[:63]
+        changes["display_name"] = display_name
     if not changes:
         raise InvalidArgument("nothing to change: pass display_name or both keys")
     api = client.api_client.cloudstorages_api
     request = models.PatchedCloudStorageWriteRequest(**changes)
-    _sent(
+    storage, _ = _sent(
         lambda: api.partial_update(cloud_storage_id, patched_cloud_storage_write_request=request),
         access_key_id,
         secret_access_key,
     )
-    storage, _ = api.retrieve(cloud_storage_id)
     return _with_status(client, storage, base_url)
 
 
@@ -254,7 +247,8 @@ def delete_cloud_storage(client: Client, cloud_storage_id: int) -> DeletedCloudS
     storage, _ = api.retrieve(cloud_storage_id)
     require_own(client, storage, f"cloud storage #{cloud_storage_id}")
     # shortcut: scans all tasks, upgrade if CVAT adds a data_cloud_storage_id filter
-    users = [t.id for t in client.tasks.list() if t.data_cloud_storage_id == cloud_storage_id]
+    tasks = client.tasks.list(page_size=500)  # CVAT's maximum; its default is 10
+    users = [t.id for t in tasks if t.data_cloud_storage_id == cloud_storage_id]
     if users:
         listed = ", ".join(f"task {i}" for i in users)
         raise InvalidArgument(

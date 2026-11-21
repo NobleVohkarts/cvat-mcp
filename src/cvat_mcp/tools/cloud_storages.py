@@ -1,4 +1,7 @@
+from typing import Annotated
+
 from mcp.server.mcpserver import Context
+from pydantic import Field
 
 from cvat_mcp.server import get_client, settings, tool
 from cvat_mcp.services import cloud_storages
@@ -7,6 +10,8 @@ from cvat_mcp.services.cloud_storages import (
     CloudStorageStatus,
     DeletedCloudStorage,
 )
+
+DisplayName = Annotated[str, Field(min_length=1, max_length=63, pattern=r"\S")]  # CVAT's limit
 
 
 @tool()
@@ -26,7 +31,7 @@ def create_cloud_storage(
     url: str,
     access_key_id: str | None = None,
     secret_access_key: str | None = None,
-    display_name: str | None = None,
+    display_name: DisplayName | None = None,
     region: str | None = None,
 ) -> CloudStorageStatus:
     """Use to register an S3-compatible bucket (AWS S3, Cloudflare R2, MinIO) in CVAT, only
@@ -51,7 +56,7 @@ def create_cloud_storage(
 def update_cloud_storage(
     ctx: Context,
     cloud_storage_id: int,
-    display_name: str | None = None,
+    display_name: DisplayName | None = None,
     access_key_id: str | None = None,
     secret_access_key: str | None = None,
 ) -> CloudStorageStatus:
