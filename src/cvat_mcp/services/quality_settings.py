@@ -1,0 +1,115 @@
+from typing import Literal
+
+from cvat_sdk import Client
+from cvat_sdk.api_client import models
+from pydantic import BaseModel
+
+from cvat_mcp.errors import InvalidArgument
+
+
+class Requirement(BaseModel):
+    name: str
+    annotation_type: str | None  # None: a child requirement, typed by its parent
+    enabled: bool
+
+
+class QualitySettings(BaseModel):
+    task_id: int
+    source: Literal["task", "project"]  # where the task's effective requirements live
+    project_id: int | None
+    requirements: list[Requirement]
+    # project source: the tasks (visible to this account) whose quality these settings decide
+    shared_with_tasks: int | None
+
+
+def settings_state(client: Client, task) -> QualitySettings:
+    """The task's effective quality requirements and where they live."""
+    api = client.api_client.quality_api
+    own = _task_settings(api, task.id)
+    target, shared = _target(api, task, own, own.inherit)
+    return _result(task, target, shared, {})
+
+
+def update_quality_settings(
+    client: Client,
+    task_id: int,
+    enable: list[str],
+    disable: list[str],
+    use_project_settings: bool | None,
+) -> QualitySettings:
+    if not enable and not disable and use_project_settings is None:
+        raise InvalidArgument("nothing to change: pass enable, disable or use_project_settings")
+    if both := sorted(set(enable) & set(disable)):
+        raise InvalidArgument(f"in both enable and disable: {', '.join(both)}")
+    task = client.tasks.retrieve(task_id)
+    if use_project_settings and task.project_id is None:
+        raise InvalidArgument(f"task {task_id} is not in a project; it uses its own settings")
+
+    api = client.api_client.quality_api
+    own = _task_settings(api, task_id)
+    inherit = own.inherit if use_project_settings is None else use_project_settings
+    target, shared = _target(api, task, own, inherit)
+
+    # Check every name before any write, so a refusal changes nothing.
+    wanted = {name: True for name in enable} | {name: False for name in disable}
+    names = [r.name for r in target.requirements]
+    for name in wanted:
+        if name not in names:
+            valid = ", ".join(repr(n) for n in names)
+            raise InvalidArgument(f"unknown quality requirement {name!r}; valid: {valid}")
+
+    by_name = {r.name: r for r in target.requirements}
+    for name, enabled in wanted.items():
+        if by_name[name].enabled != enabled:
+            api.partial_update_settings_requirements(
+                by_name[name].id,
+                patched_quality_requirement_request=models.PatchedQualityRequirementRequest(
+                    enabled=enabled
+                ),
+            )
+    # Last, so a failed requirement write leaves the task where it was.
+    if task.project_id is not None and inherit != own.inherit:
+        api.partial_update_settings(
+            own.id,
+            patched_quality_settings_request=models.PatchedQualitySettingsRequest(inherit=inherit),
+        )
+    return _result(task, target, shared, wanted)
+
+
+def _task_settings(api, task_id: int):
+    page, _ = api.list_settings(task_id=task_id)
+    return page.results[0]
+
+
+def _target(api, task, own, inherit: bool):
+    """The settings that decide the task's quality, and how many tasks share them."""
+    if task.project_id is None or not inherit:  # a task outside a project says inherit too
+        return own, None
+    page, _ = api.list_settings(project_id=task.project_id, parent_type="project")
+    if not page.results:
+        raise InvalidArgument(
+            f"project #{task.project_id}'s quality settings are not visible to this account; "
+            f"pass use_project_settings=false to give task {task.id} its own settings"
+        )
+    tasks, _ = api.list_settings(
+        project_id=task.project_id, parent_type="task", inherit=True, page_size=1
+    )
+    # counted before this call's writes: add the task if it is about to start inheriting
+    return page.results[0], tasks.count + (0 if own.inherit else 1)
+
+
+def _result(task, target, shared: int | None, wanted: dict[str, bool]) -> QualitySettings:
+    return QualitySettings(
+        task_id=task.id,
+        source="task" if shared is None else "project",
+        project_id=task.project_id,
+        requirements=[
+            Requirement(
+                name=r.name,
+                annotation_type=None if r.annotation_type is None else str(r.annotation_type),
+                enabled=wanted.get(r.name, r.enabled),
+            )
+            for r in target.requirements
+        ],
+        shared_with_tasks=shared,
+    )

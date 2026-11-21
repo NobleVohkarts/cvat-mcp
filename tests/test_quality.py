@@ -3,7 +3,8 @@ from unittest.mock import Mock
 
 import pytest
 from cvat_sdk.api_client.exceptions import ApiException
-from fakes import Obj, fake_client, fake_task
+from fakes import Obj, fake_client, fake_list_settings, fake_task
+from fakes import quality_requirement as req
 
 from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.services.quality import create_report
@@ -50,9 +51,12 @@ def _client(conflicts=(), jobs=JOBS, summary=None, organization=None, count=None
                 None,
             )
         ),
+        list_settings=fake_list_settings(
+            1, [], [req(1, "Base tag", "tag"), req(2, "Base rectangle", "rectangle")]
+        ),
     )
     return fake_client(
-        fake_task(jobs=jobs, organization=organization),
+        fake_task(jobs=jobs, organization=organization, project_id=9),
         api_client=Obj(quality_api=quality_api),
         wait_for_completion=Mock(return_value=(Obj(result_id=9), None)),
     )
@@ -158,8 +162,13 @@ def test_conflicts_org_context(organization, org_args):
 def test_no_enabled_requirement_refused():
     # CVAT starts every quality requirement disabled; then a report compares nothing
     client = _client(summary=_summary(conflict_count=0, enabled=0))
-    with pytest.raises(InvalidArgument, match="no quality requirement is enabled.*Base rectangle"):
+    with pytest.raises(InvalidArgument, match="no quality requirement is enabled") as refused:
         create_report(client, "http://cvat", 1, 100)
+    message = str(refused.value)
+    # the state the agent needs to decide: where the settings live and what exists
+    assert "uses project #9's settings" in message
+    assert "Base rectangle (rectangle)" in message
+    assert "update_quality_settings" in message
     client.api_client.quality_api.list_conflicts.assert_not_called()
 
 
@@ -192,3 +201,11 @@ def test_not_computed_score_shows_status():
     summary.requirements.items[0].calculation = Obj(status="not_computed", reason="no_annotations")
     [score] = create_report(_client(summary=summary), "http://cvat", 1, 100).scores
     assert (score.score, score.status, score.reason) == (None, "not_computed", "no_annotations")
+
+
+def test_refusal_survives_unreadable_settings():
+    # the settings are only details: the refusal must still say nothing is enabled
+    client = _client(summary=_summary(conflict_count=0, enabled=0))
+    client.api_client.quality_api.list_settings.side_effect = ApiException(status=403)
+    with pytest.raises(InvalidArgument, match="no quality requirement is enabled.*update_quality"):
+        create_report(client, "http://cvat", 1, 100)

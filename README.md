@@ -34,6 +34,7 @@ reports each problem as a CVAT issue on the right frame of the right job.
 | `update_job` | **write** | Assign a job or move it through stages and states (a stage change without a state resets it to "new"). |
 | `create_gt_job` | **write** | Add a ground-truth job: random frames (optional seed) or given task frames; one per image task. |
 | `delete_gt_job` | **write** | Delete a ground-truth job of a task owned by the token's CVAT account; annotation jobs can't be deleted. |
+| `update_quality_settings` | **write** | Switch a task's quality requirements (e.g. `Base rectangle`) on or off where its settings live (its project's or its own) and choose between them, so `create_report` has something to compare; says how many tasks share project settings. |
 
 In write mode the model can fix annotations, and the instructions say to do so only when the
 user asks. Each annotation tool checks every item (frame, label and its type, attribute values,
