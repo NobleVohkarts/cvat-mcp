@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from cvat_mcp.config import resolve_in_workdir
 from cvat_mcp.errors import InvalidArgument
-from cvat_mcp.services.issues import job_url
+from cvat_mcp.services.issues import is_own, job_url
 from cvat_mcp.services.tasks import JobInfo, job_info
 
 logger = logging.getLogger("cvat_mcp")
@@ -174,3 +174,71 @@ def create_task(
         jobs=[job_info(j) for j in sorted(task.get_jobs(), key=lambda j: j.start_frame)],
         url=job_url(base_url, task.id),
     )
+
+
+class UpdatedTask(BaseModel):
+    task_id: int
+    name: str
+    project_id: int | None
+    assignee: str | None
+    labels: list[str]
+
+
+class DeletedTask(BaseModel):
+    task_id: int
+    name: str
+    frame_count: int | None
+
+
+def _user_id(client: Client, username: str) -> int | None:
+    """The CVAT user id for a username; "" unassigns (None)."""
+    if username == "":
+        return None
+    page, _ = client.api_client.users_api.list(username=username)
+    user = next((u for u in page.results if u.username == username), None)
+    if user is None:
+        raise InvalidArgument(f'no CVAT user {username!r}; pass an existing username or ""')
+    return user.id
+
+
+def update_task(
+    client: Client,
+    task_id: int,
+    name: str | None,
+    assignee: str | None,
+    project_id: int | None,
+    add_labels: list[LabelSpec] | None,
+) -> UpdatedTask:
+    if name is None and assignee is None and project_id is None and not add_labels:
+        raise InvalidArgument("nothing to change: pass name, assignee, project_id or add_labels")
+    if name is not None and not name.strip():
+        raise InvalidArgument("the task name must not be empty")
+    task = client.tasks.retrieve(task_id)
+    changes = {k: v for k, v in {"name": name, "project_id": project_id}.items() if v is not None}
+    if assignee is not None:
+        changes["assignee_id"] = _user_id(client, assignee)
+    if add_labels:
+        # Labels are only added: removing one deletes its annotations.
+        changes["labels"] = label_requests(add_labels, [l.name for l in task.get_labels()])
+    task.update(models.PatchedTaskWriteRequest(**changes))
+    return UpdatedTask(
+        task_id=task.id,
+        name=task.name,
+        project_id=task.project_id,
+        assignee=task.assignee.username if task.assignee else None,
+        labels=[l.name for l in task.get_labels()],
+    )
+
+
+def delete_task(client: Client, task_id: int) -> DeletedTask:
+    """Delete a task with everything in it, only if this server's user owns it."""
+    task = client.tasks.retrieve(task_id)
+    me = client.users.retrieve_current_user()
+    if not is_own(task, me.id):
+        owner = task.owner.username if task.owner else "a deleted user"
+        raise InvalidArgument(
+            f"task #{task_id} is owned by {owner}, not by this server's user {me.username}; "
+            "only its own tasks can be deleted here, others in the CVAT UI"
+        )
+    task.remove()
+    return DeletedTask(task_id=task_id, name=task.name, frame_count=task.size)

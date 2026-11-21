@@ -113,9 +113,9 @@ def create_issue(
     )
 
 
-def _is_own(issue, user_id: int) -> bool:
-    """Filed by this server's CVAT user: the only issues delete_issue may remove."""
-    return issue.owner is not None and issue.owner.id == user_id
+def is_own(obj, user_id: int) -> bool:
+    """Owned by this server's CVAT user: the only issues and tasks it may delete."""
+    return obj.owner is not None and obj.owner.id == user_id
 
 
 def list_issues(client: Client, task_id: int, frame: int | None) -> IssueList:
@@ -146,7 +146,7 @@ def list_issues(client: Client, task_id: int, frame: int | None) -> IssueList:
                 resolved=i.resolved,
                 author=i.owner.username if i.owner else None,
                 replies=max(i.comments.count - 1, 0),  # the first comment is the message
-                own=_is_own(i, me),
+                own=is_own(i, me),
             )
             for i in sorted(found, key=lambda i: (i.frame, i.id))
         ],
@@ -157,7 +157,7 @@ def delete_issue(client: Client, issue_id: int) -> DeletedIssue:
     """Delete one issue, only if this server's user filed it."""
     issue = client.issues.retrieve(issue_id)
     me = client.users.retrieve_current_user()
-    if not _is_own(issue, me.id):
+    if not is_own(issue, me.id):
         author = issue.owner.username if issue.owner else "a deleted user"
         raise InvalidArgument(
             f"issue #{issue_id} was filed by {author}, not by this server's user {me.username}; "

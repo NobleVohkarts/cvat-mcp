@@ -10,7 +10,9 @@ from cvat_mcp.services.task_edits import (
     AttributeSpec,
     LabelSpec,
     create_task,
+    delete_task,
     label_requests,
+    update_task,
 )
 
 COLOR = AttributeSpec(name="color", input_type="select", values=["red", "blue"])
@@ -194,3 +196,95 @@ def test_failed_upload_removes_the_task(tmp_path, remove_error):
     with pytest.raises(BackgroundRequestException, match="bad image"):
         _create(client, tmp_path, urls=["https://example.com/a.jpg"])
     task.remove.assert_called_once()
+
+
+ADMIN = Obj(id=1, username="admin")
+CAR_LABEL = Obj(id=1, name="car")
+
+
+def _task_client(owner=ADMIN, users=()):
+    task = Obj(id=5, name="Scratch", size=3, owner=owner, project_id=None, assignee=None)
+    task.get_labels = lambda: [CAR_LABEL]
+    task.update, task.remove = Mock(), Mock()
+    users_api = Obj(list=Mock(return_value=(Obj(results=list(users)), None)))
+    client = Obj(
+        tasks=Obj(retrieve=lambda _id: task),
+        users=Obj(retrieve_current_user=lambda: ADMIN),
+        api_client=Obj(users_api=users_api),
+    )
+    return client, task
+
+
+def _update(client, **kw):
+    args = {"name": None, "assignee": None, "project_id": None, "add_labels": None} | kw
+    return update_task(client, 5, **args)
+
+
+def _sent(task):
+    (request,), _ = task.update.call_args
+    return request.to_dict()
+
+
+def test_update_sends_only_given_fields():
+    client, task = _task_client()
+    result = _update(client, name="New")
+    assert _sent(task) == {"name": "New"}
+    assert (result.task_id, result.labels) == (5, ["car"])
+
+
+def test_update_assignee_by_username():
+    client, task = _task_client(users=[Obj(id=7, username="bob")])
+    _update(client, assignee="bob")
+    client.api_client.users_api.list.assert_called_once_with(username="bob")
+    assert _sent(task) == {"assignee_id": 7}
+
+
+def test_update_empty_assignee_unassigns():
+    client, task = _task_client()
+    _update(client, assignee="")
+    client.api_client.users_api.list.assert_not_called()
+    assert _sent(task) == {"assignee_id": None}
+
+
+def test_update_unknown_user():
+    client, task = _task_client(users=[])
+    with pytest.raises(InvalidArgument, match="no CVAT user 'nobody'"):
+        _update(client, assignee="nobody")
+    task.update.assert_not_called()
+
+
+def test_update_add_labels_checks_existing():
+    client, task = _task_client()
+    with pytest.raises(InvalidArgument, match="already has"):
+        _update(client, add_labels=[LabelSpec(name="car")])
+    task.update.assert_not_called()
+
+
+def test_update_add_labels():
+    client, task = _task_client()
+    _update(client, add_labels=[LabelSpec(name="bus", type="rectangle")])
+    assert [l["name"] for l in _sent(task)["labels"]] == ["bus"]
+
+
+def test_update_needs_a_field():
+    client, task = _task_client()
+    with pytest.raises(InvalidArgument, match="nothing to change"):
+        _update(client)
+    task.update.assert_not_called()
+
+
+def test_delete_own_task():
+    client, task = _task_client()
+    result = delete_task(client, 5)
+    task.remove.assert_called_once()
+    assert (result.task_id, result.name, result.frame_count) == (5, "Scratch", 3)
+
+
+@pytest.mark.parametrize(
+    "owner, match", [(Obj(id=2, username="alice"), "alice.*CVAT UI"), (None, "a deleted user")]
+)
+def test_delete_refuses_foreign_or_ownerless(owner, match):
+    client, task = _task_client(owner=owner)
+    with pytest.raises(InvalidArgument, match=match):
+        delete_task(client, 5)
+    task.remove.assert_not_called()
