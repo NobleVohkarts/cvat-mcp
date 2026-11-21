@@ -37,17 +37,12 @@ def _summary(conflict_count=2, score=0.5, enabled=1):
     )
 
 
-def _client(conflicts=(), count=None, jobs=JOBS, summary=None, organization=None):
+def _client(conflicts=(), jobs=JOBS, summary=None, organization=None):
     report = Obj(id=9, created_date=datetime(2026, 11, 21), summary=summary or _summary())
     quality_api = Obj(
         create_report=Mock(return_value=(None, Obj(data=b'{"rq_id": "rq-1"}'))),
         retrieve_report=Mock(return_value=(report, None)),
-        list_conflicts=Mock(
-            return_value=(
-                Obj(count=len(conflicts) if count is None else count, results=list(conflicts)),
-                None,
-            )
-        ),
+        list_conflicts=Mock(return_value=(Obj(results=list(conflicts)), None)),
     )
     return fake_client(
         fake_task(jobs=jobs, organization=organization),
@@ -104,21 +99,21 @@ def test_conflict_ids_split_by_job():
         [21],
     )
     assert (second.shape_ids, second.gt_shape_ids) == ([], [21])
-    assert result.conflicts_truncated is False
 
 
 @pytest.mark.parametrize("count, truncated", [(5, True), (2, False)])
 def test_conflicts_truncated(count, truncated):
     conflicts = [_conflict(f, "missing_annotation", _ann(21, 4)) for f in (1, 3)]
-    result = create_report(_client(conflicts, count=count), "http://cvat", 1, 2)
+    client = _client(conflicts, summary=_summary(conflict_count=count))
+    result = create_report(client, "http://cvat", 1, 2)
     assert len(result.conflicts) == 2
     assert result.conflicts_truncated is truncated
 
 
-@pytest.mark.parametrize("conflict_count", [0, 2])
-def test_zero_conflicts_skips_listing(conflict_count):
+@pytest.mark.parametrize("max_conflicts, conflict_count", [(0, 0), (0, 2), (100, 0)])
+def test_listing_skipped_without_need(max_conflicts, conflict_count):
     client = _client(summary=_summary(conflict_count=conflict_count))
-    result = create_report(client, "http://cvat", 1, 0)
+    result = create_report(client, "http://cvat", 1, max_conflicts)
     client.api_client.quality_api.list_conflicts.assert_not_called()
     assert result.conflicts == []
     assert result.conflicts_truncated is (conflict_count > 0)
@@ -136,14 +131,13 @@ def test_no_gt_job_refused():
     client.api_client.quality_api.create_report.assert_not_called()
 
 
-@pytest.mark.parametrize("organization", [None, 7])
-def test_conflicts_org_only_when_set(organization):
-    # the raw SDK endpoint refuses org_id=None, so it is sent only for a task in an organization
+@pytest.mark.parametrize("organization, org_args", [(None, {"org": ""}), (7, {"org_id": 7})])
+def test_conflicts_org_context(organization, org_args):
+    # the raw SDK endpoint refuses org_id=None; like the SDK's list helpers, send org="" instead
     client = _client([_conflict(1, "missing_annotation", _ann(21, 4))], organization=organization)
     create_report(client, "http://cvat", 1, 100)
     _, kwargs = client.api_client.quality_api.list_conflicts.call_args
-    assert kwargs.get("org_id") == organization
-    assert ("org_id" in kwargs) is (organization is not None)
+    assert {k: kwargs[k] for k in ("org", "org_id") if k in kwargs} == org_args
 
 
 def test_no_enabled_requirement_refused():

@@ -5,6 +5,7 @@ from cvat_sdk.api_client import models
 from pydantic import BaseModel
 
 from cvat_mcp.errors import InvalidArgument
+from cvat_mcp.services.issues import job_url
 
 
 class Conflict(BaseModel):
@@ -72,21 +73,21 @@ def create_report(client: Client, base_url: str, task_id: int, max_conflicts: in
             "project's settings if the task inherits them), then call create_report again"
         )
 
-    conflicts, truncated = [], summary.conflict_count > 0
-    if max_conflicts > 0:
-        # Explicit org context, as for issue comments; the raw endpoint refuses org_id=None.
-        org = {"org_id": task.organization} if task.organization is not None else {}
+    conflicts = []
+    if max_conflicts > 0 and summary.conflict_count > 0:
+        # The SDK's list helpers send org="" (personal workspace) for org_id=None; the raw
+        # endpoint refuses None, so do the same here.
+        org = {"org_id": task.organization} if task.organization is not None else {"org": ""}
         page, _ = quality_api.list_conflicts(
             report_id=report.id, page_size=max_conflicts, sort="frame", **org
         )
         conflicts = [_conflict(c, gt_job_id) for c in page.results]
-        truncated = page.count > len(conflicts)
 
     return Report(
         report_id=report.id,
         task_id=task_id,
         gt_job_id=gt_job_id,
-        url=f"{base_url.rstrip('/')}/tasks/{task_id}/quality-control",
+        url=f"{job_url(base_url, task_id)}/quality-control",
         created_date=report.created_date.isoformat(),
         total_frames=summary.total_frames,
         validation_frames=summary.validation_frames,
@@ -96,7 +97,7 @@ def create_report(client: Client, base_url: str, task_id: int, max_conflicts: in
         jobs=summary.jobs.to_dict() if getattr(summary, "jobs", None) else None,
         scores=[_score(item) for item in (requirements.items if requirements else [])],
         conflicts=conflicts,
-        conflicts_truncated=truncated,
+        conflicts_truncated=summary.conflict_count > len(conflicts),
     )
 
 

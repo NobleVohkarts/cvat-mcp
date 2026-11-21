@@ -35,8 +35,9 @@ def create_gt_job(
     """Use to add a ground-truth (validation) job to a task, only when the user asks: either
     frame_count random frames (seed makes the choice repeatable) or the given task frame numbers.
     CVAT allows one per task and only for image tasks. Its annotations are drawn or imported (e.g.
-    COCO) in the CVAT UI; the annotation tools here can't edit them. Returns the job id and its task frame
-    numbers (frames null: the job was created but its frames could not be read; do not retry)."""
+    COCO) in the CVAT UI; the annotation tools here can't edit them. Returns the job id and its
+    task frame numbers (frames null: the job was created but its frames could not be read; do not
+    retry)."""
     return job_edits.create_gt_job(get_client(ctx), task_id, frame_count, frames, seed)
 
 
