@@ -16,6 +16,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 import cvat_mcp
 
 READ_TOOLS = [
+    "create_report",
     "export_dataset",
     "get_frame_annotations",
     "get_task_overview",
@@ -67,6 +68,15 @@ def test_read_only_mode_registers_only_read_tools(monkeypatch, mode):
     assert "delete_issue" not in result["instructions"]
     assert "update_annotations" not in result["instructions"]
     assert "is not available through this server" not in result["instructions"]
+
+
+@pytest.mark.parametrize("mode", ["read-only", "write"])
+def test_create_report_in_both_modes(monkeypatch, mode):
+    result = registered(monkeypatch, mode)
+    assert "create_report" in result["tools"]
+    assert "create_report" not in result["destructive"]
+    assert "create_report" in result["instructions"]
+    assert "render_frame the conflict frames" in result["instructions"]
 
 
 def test_write_mode_adds_write_tools(monkeypatch):
