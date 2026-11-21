@@ -347,9 +347,9 @@ def test_delete_not_owned_refused():
     "key, expected",
     [
         ("", ([], "*")),
-        ("street/", ([], "street/*")),
-        ("street", ([], "street/*")),
-        ("a/b", ([], "a/b/*")),
+        ("street/", (["street/"], None)),
+        ("street", (["street/"], None)),
+        ("a/b", (["a/b/"], None)),
         ("street/*.jpg", ([], "street/*.jpg")),
         ("img_?.png", ([], "img_?.png")),
         ("street/000001.jpg", (["street/000001.jpg"], None)),
@@ -361,13 +361,13 @@ def test_cloud_source(key, expected):
 
 def test_resolve_reuses_match():
     client, api = _crud_client([cloud_storage(1, "cvat", AT_R2)])
-    assert resolve_storage(client, BASE, f"{R2}/cvat/street/") == (1, False)
+    assert resolve_storage(client, parse_bucket_url(f"{R2}/cvat/street/")) == (1, False)
     api.create.assert_not_called()
 
 
 def test_resolve_registers_anonymous():
     client, api = _crud_client()
-    assert resolve_storage(client, BASE, "s3://open-bucket/x/") == (7, True)
+    assert resolve_storage(client, parse_bucket_url("s3://open-bucket/x/")) == (7, True)
     assert _sent(api.create)["credentials_type"] == "ANONYMOUS_ACCESS"
 
 
@@ -376,7 +376,7 @@ def test_resolve_private_bucket_needs_keys():
     refused = ApiException(status=400)
     refused.body = b"The specified cloud storage is not available."
     api.create.side_effect = refused
-    with pytest.raises(InvalidArgument, match="needs keys") as error:
-        resolve_storage(client, BASE, f"{R2}/cvat/street/")
+    with pytest.raises(InvalidArgument, match="without keys") as error:
+        resolve_storage(client, parse_bucket_url(f"{R2}/cvat/street/"))
     assert "create_cloud_storage(url, access_key_id, secret_access_key)" in str(error.value)
     assert "not available" in str(error.value)

@@ -7,12 +7,13 @@ from urllib.parse import urlsplit
 
 from cvat_sdk import Client
 from cvat_sdk.api_client import models
+from cvat_sdk.api_client.exceptions import ApiException
 from cvat_sdk.attributes import attribute_value_validator
 from cvat_sdk.core.proxies.tasks import ResourceType
 from pydantic import BaseModel, ConfigDict, Field
 
 from cvat_mcp.config import resolve_in_workdir
-from cvat_mcp.errors import InvalidArgument
+from cvat_mcp.errors import InvalidArgument, explain
 from cvat_mcp.services.annotation_edits import check_value
 from cvat_mcp.services.cloud_storages import cloud_source, parse_bucket_url, resolve_storage
 from cvat_mcp.services.issues import job_url
@@ -164,21 +165,21 @@ def create_task(
         )
     if [files, urls, cloud_url].count(None) != 2:
         raise InvalidArgument("pass exactly one of files, urls or cloud_url")
+    spec = {"name": name, "project_id": project_id, "segment_size": segment_size}
+    if labels is not None:
+        spec["labels"] = label_requests(labels)
     params = {"sorting_method": "natural"}
-    storage_id, registered, pattern = None, False, None
+    storage_id, registered = None, False
     if files is not None:
         resources, resource_type = resolve_files(workdir, files), ResourceType.LOCAL
     elif urls is not None:
         _check_urls(urls)
         resources, resource_type = urls, ResourceType.REMOTE
     else:
-        resources, pattern = cloud_source(parse_bucket_url(cloud_url).key)
+        ref = parse_bucket_url(cloud_url)
+        resources, pattern = cloud_source(ref.key)
         resource_type = ResourceType.SHARE
-    spec = {"name": name, "project_id": project_id, "segment_size": segment_size}
-    if labels is not None:
-        spec["labels"] = label_requests(labels)
-    if cloud_url is not None:  # after every check: this may register the bucket
-        storage_id, registered = resolve_storage(client, base_url, cloud_url)
+        storage_id, registered = resolve_storage(client, ref)  # last check: it may register
         params |= {"cloud_storage_id": storage_id, "use_cache": True}
         if pattern:
             params["filename_pattern"] = pattern
@@ -205,10 +206,10 @@ def create_task(
                 client.api_client.cloudstorages_api.destroy(storage_id)
             except Exception:  # pylint: disable=broad-exception-caught
                 logger.exception("could not remove cloud storage %s", storage_id)
-        elif storage_id is not None and "not available" in str(getattr(exc, "body", "")):
+        elif storage_id is not None and isinstance(exc, ApiException) and exc.status == 400:
             raise InvalidArgument(
-                f"cloud storage #{storage_id} is not available: check the bucket, or its keys "
-                "with update_cloud_storage"
+                f"{explain(exc)}; if cloud storage #{storage_id} is not available, check the "
+                "bucket, or its keys with update_cloud_storage"
             ) from exc
         raise
     return CreatedTask(

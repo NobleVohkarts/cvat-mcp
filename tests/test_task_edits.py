@@ -190,13 +190,12 @@ def test_create_from_bucket_folder(tmp_path):
     client, task = _create_client(storages=[STORAGE_1])
     result = _create(client, tmp_path, cloud_url=f"{R2}/cvat/street/")
     task.upload_data.assert_called_once_with(
-        resources=[],
+        resources=["street/"],  # CVAT lists only this prefix
         resource_type=ResourceType.SHARE,
         params={
             "sorting_method": "natural",
             "cloud_storage_id": 1,
             "use_cache": True,
-            "filename_pattern": "street/*",
         },
         wait_for_completion=True,
         status_check_period=1,
@@ -236,7 +235,7 @@ def test_private_bucket_creates_nothing(tmp_path):
     refused = ApiException(status=400)
     refused.body = b"The resource cvat not found."
     client.api_client.cloudstorages_api.create.side_effect = refused
-    with pytest.raises(InvalidArgument, match="needs keys"):
+    with pytest.raises(InvalidArgument, match="without keys"):
         _create(client, tmp_path, cloud_url=f"{R2}/cvat/street/")
     client.tasks.create.assert_not_called()
 

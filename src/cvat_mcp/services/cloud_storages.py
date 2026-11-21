@@ -216,25 +216,31 @@ def create_cloud_storage(
 ) -> CloudStorageStatus:
     """Register a whole S3-compatible bucket; CVAT checks that it can reach it."""
     ref = parse_bucket_url(url)
-    credentials = _credentials(access_key_id, secret_access_key) or {
-        "credentials_type": models.CredentialsTypeEnum("ANONYMOUS_ACCESS")
-    }
+    credentials = _credentials(access_key_id, secret_access_key)
     if existing := find_storage(client, ref, None, whole_bucket=True):
         raise InvalidArgument(
             f"bucket {ref.bucket!r} is already registered as cloud storage #{existing.id}: use "
             "it, or change its keys with update_cloud_storage"
         )
+    storage = _register(client, ref, credentials, display_name, region)
+    return _with_status(client, storage, base_url)
+
+
+def _register(client: Client, ref: BucketRef, credentials: dict, display_name=None, region=None):
+    """Create the storage for the whole bucket; anonymous without credentials."""
     attrs = {"endpoint_url": ref.endpoint_url, "region": region or ref.region}
     request = models.CloudStorageWriteRequest(
         provider_type=models.ProviderTypeEnum(S3),
         resource=ref.bucket,
         display_name=display_name or f"{ref.bucket} ({_label(ref)})"[:63],  # CVAT's limit
         specific_attributes=urlencode({k: v for k, v in attrs.items() if v}),  # as the UI does
-        **credentials,
+        **(credentials or {"credentials_type": models.CredentialsTypeEnum("ANONYMOUS_ACCESS")}),
     )
     api = client.api_client.cloudstorages_api
-    storage, _ = _sent(lambda: api.create(request), access_key_id, secret_access_key)
-    return _with_status(client, storage, base_url)
+    storage, _ = _sent(
+        lambda: api.create(request), credentials.get("key"), credentials.get("secret_key")
+    )
+    return storage
 
 
 def update_cloud_storage(
@@ -295,20 +301,24 @@ def cloud_source(key: str) -> CloudSource:
     if "." in key.rsplit("/", 1)[-1]:  # a file name; "street" (no extension) is a folder
         return CloudSource([key], None)
     folder = key.rstrip("/")
-    return CloudSource([], f"{folder}/*" if folder else "*")  # fnmatch's * also matches "/"
+    # CVAT expands "folder/" by listing only that prefix (recursively); a filename_pattern
+    # makes it list the whole bucket first, which is slow on big buckets.
+    return CloudSource([f"{folder}/"], None) if folder else CloudSource([], "*")
 
 
-def resolve_storage(client: Client, base_url: str, url: str) -> tuple[int, bool]:
-    """The storage serving this link, and whether this call registered it (without keys)."""
-    ref = parse_bucket_url(url)
+def resolve_storage(client: Client, ref: BucketRef) -> tuple[int, bool]:
+    """The storage serving this bucket and key, and whether this call registered it (no keys).
+
+    No match means no whole-bucket storage either, so no duplicate check before registering."""
     me = client.users.retrieve_current_user()
     if storage := find_storage(client, ref, me.id):
         return storage.id, False
     try:
-        created = create_cloud_storage(client, base_url, url, None, None, None, None)
+        storage = _register(client, ref, {})
     except InvalidArgument as exc:
         raise InvalidArgument(
-            f"bucket {ref.bucket!r} needs keys: register it with create_cloud_storage(url, "
-            f"access_key_id, secret_access_key), then call create_task again ({exc})"
+            f"bucket {ref.bucket!r} could not be registered without keys; if it is private, "
+            "register it with create_cloud_storage(url, access_key_id, secret_access_key), then "
+            f"call create_task again ({exc})"
         ) from None
-    return created.id, True
+    return storage.id, True
