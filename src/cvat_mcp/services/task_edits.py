@@ -14,8 +14,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from cvat_mcp.config import resolve_in_workdir
 from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.services.annotation_edits import check_value
-from cvat_mcp.services.issues import job_url, require_own
+from cvat_mcp.services.issues import job_url
 from cvat_mcp.services.tasks import JobInfo, jobs_of
+from cvat_mcp.services.users import require_own, user_id
 
 logger = logging.getLogger("cvat_mcp")
 
@@ -210,16 +211,6 @@ class DeletedTask(BaseModel):
     frame_count: int | None
 
 
-def _user_id(client: Client, username: str) -> int | None:
-    """The CVAT user id for a username; "" unassigns (None)."""
-    if username == "":
-        return None
-    user = next((u for u in client.users.list(username=username) if u.username == username), None)
-    if user is None:
-        raise InvalidArgument(f'no CVAT user {username!r}; pass an existing username or ""')
-    return user.id
-
-
 def update_task(
     client: Client,
     task_id: int,
@@ -248,7 +239,7 @@ def update_task(
     if add_labels:
         label_requests(add_labels, [l.name for l in task.get_labels()])  # names new to the task
     if assignee is not None:
-        changes["assignee_id"] = _user_id(client, assignee)
+        changes["assignee_id"] = user_id(client, assignee)
     task.update(models.PatchedTaskWriteRequest(**changes))
     return UpdatedTask(
         task_id=task.id,
@@ -262,6 +253,6 @@ def update_task(
 def delete_task(client: Client, task_id: int) -> DeletedTask:
     """Delete a task with everything in it, only if this server's user owns it."""
     task = client.tasks.retrieve(task_id)
-    require_own(client, task, f"task #{task_id}", "tasks")
+    require_own(client, task, f"task #{task_id}")
     task.remove()
     return DeletedTask(task_id=task_id, name=task.name, frame_count=task.size)

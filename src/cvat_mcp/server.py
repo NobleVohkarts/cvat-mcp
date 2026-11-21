@@ -73,18 +73,21 @@ if WRITE_MODE:
         "only when the user asks to fix them (reviewing or filing issues is not such a request), "
         "then render_frame again to check. Create, change or delete tasks (create_task, "
         "update_task, delete_task) only when the user asks; delete_task removes only tasks owned "
-        "by this server's CVAT account"
+        "by this server's CVAT account. Change jobs (update_job) or create and delete "
+        "ground-truth jobs (create_gt_job, delete_gt_job) only when the user asks; delete_gt_job "
+        "removes only ground-truth jobs of tasks owned by this server's CVAT account"
     )
     READ_ONLY_NOTE = ""
 else:
     WRITE_STEPS = ""
     READ_ONLY_NOTE = (
-        "Creating issues and changing annotations and tasks are disabled: the server runs in "
-        "read-only mode (CVAT_MCP_MODE=write enables them)."
+        "Write tools are disabled: the server runs in read-only mode (CVAT_MCP_MODE=write "
+        "enables them)."
     )
 
 INSTRUCTIONS = f"""\
-Tools for reviewing annotations in CVAT (computer vision annotation tool).
+Tools for reviewing annotations in CVAT (computer vision annotation tool) and, in write mode,
+for fixing them and managing tasks and jobs.
 Mode: {settings.mcp_mode}.
 Typical flow: list_tasks -> get_task_overview (labels, jobs and their frame ranges)
 -> render_frame for each frame to review (look for missing objects, wrong labels and boxes
@@ -93,8 +96,6 @@ that miss their object) -> get_frame_annotations for exact ids and boxes
 All frame numbers are task frame numbers (0-based), not job-relative; coordinates are original
 image pixels [x1, y1, x2, y2].
 {READ_ONLY_NOTE}
-Deleting or changing jobs is not available through this server: if the user asks for it,
-explain that it must be done in the CVAT UI.
 """
 
 HTTP_MODE = settings.mcp_transport == "http"
