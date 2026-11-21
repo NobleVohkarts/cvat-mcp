@@ -1,45 +1,19 @@
 from unittest.mock import Mock
 
 import pytest
-from fakes import Obj, fake_client, fake_task
+from fakes import Obj, fake_client, fake_list_settings, fake_task
+from fakes import quality_requirement as req
 
 from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.services.quality_settings import settings_state, update_quality_settings
 
-
-def _req(id_, name, annotation_type, enabled=False):
-    return Obj(id=id_, name=name, annotation_type=annotation_type, enabled=enabled)
-
-
-def _settings(id_, task_id, inherit, requirements, project_id=None):
-    return Obj(
-        id=id_, task_id=task_id, project_id=project_id, inherit=inherit, requirements=requirements
-    )
+PROJECT_REQS = [req(154, "Base tag", "tag"), req(155, "Base rectangle", "rectangle")]
+TASK_REQS = [req(253, "Base tag", "tag"), req(254, "Base rectangle", "rectangle")]
 
 
-def _client(project_id=9, inherit=True, task_reqs=None, project_reqs=None):
-    task_settings = _settings(
-        30,
-        21,
-        inherit,
-        task_reqs or [_req(253, "Base tag", "tag"), _req(254, "Base rectangle", "rectangle")],
-    )
-    project_settings = _settings(
-        18,
-        None,
-        True,
-        project_reqs or [_req(154, "Base tag", "tag"), _req(155, "Base rectangle", "rectangle")],
-        project_id=9,
-    )
-    other_task = _settings(19, 10, True, [])
-
-    def list_settings(task_id=None, project_id=None, **_):
-        if task_id is not None:
-            return Obj(results=[task_settings]), None
-        return Obj(results=[project_settings, other_task, task_settings]), None
-
+def _client(project_id=9, project_reqs=None):
     quality_api = Obj(
-        list_settings=Mock(side_effect=list_settings),
+        list_settings=fake_list_settings(21, list(TASK_REQS), project_reqs or list(PROJECT_REQS)),
         partial_update_settings=Mock(),
         partial_update_settings_requirements=Mock(),
     )
@@ -59,11 +33,12 @@ def _state(result):
 
 
 def test_state_inherited_from_project():
-    client, task, _ = _client()
+    client, task, api = _client()
     state = settings_state(client, task)
     assert (state.task_id, state.source, state.project_id) == (21, "project", 9)
     assert _state(state) == [("Base tag", "tag", False), ("Base rectangle", "rectangle", False)]
     assert state.shared_with_tasks == 2
+    assert api.list_settings.call_count == 1  # the project listing holds the task's own row too
 
 
 def test_state_own_without_project():
@@ -92,27 +67,23 @@ def test_own_settings_then_enable():
     assert ("Base rectangle", "rectangle", True) in _state(result)
 
 
+DUPLICATE_TAG = [req(154, "Base tag", "tag"), req(156, "Base tag", "tag")]
+
+
 @pytest.mark.parametrize(
-    "kw, match",
+    "client_kw, args, match",
     [
-        ({"enable": ["Base box"]}, "unknown.*Base rectangle"),
-        ({"enable": ["Base tag"], "disable": ["Base tag"]}, "both"),
-        ({}, "nothing to change"),
-        ({"use_project_settings": True, "project_id": None}, "not in a project"),
-        ({"enable": ["Base tag"], "dup": True}, "ambiguous"),
+        ({}, (["Base box"], [], None), "unknown.*Base rectangle"),
+        ({}, (["Base tag"], ["Base tag"], None), "both"),
+        ({}, ([], [], None), "nothing to change"),
+        ({"project_id": None}, ([], [], True), "not in a project"),
+        ({"project_reqs": DUPLICATE_TAG}, (["Base tag"], [], None), "ambiguous"),
     ],
 )
-def test_refusals_write_nothing(kw, match):
-    reqs = [_req(154, "Base tag", "tag"), _req(156, "Base tag", "tag")] if kw.get("dup") else None
-    client, _, api = _client(project_id=kw.get("project_id", 9), project_reqs=reqs)
+def test_refusals_write_nothing(client_kw, args, match):
+    client, _, api = _client(**client_kw)
     with pytest.raises(InvalidArgument, match=match):
-        update_quality_settings(
-            client,
-            21,
-            kw.get("enable", []),
-            kw.get("disable", []),
-            kw.get("use_project_settings"),
-        )
+        update_quality_settings(client, 21, *args)
     api.partial_update_settings.assert_not_called()
     api.partial_update_settings_requirements.assert_not_called()
 

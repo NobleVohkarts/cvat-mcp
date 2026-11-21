@@ -1,6 +1,7 @@
 """Tiny stand-ins for cvat-sdk objects: only the attributes our services read."""
 
 from types import SimpleNamespace as Obj
+from unittest.mock import Mock
 
 
 def _with_to_dict(obj):
@@ -87,3 +88,26 @@ def gt_job(shapes=(), included=(0, 2), task_id=1, job_id=30, deleted=(), **kw):
 def job_client(task, job, **repos):
     """A fake client whose jobs.retrieve returns `job`."""
     return fake_client(task, jobs=Obj(retrieve=lambda _id: job), **repos)
+
+
+def quality_requirement(
+    id, name, annotation_type, enabled=False
+):  # pylint: disable=redefined-builtin
+    return Obj(id=id, name=name, annotation_type=annotation_type, enabled=enabled)
+
+
+def fake_list_settings(task_id, task_reqs, project_reqs, inherit=True, project_id=9):
+    """quality_api.list_settings: by task_id the task's own settings; by project_id the
+    project's settings plus each of its tasks' own (as CVAT lists them)."""
+    own = Obj(id=30, task_id=task_id, project_id=None, inherit=inherit, requirements=task_reqs)
+    project = Obj(
+        id=18, task_id=None, project_id=project_id, inherit=True, requirements=project_reqs
+    )
+    other = Obj(id=19, task_id=task_id + 1, project_id=None, inherit=True, requirements=[])
+
+    def list_settings(task_id=None, **_):
+        if task_id is not None:
+            return Obj(results=[own]), None
+        return Obj(results=[project, other, own]), None
+
+    return Mock(side_effect=list_settings)

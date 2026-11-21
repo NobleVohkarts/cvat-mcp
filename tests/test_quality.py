@@ -3,7 +3,8 @@ from unittest.mock import Mock
 
 import pytest
 from cvat_sdk.api_client.exceptions import ApiException
-from fakes import Obj, fake_client, fake_task
+from fakes import Obj, fake_client, fake_list_settings, fake_task
+from fakes import quality_requirement as req
 
 from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.services.quality import create_report
@@ -39,18 +40,6 @@ def _summary(conflict_count=2, score=0.5, enabled=1):
     )
 
 
-def _list_settings(task_id=None, project_id=None, **_):
-    reqs = [
-        Obj(id=1, name="Base tag", annotation_type="tag", enabled=False),
-        Obj(id=2, name="Base rectangle", annotation_type="rectangle", enabled=False),
-    ]
-    task = Obj(id=30, task_id=1, project_id=None, inherit=True, requirements=reqs)
-    if task_id is not None:
-        return Obj(results=[task]), None
-    project = Obj(id=18, task_id=None, project_id=9, inherit=True, requirements=reqs)
-    return Obj(results=[project, task]), None
-
-
 def _client(conflicts=(), jobs=JOBS, summary=None, organization=None, count=None):
     report = Obj(id=9, created_date=datetime(2026, 11, 21), summary=summary or _summary())
     quality_api = Obj(
@@ -62,7 +51,9 @@ def _client(conflicts=(), jobs=JOBS, summary=None, organization=None, count=None
                 None,
             )
         ),
-        list_settings=Mock(side_effect=_list_settings),
+        list_settings=fake_list_settings(
+            1, [], [req(1, "Base tag", "tag"), req(2, "Base rectangle", "rectangle")]
+        ),
     )
     return fake_client(
         fake_task(jobs=jobs, organization=organization, project_id=9),
