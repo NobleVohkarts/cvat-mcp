@@ -9,8 +9,10 @@ from cvat_mcp.services.annotations import FrameAnnotations
 @tool()
 def get_frame_annotations(ctx: Context, task_id: int, frame: int) -> FrameAnnotations:
     """Use for exact object data on one frame: id, label, type, box [x1, y1, x2, y2] in original
-    pixels, attributes and source. Use render_frame to see the frame; use these ids and boxes
-    for create_issue."""
+    pixels (plus points for non-rectangle shapes), attributes and source, and the frame's tags.
+    Shape and tag ids are separate: a shape and a tag can share a number. Use render_frame to see
+    the frame; use these ids and boxes for create_issue, update_annotations and
+    delete_annotations."""
     return annotations.get_frame_annotations(get_client(ctx), task_id, frame)
 
 
