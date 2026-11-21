@@ -1,11 +1,15 @@
+import json
 import re
 from typing import NamedTuple
 from urllib.parse import unquote, urlsplit
 
 from cvat_sdk import Client
+from cvat_sdk.api_client import models
+from cvat_sdk.api_client.exceptions import ApiException
 from pydantic import BaseModel
 
 from cvat_mcp.errors import InvalidArgument
+from cvat_mcp.services.users import require_own
 
 S3 = "AWS_S3_BUCKET"
 NOT_S3 = (
@@ -105,3 +109,157 @@ def find_storage(client: Client, ref: BucketRef, owner_id: int, *, whole_bucket:
     page, _ = client.api_client.cloudstorages_api.list(resource=ref.bucket, page_size=100)
     found = [s for s in page.results if _matches(s, ref, whole_bucket)]
     return min(found, key=lambda s: (s.owner is None or s.owner.id != owner_id, s.id), default=None)
+
+
+class CloudStorageList(BaseModel):
+    storages: list[CloudStorageInfo]
+    total: int
+
+
+class CloudStorageStatus(CloudStorageInfo):
+    status: str
+
+
+class DeletedCloudStorage(BaseModel):
+    cloud_storage_id: int
+    display_name: str
+
+
+def list_cloud_storages(
+    client: Client, base_url: str, search: str | None, limit: int
+) -> CloudStorageList:
+    kwargs = {"search": search} if search else {}
+    page, _ = client.api_client.cloudstorages_api.list(
+        sort="-id", page_size=max(1, min(limit, 100)), **kwargs
+    )
+    return CloudStorageList(
+        storages=[storage_info(s, base_url) for s in page.results], total=page.count
+    )
+
+
+def _credentials(access_key_id: str | None, secret_access_key: str | None) -> dict:
+    """The request fields for a key pair; {} when neither is given."""
+    if access_key_id is None and secret_access_key is None:
+        return {}
+    if access_key_id is None or secret_access_key is None:
+        raise InvalidArgument("pass both access_key_id and secret_access_key, or neither")
+    if bool(access_key_id) != bool(secret_access_key):
+        raise InvalidArgument('pass both keys, or both as "" for anonymous access')
+    kind = "KEY_SECRET_KEY_PAIR" if access_key_id else "ANONYMOUS_ACCESS"
+    return {
+        "credentials_type": models.CredentialsTypeEnum(kind),
+        "key": access_key_id,
+        "secret_key": secret_access_key,
+    }
+
+
+def _scrubbed(text: str, *secrets: str | None) -> str:
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "***")
+    return text
+
+
+def _sent(call, *secrets: str | None):
+    """Run a create/update request; CVAT's refusal comes back without the keys in it."""
+    try:
+        return call()
+    except ApiException as exc:
+        if exc.status != 400:
+            raise
+        body = exc.body.decode(errors="replace") if isinstance(exc.body, bytes) else exc.body
+        reason = _scrubbed(body or exc.reason or "", *secrets)
+        raise InvalidArgument(f"CVAT refused the storage: {reason[:300]}") from None
+
+
+def _with_status(client: Client, storage, base_url: str) -> CloudStorageStatus:
+    _, response = client.api_client.cloudstorages_api.retrieve_status(
+        storage.id, _parse_response=False
+    )
+    status = json.loads(response.data)  # a bare JSON string, e.g. "AVAILABLE"
+    return CloudStorageStatus(**storage_info(storage, base_url).model_dump(), status=status)
+
+
+def _label(ref: BucketRef) -> str:
+    if ref.endpoint_url is None:
+        return "AWS S3"
+    host = urlsplit(ref.endpoint_url).netloc
+    return "Cloudflare R2" if host.endswith(R2_SUFFIX) else host
+
+
+def create_cloud_storage(
+    client: Client,
+    base_url: str,
+    url: str,
+    access_key_id: str | None,
+    secret_access_key: str | None,
+    display_name: str | None,
+    region: str | None,
+) -> CloudStorageStatus:
+    """Register a whole S3-compatible bucket; CVAT checks that it can reach it."""
+    ref = parse_bucket_url(url)
+    credentials = _credentials(access_key_id, secret_access_key) or {
+        "credentials_type": models.CredentialsTypeEnum("ANONYMOUS_ACCESS")
+    }
+    if display_name is not None and not display_name.strip():
+        raise InvalidArgument("the display name must not be empty")
+    me = client.users.retrieve_current_user()
+    if existing := find_storage(client, ref, me.id, whole_bucket=True):
+        raise InvalidArgument(
+            f"bucket {ref.bucket!r} is already registered as cloud storage #{existing.id}: use "
+            "it, or change its keys with update_cloud_storage"
+        )
+    attrs = {"endpoint_url": ref.endpoint_url, "region": region or ref.region}
+    request = models.CloudStorageWriteRequest(
+        provider_type=models.ProviderTypeEnum(S3),
+        resource=ref.bucket,
+        display_name=(display_name or f"{ref.bucket} ({_label(ref)})")[:63],  # CVAT's limit
+        specific_attributes="&".join(f"{k}={v}" for k, v in attrs.items() if v),
+        **credentials,
+    )
+    api = client.api_client.cloudstorages_api
+    storage, _ = _sent(lambda: api.create(request), access_key_id, secret_access_key)
+    return _with_status(client, storage, base_url)
+
+
+def update_cloud_storage(
+    client: Client,
+    base_url: str,
+    cloud_storage_id: int,
+    display_name: str | None,
+    access_key_id: str | None,
+    secret_access_key: str | None,
+) -> CloudStorageStatus:
+    changes = _credentials(access_key_id, secret_access_key)
+    if display_name is not None:
+        if not display_name.strip():
+            raise InvalidArgument("the display name must not be empty")
+        changes["display_name"] = display_name[:63]
+    if not changes:
+        raise InvalidArgument("nothing to change: pass display_name or both keys")
+    api = client.api_client.cloudstorages_api
+    request = models.PatchedCloudStorageWriteRequest(**changes)
+    _sent(
+        lambda: api.partial_update(cloud_storage_id, patched_cloud_storage_write_request=request),
+        access_key_id,
+        secret_access_key,
+    )
+    storage, _ = api.retrieve(cloud_storage_id)
+    return _with_status(client, storage, base_url)
+
+
+def delete_cloud_storage(client: Client, cloud_storage_id: int) -> DeletedCloudStorage:
+    """Delete our own storage, unless some task's frames still come from it."""
+    api = client.api_client.cloudstorages_api
+    storage, _ = api.retrieve(cloud_storage_id)
+    require_own(client, storage, f"cloud storage #{cloud_storage_id}")
+    # shortcut: scans all tasks, upgrade if CVAT adds a data_cloud_storage_id filter
+    users = [t.id for t in client.tasks.list() if t.data_cloud_storage_id == cloud_storage_id]
+    if users:
+        listed = ", ".join(f"task {i}" for i in users)
+        raise InvalidArgument(
+            f"cloud storage #{cloud_storage_id} still holds the frames of {listed}: delete or "
+            "rebuild those tasks first"
+        )
+    api.destroy(cloud_storage_id)
+    return DeletedCloudStorage(cloud_storage_id=cloud_storage_id, display_name=storage.display_name)
