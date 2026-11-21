@@ -123,8 +123,12 @@ def test_write_mode_adds_write_tools(monkeypatch):
     assert "create_task" in result["instructions"]
     assert "only tasks owned by" in result["instructions"]
     # urls and bucket links make CVAT fetch from any host
-    assert sorted(result["open_world"]) == ["create_cloud_storage", "create_task"]
-    assert "create_cloud_storage" in result["instructions"]
+    assert sorted(result["open_world"]) == [
+        "create_cloud_storage",
+        "create_task",
+        "update_cloud_storage",  # CVAT re-checks the bucket on every update
+    ]
+    assert "keys go only to create_cloud_storage and update_cloud_storage" in result["instructions"]
     assert "never repeat keys" in result["instructions"]
     assert "disabled" not in result["instructions"]
 

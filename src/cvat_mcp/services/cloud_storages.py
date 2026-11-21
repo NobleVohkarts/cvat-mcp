@@ -1,7 +1,7 @@
 import json
 import re
 from typing import NamedTuple
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
 
 from cvat_sdk import Client
 from cvat_sdk.api_client import models
@@ -18,7 +18,9 @@ NOT_S3 = (
 )
 AWS_VIRTUAL = re.compile(r"^(?P<bucket>.+)\.s3(?:[.-](?P<region>[a-z0-9-]+))?\.amazonaws\.com$")
 AWS_PATH = re.compile(r"^s3(?:[.-](?P<region>[a-z0-9-]+))?\.amazonaws\.com$")
+AWS_SPECIAL = re.compile(r"(^|\.)s3[.-](accelerate|dualstack|website)[^/]*\.amazonaws\.com$")
 R2_SUFFIX = ".r2.cloudflarestorage.com"
+R2_JURISDICTIONS = {"eu", "fedramp"}  # <account>.eu.r2.cloudflarestorage.com
 
 
 class BucketRef(NamedTuple):
@@ -40,6 +42,13 @@ def parse_bucket_url(url: str) -> BucketRef:
         raise InvalidArgument(
             "a link with a query looks like a presigned URL: pass it in urls, or the bucket link"
         )
+    if parts.username or parts.password:
+        raise InvalidArgument("don't put credentials in the link: pass the keys as arguments")
+    if AWS_SPECIAL.search(host):
+        raise InvalidArgument(
+            "accelerate, dual-stack and website hosts aren't S3 API endpoints: pass "
+            "s3://bucket/folder/ and the bucket's region"
+        )
     path = unquote(parts.path).lstrip("/")
     endpoint, region = None, None
     if parts.scheme == "s3":
@@ -51,8 +60,13 @@ def parse_bucket_url(url: str) -> BucketRef:
         if m := AWS_PATH.match(host):
             region = m["region"]
         else:
-            endpoint = f"{parts.scheme}://{parts.netloc}"
-            region = "auto" if host.endswith(R2_SUFFIX) else None
+            if host.endswith(R2_SUFFIX):
+                labels = host.removesuffix(R2_SUFFIX).split(".")
+                if len(labels) > 1 and labels[1] not in R2_JURISDICTIONS:  # <bucket>.<account>
+                    bucket, key, host = labels[0], path, host.partition(".")[2]
+                region = "auto"
+            port = f":{parts.port}" if parts.port else ""
+            endpoint = f"{parts.scheme}://{host}{port}"
     if not bucket:
         raise InvalidArgument(f"{url!r} names no bucket: pass a link like s3://bucket/folder/")
     return BucketRef(endpoint, region, bucket, key)
@@ -60,7 +74,7 @@ def parse_bucket_url(url: str) -> BucketRef:
 
 def attributes(storage) -> dict[str, str]:
     """CVAT's specific_attributes, "endpoint_url=…&region=…&prefix=…", as a dict."""
-    return dict(kv.split("=", 1) for kv in (storage.specific_attributes or "").split("&") if kv)
+    return dict(parse_qsl(storage.specific_attributes or ""))  # the UI percent-encodes them
 
 
 class CloudStorageInfo(BaseModel):
@@ -165,25 +179,30 @@ def _sent(call, *secrets: str | None):
     except ApiException as exc:
         if exc.status != 400:
             raise  # explain() shows no body for these
-        message = explain(exc)
-        for secret in filter(None, secrets):
-            message = message.replace(secret, "***")
-        raise InvalidArgument(message) from None  # no chained exception carrying the body
+        body = exc.body.decode(errors="replace") if isinstance(exc.body, bytes) else exc.body
+        for secret in filter(None, secrets):  # before explain() cuts the body, splitting a key
+            body = (body or "").replace(secret, "***")
+        exc.body = body
+        raise InvalidArgument(explain(exc)) from None  # no chained exception carrying the body
 
 
 def _with_status(client: Client, storage, base_url: str) -> CloudStorageStatus:
-    _, response = client.api_client.cloudstorages_api.retrieve_status(
-        storage.id, _parse_response=False
-    )
-    status = json.loads(response.data)  # a bare JSON string, e.g. "AVAILABLE"
+    """The storage as CVAT stored it, and whether CVAT can reach it right now."""
+    try:
+        _, response = client.api_client.cloudstorages_api.retrieve_status(
+            storage.id, _parse_response=False
+        )
+        status = json.loads(response.data)  # a bare JSON string, e.g. "AVAILABLE"
+    except ApiException:
+        status = "unknown"  # the write already happened: report it, don't fail
     return CloudStorageStatus(**storage_info(storage, base_url).model_dump(), status=status)
 
 
 def _label(ref: BucketRef) -> str:
     if ref.endpoint_url is None:
         return "AWS S3"
-    host = urlsplit(ref.endpoint_url).netloc
-    return "Cloudflare R2" if host.endswith(R2_SUFFIX) else host
+    parts = urlsplit(ref.endpoint_url)
+    return "Cloudflare R2" if parts.hostname.endswith(R2_SUFFIX) else parts.netloc
 
 
 def create_cloud_storage(
@@ -210,7 +229,7 @@ def create_cloud_storage(
         provider_type=models.ProviderTypeEnum(S3),
         resource=ref.bucket,
         display_name=display_name or f"{ref.bucket} ({_label(ref)})"[:63],  # CVAT's limit
-        specific_attributes="&".join(f"{k}={v}" for k, v in attrs.items() if v),
+        specific_attributes=urlencode({k: v for k, v in attrs.items() if v}),  # as the UI does
         **credentials,
     )
     api = client.api_client.cloudstorages_api
@@ -246,6 +265,11 @@ def delete_cloud_storage(client: Client, cloud_storage_id: int) -> DeletedCloudS
     api = client.api_client.cloudstorages_api
     storage, _ = api.retrieve(cloud_storage_id)
     require_own(client, storage, f"cloud storage #{cloud_storage_id}")
+    if storage.organization is not None:  # its tasks are outside the scan below
+        raise InvalidArgument(
+            f"cloud storage #{cloud_storage_id} belongs to an organization; delete it in the "
+            "CVAT UI, where its tasks are visible"
+        )
     # shortcut: scans all tasks, upgrade if CVAT adds a data_cloud_storage_id filter
     tasks = client.tasks.list(page_size=500)  # CVAT's maximum; its default is 10
     users = [t.id for t in tasks if t.data_cloud_storage_id == cloud_storage_id]

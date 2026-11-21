@@ -41,6 +41,11 @@ R2 = "https://abc123.r2.cloudflarestorage.com"
             "http://minio.local:9000/data/img%20one.jpg",
             ("http://minio.local:9000", None, "data", "img one.jpg"),
         ),
+        (
+            f"https://photos.abc123.r2.cloudflarestorage.com/train/",
+            (R2, "auto", "photos", "train/"),
+        ),
+        ("https://ABC123.R2.cloudflarestorage.com/cvat/", (R2, "auto", "cvat", "")),
     ],
 )
 def test_parse_bucket_url(url, expected):
@@ -57,6 +62,10 @@ def test_parse_bucket_url(url, expected):
         ("s3://", "no bucket"),
         ("ftp://h/b", r"s3:// or http\(s\)"),
         ("https://h/b/a.jpg?X-Amz-Signature=1", "presigned"),
+        ("https://k:s@minio:9000/b/", "credentials"),
+        ("https://b.s3-accelerate.amazonaws.com/x", r"s3://bucket/"),
+        ("https://b.s3.dualstack.us-east-1.amazonaws.com/x", r"s3://bucket/"),
+        ("https://b.s3-website-us-east-1.amazonaws.com/x", r"s3://bucket/"),
     ],
 )
 def test_parse_bucket_url_refused(url, match):
@@ -75,6 +84,9 @@ def test_storage_info_parses_attributes():
     assert info.url == "http://cvat/cloudstorages/update/1"
     bare = storage_info(cloud_storage(2, "cvat"), "http://cvat/")
     assert (bare.endpoint_url, bare.region, bare.prefix) == (None, None, None)
+    # the CVAT UI percent-encodes the values (URLSearchParams)
+    ui = storage_info(cloud_storage(3, "cvat", "endpoint_url=https%3A%2F%2Fe&prefix=a%2Fb%2F"), "")
+    assert (ui.endpoint_url, ui.prefix) == ("https://e", "a/b/")
 
 
 def _client(storages=(), **repos):
@@ -128,6 +140,16 @@ AT_R2 = f"endpoint_url={R2}&region=auto"
             None,
         ),
         ([cloud_storage(1, "cvat")], BucketRef(None, None, "cvat", ""), {}, 1),
+        (
+            [
+                cloud_storage(
+                    1, "cvat", "endpoint_url=https%3A%2F%2Fabc123.r2.cloudflarestorage.com"
+                )
+            ],
+            REF,
+            {},
+            1,
+        ),
     ],
 )
 def test_find_storage(storages, ref, kw, expected):
@@ -186,7 +208,8 @@ def test_create_with_keys_sends_s3_request():
         "credentials_type": "KEY_SECRET_KEY_PAIR",
         "key": "AK",
         "secret_key": "SK",
-        "specific_attributes": f"endpoint_url={R2}&region=auto",
+        "specific_attributes": "endpoint_url=https%3A%2F%2Fabc123.r2.cloudflarestorage.com"
+        "&region=auto",
     }
     assert result.status == "AVAILABLE" and result.id == 7
     dumped = result.model_dump_json()
@@ -239,6 +262,26 @@ def test_error_never_contains_keys():
     assert "AK" not in message and "SK" not in message and "***" in message
 
 
+def test_error_never_contains_part_of_a_key():
+    """A key cut by the 300-character limit must not leave its first part behind."""
+    client, api = _crud_client()
+    secret = "SECRETKEYVALUE0123456789"
+    refused = ApiException(status=400)
+    refused.body = ("x" * 290 + secret).encode()  # the 300-character cut splits the key
+    api.create.side_effect = refused
+    with pytest.raises(InvalidArgument) as error:
+        create_cloud_storage(client, BASE, f"{R2}/cvat/", "AKIDVALUE", secret, None, None)
+    assert secret[:8] not in str(error.value)
+
+
+def test_create_survives_status_failure():
+    """The storage exists once create answers: a failing status read doesn't hide that."""
+    client, api = _crud_client()
+    api.retrieve_status.side_effect = ApiException(status=500, reason="Server Error")
+    result = create_cloud_storage(client, BASE, f"{R2}/cvat/", "AK", "SK", None, None)
+    assert (result.id, result.status) == (7, "unknown")
+
+
 def test_update_rename_and_keys():
     client, api = _crud_client([cloud_storage(1, "cvat", AT_R2)])
 
@@ -280,6 +323,14 @@ def test_delete_own_unused():
     result = delete_cloud_storage(client, 1)
     api.destroy.assert_called_once_with(1)
     assert (result.cloud_storage_id, result.display_name) == (1, "R2")
+
+
+def test_delete_organization_storage_refused():
+    """Its tasks live in the organization, which this server's task scan can't see."""
+    client, api = _crud_client([cloud_storage(1, "cvat", AT_R2, org=3)])
+    with pytest.raises(InvalidArgument, match="organization.*CVAT UI"):
+        delete_cloud_storage(client, 1)
+    api.destroy.assert_not_called()
 
 
 def test_delete_not_owned_refused():

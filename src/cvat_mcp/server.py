@@ -82,7 +82,7 @@ if WRITE_MODE:
         "create_report says nothing is enabled and the user wants the report"
         "; register, change or delete cloud storages (create_cloud_storage, "
         "update_cloud_storage, delete_cloud_storage) only when the user asks; keys go only to "
-        "those two tools, never repeat keys back"
+        "create_cloud_storage and update_cloud_storage, never repeat keys back"
     )
     READ_ONLY_NOTE = ""
 else:

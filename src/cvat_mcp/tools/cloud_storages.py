@@ -52,7 +52,8 @@ def create_cloud_storage(
     )
 
 
-@tool(write=True, idempotent_hint=True)
+# open world: CVAT re-checks the bucket's host on every update
+@tool(write=True, idempotent_hint=True, open_world_hint=True)
 def update_cloud_storage(
     ctx: Context,
     cloud_storage_id: int,
