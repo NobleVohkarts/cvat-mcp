@@ -12,9 +12,10 @@ from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, Re
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp.types import ToolAnnotations
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from urllib3.exceptions import HTTPError
 
+from cvat_mcp import __version__
 from cvat_mcp.auth import SCOPE, CvatOAuthProvider, cvat_login_username
 from cvat_mcp.config import Settings
 from cvat_mcp.errors import explain
@@ -108,8 +109,33 @@ if HTTP_MODE:
         required_scopes=[SCOPE],
         validate_token_resource=False,  # this issuer only mints tokens for this one server
     )
+
+
+async def reject_unknown_arguments(ctx, call_next):
+    """mcp drops unknown tool arguments silently; a client with a stale tool list would then
+    never learn that its call didn't do what it asked. Refuse them with the valid names."""
+    if ctx.method == "tools/call" and isinstance(ctx.params, dict):
+        name, given = ctx.params.get("name"), set(ctx.params.get("arguments") or {})
+        tool = next((t for t in await mcp.list_tools() if t.name == name), None)
+        valid = set((tool.input_schema or {}).get("properties", {})) if tool else set()
+        if tool and given - valid:
+            unknown = ", ".join(sorted(given - valid))
+            message = (
+                f"unknown argument(s) {unknown} for {name}; valid: {', '.join(sorted(valid))}. "
+                "Your tool list may be out of date: reconnect the connector to refresh it."
+            )
+            return CallToolResult(content=[TextContent(type="text", text=message)], is_error=True)
+    return await call_next(ctx)
+
+
 mcp = MCPServer(
-    "cvat", instructions=INSTRUCTIONS, lifespan=lifespan, auth_server_provider=oauth, auth=auth
+    "cvat",
+    version=__version__,
+    instructions=INSTRUCTIONS,
+    lifespan=lifespan,
+    auth_server_provider=oauth,
+    auth=auth,
+    middleware=[reject_unknown_arguments],
 )
 if oauth is not None:
     mcp.custom_route("/login", ["GET"])(oauth.login_form)

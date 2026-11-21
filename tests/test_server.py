@@ -178,3 +178,48 @@ def test_http_mode_reports_unreachable_cvat_in_one_line(monkeypatch):
     result = run("from cvat_mcp.__main__ import main; main()", monkeypatch)
     assert result.returncode == 1
     assert "cannot reach CVAT" in result.stderr and "Traceback" not in result.stderr
+
+
+IN_PROCESS = """
+import anyio, json
+from types import SimpleNamespace as Obj
+import cvat_mcp, cvat_mcp.server as s, cvat_mcp.tools
+from mcp import Client
+s._connect = lambda _settings: (Obj(close=lambda: None), "admin")
+
+async def main():
+    async with Client(s.mcp) as client:
+        unknown = await client.call_tool("render_frame", {"task_id": 1, "frame": 0, "clean": True})
+        known = await client.call_tool("get_frame_annotations", {"task_id": 1, "frame": 0})
+        print(json.dumps({
+            "version": client.server_info.version,
+            "package": cvat_mcp.__version__,
+            "unknown": [unknown.is_error, unknown.content[0].text],
+            "known": [known.is_error, known.content[0].text],
+        }))
+
+anyio.run(main)
+"""
+
+
+def in_process(monkeypatch):
+    result = run(IN_PROCESS, monkeypatch)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout.strip().splitlines()[-1])
+
+
+def test_handshake_reports_the_package_version(monkeypatch):
+    checks = in_process(monkeypatch)
+    assert checks["version"] == checks["package"] == "0.7.0"
+
+
+def test_unknown_tool_arguments_are_rejected_with_the_valid_ones(monkeypatch):
+    is_error, text = in_process(monkeypatch)["unknown"]
+    assert is_error
+    assert "unknown argument" in text and "clean" in text and "include_clean" in text
+    assert "reconnect" in text
+
+
+def test_known_tool_arguments_still_reach_the_tool(monkeypatch):
+    _, text = in_process(monkeypatch)["known"]
+    assert "unknown argument" not in text

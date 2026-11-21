@@ -4,8 +4,11 @@ from cvat_sdk.core.exceptions import IncompatibleVersionException
 from cvat_sdk.version import VERSION as SDK_VERSION
 from pydantic import BaseModel
 
+from cvat_mcp import __version__
+
 
 class ServerInfo(BaseModel):
+    cvat_mcp_version: str = __version__
     server_version: str
     sdk_version: str
     compatible: bool
