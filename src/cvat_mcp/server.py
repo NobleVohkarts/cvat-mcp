@@ -116,9 +116,12 @@ async def reject_unknown_arguments(ctx, call_next):
     never learn that its call didn't do what it asked. Refuse them with the valid names."""
     if ctx.method == "tools/call" and isinstance(ctx.params, dict):
         name, given = ctx.params.get("name"), set(ctx.params.get("arguments") or {})
+        # list_tools() is public; mcp's by-name lookup is private, and this costs microseconds
         tool = next((t for t in await mcp.list_tools() if t.name == name), None)
-        valid = set((tool.input_schema or {}).get("properties", {})) if tool else set()
-        if tool and given - valid:
+        if tool is None:  # unknown tool: let mcp answer as usual
+            return await call_next(ctx)
+        valid = set(tool.input_schema.get("properties", {}))
+        if given - valid:
             unknown = ", ".join(sorted(given - valid))
             message = (
                 f"unknown argument(s) {unknown} for {name}; valid: {', '.join(sorted(valid))}. "

@@ -13,6 +13,8 @@ import pytest
 from cvat_sdk.api_client.exceptions import ApiException
 from mcp.server.mcpserver.exceptions import ToolError
 
+import cvat_mcp
+
 READ_TOOLS = [
     "export_dataset",
     "get_frame_annotations",
@@ -183,7 +185,7 @@ def test_http_mode_reports_unreachable_cvat_in_one_line(monkeypatch):
 IN_PROCESS = """
 import anyio, json
 from types import SimpleNamespace as Obj
-import cvat_mcp, cvat_mcp.server as s, cvat_mcp.tools
+import cvat_mcp.server as s, cvat_mcp.tools
 from mcp import Client
 s._connect = lambda _settings: (Obj(close=lambda: None), "admin")
 
@@ -193,7 +195,6 @@ async def main():
         known = await client.call_tool("get_frame_annotations", {"task_id": 1, "frame": 0})
         print(json.dumps({
             "version": client.server_info.version,
-            "package": cvat_mcp.__version__,
             "unknown": [unknown.is_error, unknown.content[0].text],
             "known": [known.is_error, known.content[0].text],
         }))
@@ -202,24 +203,12 @@ anyio.run(main)
 """
 
 
-def in_process(monkeypatch):
+def test_strict_arguments_and_version_in_process(monkeypatch):
     result = run(IN_PROCESS, monkeypatch)
     assert result.returncode == 0, result.stderr
-    return json.loads(result.stdout.strip().splitlines()[-1])
-
-
-def test_handshake_reports_the_package_version(monkeypatch):
-    checks = in_process(monkeypatch)
-    assert checks["version"] == checks["package"] == "0.7.0"
-
-
-def test_unknown_tool_arguments_are_rejected_with_the_valid_ones(monkeypatch):
-    is_error, text = in_process(monkeypatch)["unknown"]
-    assert is_error
-    assert "unknown argument" in text and "clean" in text and "include_clean" in text
-    assert "reconnect" in text
-
-
-def test_known_tool_arguments_still_reach_the_tool(monkeypatch):
-    _, text = in_process(monkeypatch)["known"]
-    assert "unknown argument" not in text
+    checks = json.loads(result.stdout.strip().splitlines()[-1])
+    assert checks["version"] == cvat_mcp.__version__  # the MCP handshake reports the build
+    is_error, text = checks["unknown"]
+    assert is_error and "unknown argument" in text and "clean" in text
+    assert "include_clean" in text and "reconnect" in text
+    assert "unknown argument" not in checks["known"][1]  # known arguments reach the tool
