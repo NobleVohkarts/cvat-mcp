@@ -22,7 +22,7 @@ class IssueInfo(BaseModel):
     message: str
     resolved: bool
     author: str | None
-    comments: int
+    replies: int
     own: bool
 
 
@@ -139,7 +139,7 @@ def list_issues(client: Client, task_id: int, frame: int | None) -> IssueList:
                 message=messages.get(i.id, ""),
                 resolved=i.resolved,
                 author=i.owner.username if i.owner else None,
-                comments=i.comments.count,
+                replies=max(i.comments.count - 1, 0),  # the first comment is the message
                 own=_is_own(i, me),
             )
             for i in sorted(found, key=lambda i: (i.frame, i.id))

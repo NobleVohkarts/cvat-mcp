@@ -141,11 +141,11 @@ def _list_client(listed, organization=None):
 def test_list_issues_messages_authors_and_own(listed):
     result = list_issues(_list_client(listed), 4, None)
     assert [
-        (i.issue_id, i.frame, i.message, i.author, i.own, i.comments) for i in result.issues
+        (i.issue_id, i.frame, i.message, i.author, i.own, i.replies) for i in result.issues
     ] == [
-        (40, 5, "label is wrong", "anna", False, 1),
-        (41, 25, "box misses the car", "reviewer", True, 2),
-        (42, 25, "missing person", None, False, 1),
+        (40, 5, "label is wrong", "anna", False, 0),
+        (41, 25, "box misses the car", "reviewer", True, 1),
+        (42, 25, "missing person", None, False, 0),
     ]
 
 

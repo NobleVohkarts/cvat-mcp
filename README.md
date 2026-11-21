@@ -21,14 +21,15 @@ reports each problem as a CVAT issue on the right frame of the right job.
 | `render_frame` | both | Look at a frame: JPEG with every box and a semi-transparent `#id label` caption drawn, plus a legend with exact boxes in original pixels. `include_clean=True` adds the same frame without annotations, for crowded frames. |
 | `get_frame_annotations` | both | Get exact data for one frame's objects: id, label, type, box, attributes, source. |
 | `export_dataset` | both | Save a task as a dataset file in a CVAT format (e.g. `COCO 1.0`) inside `CVAT_MCP_WORKDIR`; waits for CVAT's background export, never overwrites. |
-| `list_issues` | both | See the issues already filed on a task or one frame: message, position, author, resolved, and `own` (filed by this server's user). |
+| `list_issues` | both | See the issues already filed on a task or one frame: message, position, author, resolved, replies, and `own` (filed under the token's CVAT account). |
 | `create_issue` | **write** | Report one problem to the annotator: an issue on a frame of a job, at an object's box or a given region. |
-| `delete_issue` | **write** | Remove one of the server user's own issues (with its comments), e.g. to rewrite issues: list → delete → create. |
+| `delete_issue` | **write** | Remove one of the token account's own issues (with its comments), e.g. to rewrite issues: list → create the new → delete the old. |
 
 Deleting or changing tasks, jobs and annotations is deliberately not available. The server's
 instructions tell the model so, and it points the user to the CVAT UI. The one deletion is
-`delete_issue`, limited to issues the server's own CVAT user filed; anyone else's issues stay
-untouched.
+`delete_issue`, limited to issues filed under the token's CVAT account; anyone else's issues stay
+untouched. Issues you filed in the UI with that same account count as its own, so give the server
+a token of a separate reviewer account if those must be protected too.
 
 ## Design
 

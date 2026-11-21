@@ -69,7 +69,7 @@ def test_write_mode_adds_issue_tools(monkeypatch):
     assert result["tools"] == sorted(READ_TOOLS + ["create_issue", "delete_issue"])
     assert "only when the user asks" in result["instructions"]
     assert "Issues belong to the job" in result["instructions"]
-    assert "delete_issue the old ones, then create_issue" in result["instructions"]
+    assert "create_issue the new ones, then delete_issue the old ones" in result["instructions"]
     assert result["destructive"] == ["delete_issue"]
     assert "Creating issues is disabled" not in result["instructions"]
 

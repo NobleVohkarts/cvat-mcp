@@ -68,7 +68,7 @@ if WRITE_MODE:
         " -> create_issue, one per problem, only when the user asks to file issues "
         '(reviewing is not such a request). Issues belong to the job of type "annotation" '
         "whose frame range contains the frame. To rewrite or replace issues, list_issues for the "
-        "frame, delete_issue the old ones, then create_issue the new ones"
+        "frame, create_issue the new ones, then delete_issue the old ones"
     )
     READ_ONLY_NOTE = ""
 else:
