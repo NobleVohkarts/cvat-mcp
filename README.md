@@ -31,6 +31,10 @@ reports each problem as a CVAT issue on the right frame of the right job.
 | `create_task` | **write** | Create a task from images in `CVAT_MCP_WORKDIR` or from URLs, with labels or a project; waits for CVAT to process the data and leaves nothing behind if the upload fails. |
 | `update_task` | **write** | Rename a task, assign it, move it into a project or add labels (never remove them). |
 | `delete_task` | **write** | Delete a task owned by the token's CVAT account, with all its jobs, annotations and issues. |
+| `list_cloud_storages` | read | The cloud storages (buckets) CVAT knows: bucket, endpoint, prefix, owner and whether it has keys; never the keys. |
+| `create_cloud_storage` | **write** | Register an S3-compatible bucket (AWS S3, Cloudflare R2, MinIO) from a bucket link, with keys or anonymously; CVAT checks it can reach it; one storage per bucket. |
+| `update_cloud_storage` | **write** | Rename a cloud storage or replace its keys. |
+| `delete_cloud_storage` | **write** | Delete a cloud storage owned by the token's account that no task's frames come from (the bucket is untouched). |
 | `update_job` | **write** | Assign a job or move it through stages and states (a stage change without a state resets it to "new"). |
 | `create_gt_job` | **write** | Add a ground-truth job: random frames (optional seed) or given task frames; one per image task. |
 | `delete_gt_job` | **write** | Delete a ground-truth job of a task owned by the token's CVAT account; annotation jobs can't be deleted. |

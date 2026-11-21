@@ -80,6 +80,9 @@ if WRITE_MODE:
         "edit ground truth only when the user explicitly asks"
         "; switch quality requirements on (update_quality_settings) only when the user asks or "
         "create_report says nothing is enabled and the user wants the report"
+        "; register, change or delete cloud storages (create_cloud_storage, "
+        "update_cloud_storage, delete_cloud_storage) only when the user asks; keys go only to "
+        "those two tools, never repeat keys back"
     )
     READ_ONLY_NOTE = ""
 else:
