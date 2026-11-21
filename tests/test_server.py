@@ -16,6 +16,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 import cvat_mcp
 
 READ_TOOLS = [
+    "create_report",
     "export_dataset",
     "get_frame_annotations",
     "get_task_overview",
@@ -68,6 +69,8 @@ def test_read_only_mode_registers_only_read_tools(monkeypatch, mode):
     assert "delete_issue" not in result["instructions"]
     assert "update_annotations" not in result["instructions"]
     assert "is not available through this server" not in result["instructions"]
+    assert "call create_report, then\nrender_frame the conflict frames" in result["instructions"]
+    assert "job_id of the ground-truth job to see the ground truth" in result["instructions"]
 
 
 def test_write_mode_adds_write_tools(monkeypatch):
@@ -98,6 +101,8 @@ def test_write_mode_adds_write_tools(monkeypatch):
     ]
     assert "update_job" in result["instructions"]
     assert "ground-truth jobs of tasks owned by" in result["instructions"]
+    assert "call create_report, then\nrender_frame the conflict frames" in result["instructions"]
+    assert "job_id of the ground-truth job to see the ground truth" in result["instructions"]
     assert "edit ground truth only when the user explicitly asks" in result["instructions"]
     annotation_tools = {
         "create_annotations",
