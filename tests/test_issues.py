@@ -4,7 +4,6 @@ import pytest
 from fakes import Obj, fake_client, fake_task, shape
 
 from cvat_mcp.errors import InvalidArgument
-from cvat_mcp.services import issues as issues_service
 from cvat_mcp.services.issues import (
     check_bbox,
     create_issue,
@@ -82,8 +81,6 @@ def test_issue_on_object_box():
 
 ME = Obj(id=5, username="reviewer")
 ANNA = Obj(id=6, username="anna")
-ISSUES_API = Obj(list_endpoint="issues")
-COMMENTS_API = Obj(list_endpoint="comments")
 
 
 def _issue(id, job, frame, owner, count=1, **kw):  # pylint: disable=redefined-builtin
@@ -104,8 +101,8 @@ def _comment(id, issue, message):  # pylint: disable=redefined-builtin
 
 
 @pytest.fixture
-def listed(monkeypatch):
-    """Fake paginated lists; records every call as (endpoint, filters)."""
+def listed():
+    """Issue and comment repos for a fake client; records every call as (repo, filters)."""
     calls = []
     data = {
         "issues": [_issue(41, 3, 25, ME, count=2), _issue(40, 2, 5, ANNA), _issue(42, 3, 25, None)],
@@ -117,29 +114,32 @@ def listed(monkeypatch):
         ],
     }
 
-    def fake(endpoint, **kwargs):
-        calls.append((endpoint, kwargs))
-        rows = data[endpoint]
-        if "job_id" in kwargs:  # comments filtered by job, as CVAT does
-            jobs = {i.id: i.job for i in data["issues"]}
-            rows = [c for c in rows if jobs[c.issue] == kwargs["job_id"]]
-        return rows
+    def repo(name):
+        def list_(**kwargs):
+            calls.append((name, kwargs))
+            rows = data[name]
+            if "job_id" in kwargs:  # comments filtered by job, as CVAT does
+                jobs = {i.id: i.job for i in data["issues"]}
+                rows = [c for c in rows if jobs[c.issue] == kwargs["job_id"]]
+            return rows
 
-    monkeypatch.setattr(issues_service, "get_paginated_collection", fake)
-    return data, calls
+        return Obj(list=list_)
+
+    return data, calls, repo
 
 
-def _list_client(organization=None):
-    task = fake_task(task_id=4, size=40, organization=organization)
+def _list_client(listed, organization=None):
+    repo = listed[2]
     return fake_client(
-        task,
-        api_client=Obj(issues_api=ISSUES_API, comments_api=COMMENTS_API),
+        fake_task(task_id=4, size=40, organization=organization),
+        issues=repo("issues"),
+        comments=repo("comments"),
         users=Obj(retrieve_current_user=lambda: ME),
     )
 
 
 def test_list_issues_messages_authors_and_own(listed):
-    result = list_issues(_list_client(), 4, None)
+    result = list_issues(_list_client(listed), 4, None)
     assert [
         (i.issue_id, i.frame, i.message, i.author, i.own, i.comments) for i in result.issues
     ] == [
@@ -150,8 +150,8 @@ def test_list_issues_messages_authors_and_own(listed):
 
 
 def test_list_issues_one_comments_request_per_job_with_org_and_frame(listed):
-    _, calls = listed
-    list_issues(_list_client(organization=9), 4, 25)
+    calls = listed[1]
+    list_issues(_list_client(listed, organization=9), 4, 25)
     assert calls[0] == ("issues", {"org_id": 9, "task_id": 4, "frame_id": 25})
     assert sorted(calls[1:], key=lambda c: c[1]["job_id"]) == [
         ("comments", {"org_id": 9, "job_id": 2, "frame_id": 25}),
@@ -160,15 +160,15 @@ def test_list_issues_one_comments_request_per_job_with_org_and_frame(listed):
 
 
 def test_list_issues_without_issues_asks_for_no_comments(listed):
-    data, calls = listed
+    data, calls, _ = listed
     data["issues"] = []
-    assert list_issues(_list_client(), 4, 7).issues == []
+    assert list_issues(_list_client(listed), 4, 7).issues == []
     assert [c[0] for c in calls] == ["issues"]
 
 
 def test_list_issues_checks_frame(listed):
     with pytest.raises(InvalidArgument, match="0..39"):
-        list_issues(_list_client(), 4, 40)
+        list_issues(_list_client(listed), 4, 40)
     assert listed[1] == []
 
 

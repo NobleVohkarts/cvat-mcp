@@ -1,6 +1,5 @@
 from cvat_sdk import Client
 from cvat_sdk.api_client import models
-from cvat_sdk.core.helpers import get_paginated_collection
 from pydantic import BaseModel
 
 from cvat_mcp.errors import InvalidArgument
@@ -108,23 +107,23 @@ def create_issue(
     )
 
 
+def _is_own(issue, user_id: int) -> bool:
+    """Filed by this server's CVAT user: the only issues delete_issue may remove."""
+    return issue.owner is not None and issue.owner.id == user_id
+
+
 def list_issues(client: Client, task_id: int, frame: int | None) -> IssueList:
     task = client.tasks.retrieve(task_id)
     filters = {}
     if frame is not None:
         check_frame(frame, task.size)
         filters["frame_id"] = frame
-    api = client.api_client
     # An explicit org context: without it the comments endpoint answers an empty list.
-    found = get_paginated_collection(
-        api.issues_api.list_endpoint, org_id=task.organization, task_id=task_id, **filters
-    )
+    found = client.issues.list(org_id=task.organization, task_id=task_id, **filters)
     # CVAT keeps an issue's message as its first comment; comments filter by job, not task.
     messages = {}
     for job_id in {i.job for i in found}:
-        comments = get_paginated_collection(
-            api.comments_api.list_endpoint, org_id=task.organization, job_id=job_id, **filters
-        )
+        comments = client.comments.list(org_id=task.organization, job_id=job_id, **filters)
         for comment in sorted(comments, key=lambda c: c.id):
             messages.setdefault(comment.issue, comment.message)
     me = client.users.retrieve_current_user().id
@@ -141,7 +140,7 @@ def list_issues(client: Client, task_id: int, frame: int | None) -> IssueList:
                 resolved=i.resolved,
                 author=i.owner.username if i.owner else None,
                 comments=i.comments.count,
-                own=i.owner is not None and i.owner.id == me,
+                own=_is_own(i, me),
             )
             for i in sorted(found, key=lambda i: (i.frame, i.id))
         ],
@@ -152,7 +151,7 @@ def delete_issue(client: Client, issue_id: int) -> DeletedIssue:
     """Delete one issue, only if this server's user filed it."""
     issue = client.issues.retrieve(issue_id)
     me = client.users.retrieve_current_user()
-    if issue.owner is None or issue.owner.id != me.id:
+    if not _is_own(issue, me.id):
         author = issue.owner.username if issue.owner else "a deleted user"
         raise InvalidArgument(
             f"issue #{issue_id} was filed by {author}, not by this server's user {me.username}; "
