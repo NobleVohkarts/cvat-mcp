@@ -200,8 +200,48 @@ def test_create_from_bucket_folder(tmp_path):
         wait_for_completion=True,
         status_check_period=1,
     )
+    assert result.cloud_storage_id == 1 and result.cloud_storage_registered is False
+    client.api_client.cloudstorages_api.create.assert_not_called()
+
+
+def test_create_from_public_bucket_says_it_registered(tmp_path):
+    client, _ = _create_client()
+    result = _create(client, tmp_path, cloud_url="s3://open-bucket/x/")
+    assert (result.cloud_storage_id, result.cloud_storage_registered) == (7, True)
+
+
+def test_folder_link_without_slash_matches_prefixed_storage(tmp_path):
+    prefixed = cloud_storage(1, "cvat", f"endpoint_url={R2}&region=auto&prefix=street/")
+    client, _ = _create_client(storages=[prefixed])
+    result = _create(client, tmp_path, cloud_url=f"{R2}/cvat/street")
     assert result.cloud_storage_id == 1
     client.api_client.cloudstorages_api.create.assert_not_called()
+
+
+def test_registered_storage_removed_when_task_create_fails(tmp_path):
+    client, _ = _create_client()
+    client.tasks.create.side_effect = ApiException(status=404)
+    with pytest.raises(ApiException):
+        _create(client, tmp_path, cloud_url="s3://open-bucket/x/", labels=None, project_id=999)
+    client.api_client.cloudstorages_api.destroy.assert_called_once_with(7)
+
+
+def test_s3_link_refused_when_bucket_registered_elsewhere(tmp_path):
+    client, _ = _create_client(storages=[STORAGE_1])  # "cvat" on R2
+    with pytest.raises(InvalidArgument, match="cloud storage #1.*https"):
+        _create(client, tmp_path, cloud_url="s3://cvat/street/")
+    client.api_client.cloudstorages_api.create.assert_not_called()
+    client.tasks.create.assert_not_called()
+
+
+def test_background_failure_names_the_link(tmp_path):
+    client, task = _create_client(
+        BackgroundRequestException("No media data found"), storages=[STORAGE_1]
+    )
+    with pytest.raises(InvalidArgument, match="No media data found.*cloud_url") as error:
+        _create(client, tmp_path, cloud_url=f"{R2}/cvat/nothing/")
+    assert "update_cloud_storage" in str(error.value)
+    task.remove.assert_called_once()
 
 
 def test_create_from_bucket_object(tmp_path):
@@ -214,8 +254,9 @@ def test_create_from_bucket_object(tmp_path):
 
 def test_bucket_upload_failure_removes_registered_storage(tmp_path):
     client, task = _create_client(ApiException(status=400))
-    with pytest.raises(ApiException):
+    with pytest.raises(InvalidArgument, match="cloud_url") as error:
         _create(client, tmp_path, cloud_url="s3://open-bucket/x/")
+    assert "update_cloud_storage" not in str(error.value)  # it was removed again
     task.remove.assert_called_once()
     client.api_client.cloudstorages_api.destroy.assert_called_once_with(7)
 

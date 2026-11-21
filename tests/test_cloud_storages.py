@@ -352,6 +352,7 @@ def test_delete_not_owned_refused():
         ("a/b", (["a/b/"], None)),
         ("street/*.jpg", ([], "street/*.jpg")),
         ("img_?.png", ([], "img_?.png")),
+        ("shots[2024]/a.jpg", (["shots[2024]/a.jpg"], None)),  # [ is part of a key, not a glob
         ("street/000001.jpg", (["street/000001.jpg"], None)),
     ],
 )

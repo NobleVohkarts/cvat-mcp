@@ -9,6 +9,7 @@ from cvat_sdk import Client
 from cvat_sdk.api_client import models
 from cvat_sdk.api_client.exceptions import ApiException
 from cvat_sdk.attributes import attribute_value_validator
+from cvat_sdk.core.exceptions import BackgroundRequestException
 from cvat_sdk.core.proxies.tasks import ResourceType
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -99,6 +100,7 @@ class CreatedTask(BaseModel):
     jobs: list[JobInfo]
     url: str
     cloud_storage_id: int | None = None  # the bucket's CVAT storage, for cloud_url
+    cloud_storage_registered: bool = False  # this call registered it (without keys)
 
 
 def _listed(directory: Path, workdir: Path) -> list[Path]:
@@ -179,14 +181,28 @@ def create_task(
         ref = parse_bucket_url(cloud_url)
         resources, pattern = cloud_source(ref.key)
         resource_type = ResourceType.SHARE
-        storage_id, registered = resolve_storage(client, ref)  # last check: it may register
+        # match storages on what is selected: "street" is the folder "street/"
+        selected = ref._replace(key=resources[0] if resources else pattern)
+        storage_id, registered = resolve_storage(client, selected)  # last check: may register
         params |= {"cloud_storage_id": storage_id, "use_cache": True}
         if pattern:
             params["filename_pattern"] = pattern
 
-    task = client.tasks.create(
-        models.TaskWriteRequest(**{k: v for k, v in spec.items() if v is not None})
-    )
+    def forget_storage():
+        """A storage this call registered is no use without its task."""
+        if registered:
+            try:
+                client.api_client.cloudstorages_api.destroy(storage_id)
+            except Exception:  # pylint: disable=broad-exception-caught
+                logger.exception("could not remove cloud storage %s", storage_id)
+
+    try:
+        task = client.tasks.create(
+            models.TaskWriteRequest(**{k: v for k, v in spec.items() if v is not None})
+        )
+    except BaseException:
+        forget_storage()
+        raise
     # Two steps instead of create_from_data(), which loses the task when the upload fails.
     try:
         task.upload_data(
@@ -201,16 +217,18 @@ def create_task(
             task.remove()  # an empty task is no use to anyone
         except Exception:  # pylint: disable=broad-exception-caught
             logger.exception("could not remove task %s after its upload failed", task.id)
-        if registered:  # nor is a storage this call registered for it
-            try:
-                client.api_client.cloudstorages_api.destroy(storage_id)
-            except Exception:  # pylint: disable=broad-exception-caught
-                logger.exception("could not remove cloud storage %s", storage_id)
-        elif storage_id is not None and isinstance(exc, ApiException) and exc.status == 400:
-            raise InvalidArgument(
-                f"{explain(exc)}; if cloud storage #{storage_id} is not available, check the "
-                "bucket, or its keys with update_cloud_storage"
-            ) from exc
+        forget_storage()
+        refused = isinstance(exc, BackgroundRequestException) or (
+            isinstance(exc, ApiException) and exc.status == 400
+        )
+        if storage_id is not None and refused:
+            hint = f"check that cloud_url {cloud_url!r} names a folder or object with images"
+            if not registered:
+                hint += (
+                    f", and that cloud storage #{storage_id} can read the bucket (its keys: "
+                    "update_cloud_storage)"
+                )
+            raise InvalidArgument(f"{explain(exc).rstrip()}; {hint}") from exc
         raise
     return CreatedTask(
         task_id=task.id,
@@ -219,6 +237,7 @@ def create_task(
         jobs=jobs_of(task),
         url=job_url(base_url, task.id),
         cloud_storage_id=storage_id,
+        cloud_storage_registered=registered,
     )
 
 

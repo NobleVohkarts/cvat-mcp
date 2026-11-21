@@ -296,7 +296,7 @@ class CloudSource(NamedTuple):
 
 def cloud_source(key: str) -> CloudSource:
     """What a link's key part selects: a glob, one object, or a folder (recursively)."""
-    if any(c in key for c in "*?["):
+    if any(c in key for c in "*?"):  # not "[": keys like "shots[2024]/" contain it
         return CloudSource([], key)
     if "." in key.rsplit("/", 1)[-1]:  # a file name; "street" (no extension) is a folder
         return CloudSource([key], None)
@@ -313,12 +313,23 @@ def resolve_storage(client: Client, ref: BucketRef) -> tuple[int, bool]:
     me = client.users.retrieve_current_user()
     if storage := find_storage(client, ref, me.id):
         return storage.id, False
+    if ref.endpoint_url is None:  # an AWS link: the same name elsewhere is a different bucket
+        page, _ = client.api_client.cloudstorages_api.list(
+            resource=ref.bucket, provider_type=S3, page_size=100
+        )
+        if other := next((s for s in page.results if attributes(s).get("endpoint_url")), None):
+            raise InvalidArgument(
+                f"bucket {ref.bucket!r} is registered as cloud storage #{other.id} at "
+                f"{attributes(other)['endpoint_url']}, not on AWS: pass its https link, "
+                f"{attributes(other)['endpoint_url'].rstrip('/')}/{ref.bucket}/{ref.key}"
+            )
     try:
         storage = _register(client, ref, {})
     except InvalidArgument as exc:
         raise InvalidArgument(
             f"bucket {ref.bucket!r} could not be registered without keys; if it is private, "
-            "register it with create_cloud_storage(url, access_key_id, secret_access_key), then "
-            f"call create_task again ({exc})"
+            "register it with create_cloud_storage(url, access_key_id, secret_access_key) (with "
+            "region for an AWS bucket outside us-east-1), then call create_task again "
+            f"({exc})"
         ) from None
     return storage.id, True
