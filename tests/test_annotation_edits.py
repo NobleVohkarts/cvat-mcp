@@ -136,10 +136,10 @@ JOBS = [
 PARKED = Obj(spec_id=10, value="true")
 
 
-def _client(response=None, shapes=(), tags=(), overlap=0):
+def _client(response=None, shapes=(), tags=(), overlap=0, labels=(*LABELS, TAG_LABEL)):
     api = Mock()
     api.partial_update_annotations.return_value = (response, None)
-    task = fake_task(shapes, tags=tags, jobs=JOBS, overlap=overlap, labels=[*LABELS, TAG_LABEL])
+    task = fake_task(shapes, tags=tags, jobs=JOBS, overlap=overlap, labels=labels)
     return fake_client(task, api_client=Obj(tasks_api=api)), api
 
 
@@ -301,4 +301,60 @@ def test_overlap_task_refused(edit):
     client, api = _client(shapes=[shape(1, 1, 3, [1, 1, 4, 4])], overlap=5)
     with pytest.raises(InvalidArgument, match="overlap"):
         edit(client)
+    api.partial_update_annotations.assert_not_called()
+
+
+def test_check_editable_refuses_gt_pool():
+    with pytest.raises(InvalidArgument, match="ground-truth pool"):
+        check_editable(fake_task(validation_mode="gt_pool"))
+
+
+def test_update_refuses_skeleton_relabel():
+    skeleton = shape(1, 4, 3, [], type="skeleton", elements=[shape(2, 9, 3, [1, 1])])
+    client, api = _client(shapes=[skeleton], labels=(*LABELS, ANY_LABEL))
+    with pytest.raises(InvalidArgument, match="skeleton"):
+        update_annotations(client, 1, [ObjectChange(id=1, label="thing")])
+    api.partial_update_annotations.assert_not_called()
+
+
+def test_update_refuses_empty_label():
+    client, api = _client(shapes=[shape(1, 1, 3, [1, 1, 4, 4])])
+    with pytest.raises(InvalidArgument, match="unknown label ''"):
+        update_annotations(client, 1, [ObjectChange(id=1, label="")])
+    api.partial_update_annotations.assert_not_called()
+
+
+def test_create_pairs_ids_by_occluded_too():
+    response = Obj(
+        shapes=[shape(302, 1, 3, [1, 1, 4, 4], occluded=True), shape(301, 1, 3, [1, 1, 4, 4])],
+        tags=[],
+    )
+    client, _ = _client(response)
+    objects = [
+        NewObject(frame=3, label="car", bbox=[1, 1, 4, 4]),
+        NewObject(frame=3, label="car", bbox=[1, 1, 4, 4], occluded=True),
+    ]
+    assert [o.id for o in create_annotations(client, "http://cvat", 1, objects).objects] == [
+        301,
+        302,
+    ]
+
+
+def test_create_survives_an_unmatched_response():
+    # the write happened: an unexpected answer must not look like a failure (the model would retry)
+    response = Obj(shapes=[shape(401, 1, 3, [1, 1, 4.5, 4])], tags=[])
+    client, _ = _client(response)
+    result = create_annotations(
+        client, "http://cvat", 1, [NewObject(frame=3, label="car", bbox=[1, 1, 4, 4])]
+    )
+    assert result.objects[0].id is None
+
+
+def test_create_fetches_jobs_before_writing():
+    client, api = _client(Obj(shapes=[], tags=[]))
+    client.tasks.retrieve(1).get_jobs = Mock(side_effect=RuntimeError("jobs list failed"))
+    with pytest.raises(RuntimeError):
+        create_annotations(
+            client, "http://cvat", 1, [NewObject(frame=3, label="car", bbox=[1, 1, 4, 4])]
+        )
     api.partial_update_annotations.assert_not_called()

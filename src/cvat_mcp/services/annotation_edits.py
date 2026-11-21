@@ -49,7 +49,7 @@ class ObjectChange(BaseModel):
 
 
 class EditedObject(BaseModel):
-    id: int
+    id: int | None  # None: CVAT's answer could not be matched; see get_frame_annotations
     kind: str
     frame: int
     label: str
@@ -63,6 +63,12 @@ class AnnotationEdit(BaseModel):
 
 
 def check_editable(task) -> None:
+    if str(task.validation_mode) == "gt_pool":
+        # CVAT's task annotations include the ground-truth job in this mode
+        raise InvalidArgument(
+            f"task {task.id} uses a ground-truth pool; its annotations are read-only here, "
+            "use the CVAT UI"
+        )
     # shortcut: a task PATCH writes overlap frames into both jobs and deletes only one copy;
     # upgrade = job-level PATCH per frame's job.
     if task.overlap:
@@ -201,7 +207,10 @@ def _result(
         action=action,
         objects=[
             EditedObject(
-                id=ids[i] if ids else r.id, kind=kind, frame=r.frame, label=names[r.label_id]
+                id=ids[i] if ids is not None else r.id,
+                kind=kind,
+                frame=r.frame,
+                label=names[r.label_id],
             )
             for i, (kind, r) in enumerate(sent)
         ],
@@ -210,9 +219,11 @@ def _result(
 
 
 def _key(obj, kind: str) -> tuple:
+    # Not attributes: CVAT may answer with defaults filled in, and then nothing would match.
     if kind == "tag":
         return (kind, obj.frame, obj.label_id)
-    return (kind, obj.frame, obj.label_id, str(obj.type), tuple(round(p, 2) for p in obj.points))
+    points = tuple(round(p, 2) for p in obj.points)
+    return (kind, obj.frame, obj.label_id, str(obj.type), points, obj.occluded)
 
 
 def create_annotations(
@@ -241,20 +252,21 @@ def create_annotations(
             )
             sent.append(("shape", request))
 
+    first = objects[0].frame
+    job = find_job_for_frame(task.get_jobs(), first)  # before the write: nothing may fail after it
+
     data = _patch(client, "create", task_id, sent)
     # Pair ids by content: across jobs CVAT returns the objects grouped by job, not in order.
     new_ids = defaultdict(list)
     for kind, created in (("shape", data.shapes), ("tag", data.tags)):
         for c in created:
             new_ids[_key(c, kind)].append(c.id)
-    first = objects[0].frame
-    job = find_job_for_frame(task.get_jobs(), first)
     return _result(
         "created",
         task_id,
         labels,
         sent,
-        ids=[new_ids[_key(r, kind)].pop(0) for kind, r in sent],
+        ids=[(new_ids[_key(r, kind)] or [None]).pop(0) for kind, r in sent],
         url=job_url(base_url, task_id, job.id, first) if job else job_url(base_url, task_id),
     )
 
@@ -280,10 +292,13 @@ def update_annotations(client: Client, task_id: int, objects: list[ObjectChange]
             if obj is None:
                 raise _not_found(change.kind, [change.id])
             type_ = "tag" if change.kind == "tag" else str(obj.type)
+            if change.label is not None and type_ == "skeleton":
+                # its elements carry the old label's sublabels
+                raise InvalidArgument("a skeleton's label can't be changed here; use the CVAT UI")
             label = (
-                label_for(labels, change.label, type_)
-                if change.label
-                else label_by_id[obj.label_id]
+                label_by_id[obj.label_id]
+                if change.label is None
+                else label_for(labels, change.label, type_)
             )
             # CVAT's update replaces the whole object, so send every field, changed or not.
             data = obj.to_dict()

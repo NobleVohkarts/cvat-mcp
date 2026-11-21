@@ -15,7 +15,7 @@ Ids = Annotated[list[int], Field(max_length=100)]
 @tool()
 def get_frame_annotations(ctx: Context, task_id: int, frame: int) -> FrameAnnotations:
     """Use for exact object data on one frame: id, label, type, box [x1, y1, x2, y2] in original
-    pixels (plus points for non-rectangle shapes), attributes and source, and the frame's tags.
+    pixels (plus points for polygons, polylines and points), attributes and source, and the frame's tags.
     Shape and tag ids are separate: a shape and a tag can share a number. Use render_frame to see
     the frame; use these ids and boxes for create_issue, update_annotations and
     delete_annotations."""
@@ -46,7 +46,8 @@ def create_annotations(
     filing issues is not such a request): rectangles by bbox [x1, y1, x2, y2], polygons,
     polylines and points by flat points, or frame tags, with a label of the task and optional
     attributes. Every object is checked first; then all are added in one step, or none. Returns
-    the new ids and a CVAT UI link. Render the frame again afterwards to check."""
+    the new ids and a CVAT UI link (an id of null means the object was added but its id could not
+    be matched: do not retry, use get_frame_annotations). Render the frame again to check."""
     return annotation_edits.create_annotations(get_client(ctx), settings.url, task_id, objects)
 
 

@@ -64,7 +64,7 @@ def test_read_only_mode_registers_only_read_tools(monkeypatch, mode):
     assert "delete_issue" not in result["instructions"]
     assert "update_annotations" not in result["instructions"]
     assert "Deleting or changing tasks, jobs and annotations" not in result["instructions"]
-    assert "Changing tasks and jobs is not available" in result["instructions"]
+    assert "Deleting or changing tasks and jobs is not available" in result["instructions"]
 
 
 def test_write_mode_adds_write_tools(monkeypatch):
@@ -84,7 +84,7 @@ def test_write_mode_adds_write_tools(monkeypatch):
     assert sorted(result["destructive"]) == ["delete_annotations", "delete_issue"]
     assert "disabled" not in result["instructions"]
     assert "Deleting or changing tasks, jobs and annotations" not in result["instructions"]
-    assert "Changing tasks and jobs is not available" in result["instructions"]
+    assert "Deleting or changing tasks and jobs is not available" in result["instructions"]
 
 
 def test_bad_mode_fails_at_startup(monkeypatch):

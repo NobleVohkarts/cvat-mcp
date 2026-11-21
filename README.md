@@ -19,7 +19,7 @@ reports each problem as a CVAT issue on the right frame of the right job.
 | `list_tasks` | both | Find tasks (newest first, `limit` ≤ 100) with frame count, status, job progress and the `total` of all matches. |
 | `get_task_overview` | both | Understand one task: labels, jobs with frame ranges, stage, state, assignee, objects per label. |
 | `render_frame` | both | Look at a frame: JPEG with every box and a semi-transparent `#id label` caption drawn, plus a legend with exact boxes in original pixels. `include_clean=True` adds the same frame without annotations, for crowded frames. |
-| `get_frame_annotations` | both | Get exact data for one frame's objects and tags: id, label, type, box (plus points for non-rectangles), attributes, source. |
+| `get_frame_annotations` | both | Get exact data for one frame's objects and tags: id, label, type, box (plus points for polygons, polylines and points), attributes, source. |
 | `export_dataset` | both | Save a task as a dataset file in a CVAT format (e.g. `COCO 1.0`) inside `CVAT_MCP_WORKDIR`; waits for CVAT's background export, never overwrites. |
 | `list_issues` | both | See the issues already filed on a task or one frame: message, position, author, resolved, replies, and `own` (filed under the token's CVAT account). |
 | `create_issue` | **write** | Report one problem to the annotator: an issue on a frame of a job, at an object's box or a given region. |

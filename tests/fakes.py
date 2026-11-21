@@ -45,12 +45,14 @@ def fake_task(
     meta_frames=None,
     overlap=0,
     labels=tuple(LABELS),
+    validation_mode=None,
     **kw,
 ):
     return Obj(
         id=task_id,
         size=size,
         overlap=overlap,
+        validation_mode=validation_mode,
         get_annotations=lambda: Obj(shapes=list(shapes), tracks=list(tracks), tags=list(tags)),
         get_labels=lambda: list(labels),
         get_meta=lambda: Obj(

@@ -91,7 +91,7 @@ that miss their object) -> get_frame_annotations for exact ids and boxes
 All frame numbers are task frame numbers (0-based), not job-relative; coordinates are original
 image pixels [x1, y1, x2, y2].
 {READ_ONLY_NOTE}
-Changing tasks and jobs is not available through this server: if the user asks for it,
+Deleting or changing tasks and jobs is not available through this server: if the user asks for it,
 explain that it must be done in the CVAT UI.
 """
 

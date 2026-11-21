@@ -4,6 +4,8 @@ from pydantic import BaseModel
 
 from cvat_mcp.errors import InvalidArgument
 
+POINT_TYPES = ("polygon", "polyline", "points")  # shapes whose points are x, y vertices
+
 
 class FrameObject(BaseModel):
     id: int
@@ -13,7 +15,7 @@ class FrameObject(BaseModel):
     attributes: dict[str, str]
     source: str
     occluded: bool
-    points: list[float] | None = None  # None for rectangles: their bbox is their geometry
+    points: list[float] | None = None  # vertices of polygons, polylines and points only
 
 
 class FrameTag(BaseModel):
@@ -81,7 +83,7 @@ def frame_annotations(task: Task, labels: list, frame: int) -> FrameAnnotations:
                 attributes={attribute_names[a.spec_id]: a.value for a in s.attributes},
                 source=str(s.source),
                 occluded=s.occluded,
-                points=None if str(s.type) == "rectangle" else list(s.points),
+                points=list(s.points) if str(s.type) in POINT_TYPES else None,
             )
             for s in annotations.shapes
             if s.frame == frame
