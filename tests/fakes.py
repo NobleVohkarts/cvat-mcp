@@ -115,3 +115,43 @@ def fake_list_settings(
         return Obj(count=inheriting, results=[]), None
 
     return Mock(side_effect=list_settings)
+
+
+def cloud_storage(
+    id,  # pylint: disable=redefined-builtin
+    bucket,
+    attrs="",
+    owner_id=1,
+    owner="admin",
+    org=None,
+    provider="AWS_S3_BUCKET",
+    credentials="KEY_SECRET_KEY_PAIR",
+    name=None,
+):
+    return Obj(
+        id=id,
+        display_name=name or f"{bucket} storage",
+        provider_type=Obj(value=provider),
+        resource=bucket,
+        specific_attributes=attrs,
+        credentials_type=Obj(value=credentials),
+        owner=Obj(id=owner_id, username=owner),
+        organization=org,
+    )
+
+
+def fake_cloudstorages_api(storages=()):
+    """cloudstorages_api.list over `storages` (honouring page_size); writes are Mocks."""
+    storages = list(storages)
+
+    def list_(page_size=100, **_):
+        return Obj(results=storages[:page_size], count=len(storages)), None
+
+    return Obj(
+        list=Mock(side_effect=list_),
+        create=Mock(),
+        partial_update=Mock(),
+        destroy=Mock(),
+        retrieve=lambda id, **_: (next(s for s in storages if s.id == id), None),
+        retrieve_status=Mock(return_value=(None, Obj(data=b'"AVAILABLE"'))),
+    )

@@ -20,6 +20,7 @@ READ_TOOLS = [
     "export_dataset",
     "get_frame_annotations",
     "get_task_overview",
+    "list_cloud_storages",
     "list_issues",
     "list_tasks",
     "render_frame",
@@ -68,6 +69,7 @@ def test_read_only_mode_registers_only_read_tools(monkeypatch, mode):
     assert "Issues belong" not in result["instructions"]
     assert "delete_issue" not in result["instructions"]
     assert "update_annotations" not in result["instructions"]
+    assert "create_cloud_storage" not in result["instructions"]
     assert "is not available through this server" not in result["instructions"]
     assert "call create_report, then\nrender_frame the conflict frames" in result["instructions"]
     assert "job_id of the ground-truth job to see the ground truth" in result["instructions"]
@@ -77,14 +79,17 @@ def test_write_mode_adds_write_tools(monkeypatch):
     result = registered(monkeypatch, "write")
     write_tools = [
         "create_annotations",
+        "create_cloud_storage",
         "create_gt_job",
         "create_issue",
         "create_task",
         "delete_annotations",
+        "delete_cloud_storage",
         "delete_gt_job",
         "delete_issue",
         "delete_task",
         "update_annotations",
+        "update_cloud_storage",
         "update_job",
         "update_quality_settings",
         "update_task",
@@ -96,6 +101,7 @@ def test_write_mode_adds_write_tools(monkeypatch):
     assert "only when the user asks to fix" in result["instructions"]
     assert sorted(result["destructive"]) == [
         "delete_annotations",
+        "delete_cloud_storage",
         "delete_gt_job",
         "delete_issue",
         "delete_task",
@@ -116,7 +122,14 @@ def test_write_mode_adds_write_tools(monkeypatch):
     assert annotation_tools <= set(result["with_job_id"])
     assert "create_task" in result["instructions"]
     assert "only tasks owned by" in result["instructions"]
-    assert result["open_world"] == ["create_task"]  # urls make CVAT fetch from any host
+    # urls and bucket links make CVAT fetch from any host
+    assert sorted(result["open_world"]) == [
+        "create_cloud_storage",
+        "create_task",
+        "update_cloud_storage",  # CVAT re-checks the bucket on every update
+    ]
+    assert "keys go only to create_cloud_storage and update_cloud_storage" in result["instructions"]
+    assert "never repeat keys" in result["instructions"]
     assert "disabled" not in result["instructions"]
 
 
