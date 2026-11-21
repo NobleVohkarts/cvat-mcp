@@ -74,12 +74,19 @@ def test_update_job_needs_a_field():
     client.api_client.jobs_api.partial_update.assert_not_called()
 
 
-def _gt_client(included=(0, 2)):
+def _gt_client(included=(0, 2), size=3, start_frame=0, frame_filter="", meta_error=None):
     jobs_api = Obj(
         create=Mock(return_value=(Obj(id=30), None)),
-        retrieve_data_meta=Mock(return_value=(Obj(included_frames=list(included)), None)),
+        retrieve_data_meta=Mock(
+            return_value=(Obj(included_frames=list(included)), None), side_effect=meta_error
+        ),
     )
-    client = fake_client(Obj(id=5, size=3), api_client=Obj(jobs_api=jobs_api))
+    task = Obj(
+        id=5,
+        size=size,
+        get_meta=lambda: Obj(start_frame=start_frame, frame_filter=frame_filter),
+    )
+    client = fake_client(task, api_client=Obj(jobs_api=jobs_api))
     return client, jobs_api
 
 
@@ -129,6 +136,7 @@ def test_create_gt_job_manual():
         ({"frames": [0, 0]}, "twice"),
         ({"frames": [3]}, "outside"),
         ({"frames": [0], "seed": 1}, "seed"),
+        ({"frame_count": 2, "seed": -1}, "seed"),
     ],
 )
 def test_create_gt_job_refusals(kw, match):
@@ -160,8 +168,18 @@ def test_delete_gt_job():
 
 def test_delete_refuses_annotation_job():
     client, jobs_api = _delete_client(job_type="annotation")
-    with pytest.raises(InvalidArgument, match="segments.*delete the task"):
+    with pytest.raises(InvalidArgument, match="not a ground-truth job.*segments.*delete the task"):
         delete_gt_job(client, 30)
+    jobs_api.destroy.assert_not_called()
+
+
+def test_delete_refuses_consensus_replica_without_segment_reason():
+    client, jobs_api = _delete_client(job_type="consensus_replica")
+    with pytest.raises(
+        InvalidArgument, match=r"\(consensus_replica\) is not a ground-truth job"
+    ) as e:
+        delete_gt_job(client, 30)
+    assert "segments" not in str(e.value)
     jobs_api.destroy.assert_not_called()
 
 
@@ -170,3 +188,29 @@ def test_delete_refuses_foreign_task():
     with pytest.raises(InvalidArgument, match="alice.*CVAT UI"):
         delete_gt_job(client, 30)
     jobs_api.destroy.assert_not_called()
+
+
+def test_create_gt_job_random_frames_become_task_frames():
+    # data frames 10, 14 of a task that starts at data frame 10 with step 2 are task frames 0, 2
+    client, _ = _gt_client(included=(10, 14), size=10, start_frame=10, frame_filter="step=2")
+    assert _create(client, frame_count=2).frames == [0, 2]
+
+
+def test_create_gt_job_manual_returns_given_frames_without_meta():
+    client, jobs_api = _gt_client(size=10, start_frame=10, frame_filter="step=2")
+    assert _create(client, frames=[3, 1]).frames == [1, 3]
+    jobs_api.retrieve_data_meta.assert_not_called()
+
+
+def test_create_gt_job_survives_a_failed_frame_read():
+    # the job exists: failing here would make the model retry into "only one GT job"
+    client, _ = _gt_client(meta_error=RuntimeError("502"))
+    result = _create(client, frame_count=2)
+    assert (result.job_id, result.frames) == (30, None)
+
+
+def test_create_gt_job_on_a_task_without_data():
+    client, jobs_api = _gt_client(size=None)
+    with pytest.raises(InvalidArgument, match="no data"):
+        _create(client, frame_count=1)
+    jobs_api.create.assert_not_called()
