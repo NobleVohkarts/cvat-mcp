@@ -27,16 +27,20 @@ reports each problem as a CVAT issue on the right frame of the right job.
 | `create_annotations` | **write** | Add missing objects or tags (rectangles by box, polygons/polylines/points by points), all checked first, then added in one step. |
 | `update_annotations` | **write** | Correct existing objects or tags by id: label, box or points, attributes, occluded; only what changes is given. |
 | `delete_annotations` | **write** | Remove objects or tags by explicit ids (shape and tag ids are separate lists), all or none. |
+| `create_task` | **write** | Create a task from images in `CVAT_MCP_WORKDIR` or from URLs, with labels or a project; waits for CVAT to process the data and leaves nothing behind if the upload fails. |
+| `update_task` | **write** | Rename a task, assign it, move it into a project or add labels (never remove them). |
+| `delete_task` | **write** | Delete a task owned by the token's CVAT account, with all its jobs, annotations and issues. |
 
 In write mode the model can fix annotations, and the instructions say to do so only when the
 user asks. Each annotation tool checks every item (frame, label and its type, attribute values,
 geometry) before it writes, then applies the whole list in one CVAT request, or nothing. Deletes
 take explicit ids only; the SDK's `remove_annotations()`, which deletes everything when given an
 empty list, is never used. Tracks, ground-truth annotations and tasks with overlapping jobs stay
-read-only here. Changing tasks and jobs is not available yet; the model points the user to the
-CVAT UI. `delete_issue` is limited to issues filed under the token's CVAT account; anyone else's
-issues stay untouched. Issues you filed in the UI with that same account count as its own, so give the server
-a token of a separate reviewer account if those must be protected too.
+read-only here. Tasks can be created and edited; `delete_task` and `delete_issue` are limited to
+what the token's CVAT account owns, so anyone else's tasks and issues stay untouched. Deleting or
+changing jobs is not available yet; the model points the user to the CVAT UI. Tasks and issues
+you created in the UI with that same account count as its own, so give the server a token of a
+separate reviewer account if those must be protected too.
 
 ## Design
 
@@ -85,7 +89,7 @@ cp .env.example .env   # then fill in CVAT_ACCESS_TOKEN
 | --- | --- | --- |
 | `CVAT_URL` | `http://localhost:8080` | CVAT server URL |
 | `CVAT_ACCESS_TOKEN` | — (required) | Personal Access Token (CVAT UI → profile → Access tokens). Write mode needs a token **without** "read only". |
-| `CVAT_MCP_MODE` | `read-only` | `read-only` or `write` (adds `create_issue`, `delete_issue` and the annotation write tools) |
+| `CVAT_MCP_MODE` | `read-only` | `read-only` or `write` (adds `create_issue`, `delete_issue` and the annotation and task write tools) |
 | `CVAT_MCP_WORKDIR` | `workdir` | The only directory the server may read or write files in |
 | `CVAT_MCP_TRANSPORT` | `stdio` | `http` serves Streamable HTTP with OAuth (set by `scripts/serve-public.sh`) |
 | `CVAT_MCP_PUBLIC_URL` | — | Public `https` URL in HTTP mode (the tunnel URL) |
@@ -184,7 +188,7 @@ Style follows the monorepo: black and isort (line length 100), pylint with the r
 
 Not done yet:
 
-- `create_task`, `import_annotations`, `update_job`;
+- `import_annotations`, `update_job`;
 - a progress adapter for long operations;
 - a `full` mode with confirmation via elicitation;
 - a `review_task` prompt;

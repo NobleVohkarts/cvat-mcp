@@ -54,6 +54,23 @@ class TaskOverview(BaseModel):
     total_objects: int
 
 
+def jobs_of(task) -> list[JobInfo]:
+    """The task's jobs in frame order (callers pick a job by frame)."""
+    return [job_info(j) for j in sorted(task.get_jobs(), key=lambda j: j.start_frame)]
+
+
+def job_info(job) -> JobInfo:
+    return JobInfo(
+        id=job.id,
+        type=str(job.type),
+        start_frame=job.start_frame,
+        stop_frame=job.stop_frame,
+        stage=str(job.stage),
+        state=str(job.state),
+        assignee=job.assignee.username if job.assignee else None,
+    )
+
+
 def clamp_limit(limit: int, *, low: int = 1, high: int = 100) -> int:
     return max(low, min(limit, high))
 
@@ -111,18 +128,7 @@ def get_task_overview(client: Client, task_id: int) -> TaskOverview:
             )
             for label in labels
         ],
-        jobs=[
-            JobInfo(
-                id=j.id,
-                type=str(j.type),
-                start_frame=j.start_frame,
-                stop_frame=j.stop_frame,
-                stage=str(j.stage),
-                state=str(j.state),
-                assignee=j.assignee.username if j.assignee else None,
-            )
-            for j in sorted(task.get_jobs(), key=lambda j: j.start_frame)
-        ],
+        jobs=jobs_of(task),
         objects_per_label=objects,
         total_objects=sum(objects.values()),
     )

@@ -113,9 +113,20 @@ def create_issue(
     )
 
 
-def _is_own(issue, user_id: int) -> bool:
-    """Filed by this server's CVAT user: the only issues delete_issue may remove."""
-    return issue.owner is not None and issue.owner.id == user_id
+def is_own(obj, user_id: int) -> bool:
+    """Owned by this server's CVAT user: the only issues and tasks it may delete."""
+    return obj.owner is not None and obj.owner.id == user_id
+
+
+def require_own(client: Client, obj, what: str, kinds: str) -> None:
+    """Refuse to delete what this server's user doesn't own; others are handled in the UI."""
+    me = client.users.retrieve_current_user()
+    if not is_own(obj, me.id):
+        owner = obj.owner.username if obj.owner else "a deleted user"
+        raise InvalidArgument(
+            f"{what} belongs to {owner}, not to this server's user {me.username}; "
+            f"only its own {kinds} can be deleted here, others in the CVAT UI"
+        )
 
 
 def list_issues(client: Client, task_id: int, frame: int | None) -> IssueList:
@@ -146,7 +157,7 @@ def list_issues(client: Client, task_id: int, frame: int | None) -> IssueList:
                 resolved=i.resolved,
                 author=i.owner.username if i.owner else None,
                 replies=max(i.comments.count - 1, 0),  # the first comment is the message
-                own=_is_own(i, me),
+                own=is_own(i, me),
             )
             for i in sorted(found, key=lambda i: (i.frame, i.id))
         ],
@@ -156,12 +167,6 @@ def list_issues(client: Client, task_id: int, frame: int | None) -> IssueList:
 def delete_issue(client: Client, issue_id: int) -> DeletedIssue:
     """Delete one issue, only if this server's user filed it."""
     issue = client.issues.retrieve(issue_id)
-    me = client.users.retrieve_current_user()
-    if not _is_own(issue, me.id):
-        author = issue.owner.username if issue.owner else "a deleted user"
-        raise InvalidArgument(
-            f"issue #{issue_id} was filed by {author}, not by this server's user {me.username}; "
-            "only its own issues can be deleted here, others in the CVAT UI"
-        )
+    require_own(client, issue, f"issue #{issue_id}", "issues")
     issue.remove()
     return DeletedIssue(issue_id=issue_id, job_id=issue.job, frame=issue.frame)

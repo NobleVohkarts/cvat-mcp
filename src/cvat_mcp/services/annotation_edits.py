@@ -113,7 +113,7 @@ def label_for(labels, name: str, type: str):  # pylint: disable=redefined-builti
     return label
 
 
-def _check_value(spec, value: str) -> None:
+def check_value(spec, value: str) -> None:
     if attribute_value_validator(spec)(value):
         return
     kind = spec.input_type.value
@@ -141,7 +141,7 @@ def attribute_values(
         )
     values = {a.id: current[a.id] for a in label.attributes if a.id in current}
     for name, value in given.items():
-        _check_value(specs[name], value)
+        check_value(specs[name], value)
         values[specs[name].id] = value
     return attribute_vals_from_dict(
         {a.id: values[a.id] for a in label.attributes if a.id in values}
