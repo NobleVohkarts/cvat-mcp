@@ -19,7 +19,7 @@ from cvat_mcp.services.annotation_edits import (
 CAR = LABELS[0]
 TAG_LABEL = Obj(id=3, name="night", type="tag", attributes=[])
 ANY_LABEL = Obj(id=4, name="thing", type="any", attributes=[])
-SPEED = Obj(id=12, name="speed", input_type="number", values=["0", "10", "1"])
+SPEED = Obj(id=12, name="speed", input_type=Obj(value="number"), values=["0", "10", "2"])
 
 
 @pytest.mark.parametrize(
@@ -76,9 +76,9 @@ def test_label_for_tag_label():
 
 
 def test_attribute_values_by_name():
-    assert attribute_values(CAR, {"color": "red", "parked": "true"}, {}) == [
-        {"spec_id": 10, "value": "true"},
-        {"spec_id": 11, "value": "red"},
+    assert _pairs(attribute_values(CAR, {"color": "red", "parked": "true"}, {})) == [
+        (10, "true"),
+        (11, "red"),
     ]
 
 
@@ -95,19 +95,27 @@ def test_attribute_values_refuses(given, match):
         attribute_values(CAR, given, {})
 
 
-@pytest.mark.parametrize("value", ["11", "-1", "fast"])
+def _pairs(values):
+    return [(v.spec_id, v.value) for v in values]
+
+
+def _summary(result):
+    return [(o.id, o.kind, o.frame, o.label) for o in result.objects]
+
+
+@pytest.mark.parametrize("value", ["12", "-2", "fast", "0.5", "3"])
 def test_number_attribute_outside_range(value):
     label = Obj(id=5, name="truck", type="rectangle", attributes=[SPEED])
-    with pytest.raises(InvalidArgument, match=r"0\.\.10"):
+    with pytest.raises(InvalidArgument, match=r"whole number in 0\.\.10, step 2"):
         attribute_values(label, {"speed": value}, {})
 
 
 def test_attribute_values_keep_current_and_drop_foreign():
     # 11 is kept, 10 overridden by name, 99 (another label's attribute) dropped
     current = {10: "false", 11: "blue", 99: "x"}
-    assert attribute_values(CAR, {"parked": "true"}, current) == [
-        {"spec_id": 10, "value": "true"},
-        {"spec_id": 11, "value": "blue"},
+    assert _pairs(attribute_values(CAR, {"parked": "true"}, current)) == [
+        (10, "true"),
+        (11, "blue"),
     ]
 
 
@@ -131,8 +139,7 @@ PARKED = Obj(spec_id=10, value="true")
 def _client(response=None, shapes=(), tags=(), overlap=0):
     api = Mock()
     api.partial_update_annotations.return_value = (response, None)
-    task = fake_task(shapes, tags=tags, jobs=JOBS, overlap=overlap)
-    task.get_labels = lambda: [*LABELS, TAG_LABEL]
+    task = fake_task(shapes, tags=tags, jobs=JOBS, overlap=overlap, labels=[*LABELS, TAG_LABEL])
     return fake_client(task, api_client=Obj(tasks_api=api)), api
 
 
@@ -142,14 +149,8 @@ def _sent(api, action):
     return call.kwargs["patched_labeled_data_request"]
 
 
-def _created(id, frame, label_id, points, type="rectangle"):  # pylint: disable=redefined-builtin
-    return Obj(id=id, frame=frame, label_id=label_id, type=type, points=points)
-
-
 def test_create_sends_one_patch_and_returns_ids():
-    response = Obj(
-        shapes=[_created(101, 3, 1, [10, 20, 110, 220])], tags=[Obj(id=7, frame=3, label_id=3)]
-    )
+    response = Obj(shapes=[shape(101, 1, 3, [10, 20, 110, 220])], tags=[tag(7, 3, 3)])
     client, api = _client(response)
     objects = [
         NewObject(frame=3, label="car", bbox=[10, 20, 110, 220], attributes={"color": "red"}),
@@ -164,9 +165,9 @@ def test_create_sends_one_patch_and_returns_ids():
         [10, 20, 110, 220],
         "rectangle",
     )
-    assert [(a.spec_id, a.value) for a in box.attributes] == [(11, "red")]
+    assert _pairs(box.attributes) == [(11, "red")]
     assert [(t.frame, t.label_id) for t in sent.tags] == [(3, 3)]
-    assert [(o.id, o.kind, o.frame, o.label) for o in result.objects] == [
+    assert _summary(result) == [
         (101, "shape", 3, "car"),
         (7, "tag", 3, "night"),
     ]
@@ -175,7 +176,7 @@ def test_create_sends_one_patch_and_returns_ids():
 
 def test_create_pairs_ids_by_content_not_order():
     response = Obj(
-        shapes=[_created(202, 25, 2, [5, 5, 9, 9]), _created(201, 3, 1, [1, 1, 4, 4])], tags=[]
+        shapes=[shape(202, 2, 25, [5, 5, 9, 9]), shape(201, 1, 3, [1, 1, 4, 4])], tags=[]
     )
     client, _ = _client(response)
     objects = [
@@ -209,8 +210,8 @@ def test_update_merges_and_keeps_other_fields():
     result = update_annotations(client, 1, [ObjectChange(id=1, bbox=[0, 0, 50, 50])])
     (sent,) = _sent(api, "update").shapes
     assert (sent.id, sent.z_order, sent.points) == (1, 2, [0, 0, 50, 50])
-    assert [(a.spec_id, a.value) for a in sent.attributes] == [(10, "true")]
-    assert [(o.id, o.kind, o.frame, o.label) for o in result.objects] == [(1, "shape", 3, "car")]
+    assert _pairs(sent.attributes) == [(10, "true")]
+    assert _summary(result) == [(1, "shape", 3, "car")]
 
 
 def test_update_label_drops_old_attributes():
@@ -225,7 +226,7 @@ def test_update_tag_attributes():
     client, api = _client(tags=[tag(7, 1, 3)])
     update_annotations(client, 1, [ObjectChange(id=7, kind="tag", attributes={"parked": "true"})])
     (sent,) = _sent(api, "update").tags
-    assert sent.id == 7 and [(a.spec_id, a.value) for a in sent.attributes] == [(10, "true")]
+    assert sent.id == 7 and _pairs(sent.attributes) == [(10, "true")]
 
 
 @pytest.mark.parametrize(
@@ -262,7 +263,7 @@ def test_delete_sends_fetched_objects():
     result = delete_annotations(client, 1, [1], [7])
     sent = _sent(api, "delete")
     assert [s.id for s in sent.shapes] == [1] and [t.id for t in sent.tags] == [7]
-    assert [(o.id, o.kind, o.frame, o.label) for o in result.objects] == [
+    assert _summary(result) == [
         (1, "shape", 3, "car"),
         (7, "tag", 3, "night"),
     ]

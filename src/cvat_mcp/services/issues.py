@@ -53,6 +53,12 @@ def find_job_for_frame(jobs, frame: int):
     )
 
 
+def job_url(base_url: str, task_id: int, job_id: int | None = None, frame: int = 0) -> str:
+    """A CVAT UI link to a task, or to a frame of one of its jobs."""
+    url = f"{base_url.rstrip('/')}/tasks/{task_id}"
+    return f"{url}/jobs/{job_id}?frame={frame}" if job_id is not None else url
+
+
 def create_issue(
     client: Client,
     base_url: str,
@@ -103,7 +109,7 @@ def create_issue(
         job_id=job_id,
         frame=frame,
         position=position,
-        url=f"{base_url.rstrip('/')}/tasks/{job.task_id}/jobs/{job_id}?frame={frame}",
+        url=job_url(base_url, job.task_id, job_id, frame),
     )
 
 

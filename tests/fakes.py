@@ -27,8 +27,8 @@ LABELS = [
         color="#ff0000",
         type="rectangle",
         attributes=[
-            Obj(id=10, name="parked", input_type="checkbox", values=["false"]),
-            Obj(id=11, name="color", input_type="select", values=["red", "blue"]),
+            Obj(id=10, name="parked", input_type=Obj(value="checkbox"), values=["false"]),
+            Obj(id=11, name="color", input_type=Obj(value="select"), values=["red", "blue"]),
         ],
     ),
     Obj(id=2, name="person", color="#00ff00", type="rectangle", attributes=[]),
@@ -36,14 +36,23 @@ LABELS = [
 
 
 def fake_task(
-    shapes=(), size=40, tracks=(), tags=(), jobs=(), task_id=1, meta_frames=None, overlap=0, **kw
+    shapes=(),
+    size=40,
+    tracks=(),
+    tags=(),
+    jobs=(),
+    task_id=1,
+    meta_frames=None,
+    overlap=0,
+    labels=tuple(LABELS),
+    **kw,
 ):
     return Obj(
         id=task_id,
         size=size,
         overlap=overlap,
         get_annotations=lambda: Obj(shapes=list(shapes), tracks=list(tracks), tags=list(tags)),
-        get_labels=lambda: LABELS,
+        get_labels=lambda: list(labels),
         get_meta=lambda: Obj(
             frames=meta_frames or [Obj(width=640, height=480) for _ in range(size)]
         ),
