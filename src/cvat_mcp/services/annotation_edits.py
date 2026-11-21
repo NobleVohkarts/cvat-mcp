@@ -1,6 +1,8 @@
+import json
 from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import Literal
 
 from cvat_sdk import Client
@@ -189,7 +191,7 @@ Sent = list[tuple[str, object]]  # (kind, request) in item order
 def _patch(client: Client, action: str, task_id: int, sent: Sent, job_id: int | None = None):
     # The SDK's update_annotations() drops the response, which holds the new ids.
     api = client.api_client.jobs_api if job_id is not None else client.api_client.tasks_api
-    data, _ = api.partial_update_annotations(
+    data, response = api.partial_update_annotations(
         action,
         job_id if job_id is not None else task_id,
         patched_labeled_data_request=models.PatchedLabeledDataRequest(
@@ -198,6 +200,8 @@ def _patch(client: Client, action: str, task_id: int, sent: Sent, job_id: int | 
             tracks=[],
         ),
     )
+    if job_id is not None:  # the SDK's schema has no body for the job PATCH, but CVAT sends one
+        data = json.loads(response.data, object_hook=lambda d: SimpleNamespace(**d))
     return data
 
 

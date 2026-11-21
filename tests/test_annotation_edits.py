@@ -1,3 +1,4 @@
+import json
 from unittest.mock import Mock
 
 import pytest
@@ -364,7 +365,9 @@ def _gt_client(
     response=None, gt_shapes=(), task_shapes=(), overlap=0, validation_mode=None, job=None
 ):
     tasks_api, jobs_api = Mock(), Mock()
-    jobs_api.partial_update_annotations.return_value = (response, None)
+    # like the SDK: no parsed body for the job PATCH (its schema has none), only the raw response
+    raw = json.dumps(response or {"shapes": [], "tags": []}).encode()
+    jobs_api.partial_update_annotations.return_value = (None, Obj(data=raw))
     task = fake_task(
         task_shapes,
         jobs=JOBS,
@@ -391,7 +394,10 @@ BOX = NewObject(frame=2, label="car", bbox=[1, 1, 4, 4])
 
 
 def test_create_in_gt_job():
-    client, tasks_api, jobs_api = _gt_client(Obj(shapes=[shape(501, 1, 2, [1, 1, 4, 4])], tags=[]))
+    created = {"id": 501, "frame": 2, "label_id": 1, "type": "rectangle", "points": [1, 1, 4, 4]}
+    client, tasks_api, jobs_api = _gt_client(
+        {"shapes": [created | {"occluded": False}], "tags": []}
+    )
     result = create_annotations(client, "http://cvat", 1, [BOX], job_id=30)
     (sent,) = _job_sent(jobs_api, "create").shapes
     assert (sent.frame, sent.label_id) == (2, 1)
@@ -449,9 +455,7 @@ def test_update_in_gt_job():
 
 
 def test_job_path_allows_overlap_but_not_gt_pool():
-    client, _, jobs_api = _gt_client(
-        Obj(shapes=[shape(501, 1, 2, [1, 1, 4, 4])], tags=[]), overlap=5
-    )
+    client, _, jobs_api = _gt_client(overlap=5)
     create_annotations(client, "http://cvat", 1, [BOX], job_id=30)
     jobs_api.partial_update_annotations.assert_called_once()
     client, _, jobs_api = _gt_client(validation_mode="gt_pool")
