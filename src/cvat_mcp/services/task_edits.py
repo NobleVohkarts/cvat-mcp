@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from cvat_mcp.config import resolve_in_workdir
 from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.services.annotation_edits import check_value
+from cvat_mcp.services.cloud_storages import cloud_source, parse_bucket_url, resolve_storage
 from cvat_mcp.services.issues import job_url
 from cvat_mcp.services.tasks import JobInfo, jobs_of
 from cvat_mcp.services.users import require_own, user_id
@@ -96,6 +97,7 @@ class CreatedTask(BaseModel):
     frame_count: int
     jobs: list[JobInfo]
     url: str
+    cloud_storage_id: int | None = None  # the bucket's CVAT storage, for cloud_url
 
 
 def _listed(directory: Path, workdir: Path) -> list[Path]:
@@ -150,6 +152,7 @@ def create_task(
     project_id: int | None,
     files: list[str] | None,
     urls: list[str] | None,
+    cloud_url: str | None,
     segment_size: int | None,
 ) -> CreatedTask:
     # Argument checks first: they need no requests.
@@ -159,16 +162,26 @@ def create_task(
         raise InvalidArgument(
             "pass exactly one of labels or project_id (a project's tasks use its labels)"
         )
-    if (files is None) == (urls is None):
-        raise InvalidArgument("pass exactly one of files or urls")
+    if [files, urls, cloud_url].count(None) != 2:
+        raise InvalidArgument("pass exactly one of files, urls or cloud_url")
+    params = {"sorting_method": "natural"}
+    storage_id, registered, pattern = None, False, None
     if files is not None:
         resources, resource_type = resolve_files(workdir, files), ResourceType.LOCAL
-    else:
+    elif urls is not None:
         _check_urls(urls)
         resources, resource_type = urls, ResourceType.REMOTE
+    else:
+        resources, pattern = cloud_source(parse_bucket_url(cloud_url).key)
+        resource_type = ResourceType.SHARE
     spec = {"name": name, "project_id": project_id, "segment_size": segment_size}
     if labels is not None:
         spec["labels"] = label_requests(labels)
+    if cloud_url is not None:  # after every check: this may register the bucket
+        storage_id, registered = resolve_storage(client, base_url, cloud_url)
+        params |= {"cloud_storage_id": storage_id, "use_cache": True}
+        if pattern:
+            params["filename_pattern"] = pattern
 
     task = client.tasks.create(
         models.TaskWriteRequest(**{k: v for k, v in spec.items() if v is not None})
@@ -178,15 +191,25 @@ def create_task(
         task.upload_data(
             resources=resources,
             resource_type=resource_type,
-            params={"sorting_method": "natural"},
+            params=params,
             wait_for_completion=True,  # also refreshes the task (size)
             status_check_period=1,  # the default 5 s makes even a one-image task take 5 s
         )
-    except BaseException:
+    except BaseException as exc:
         try:
             task.remove()  # an empty task is no use to anyone
         except Exception:  # pylint: disable=broad-exception-caught
             logger.exception("could not remove task %s after its upload failed", task.id)
+        if registered:  # nor is a storage this call registered for it
+            try:
+                client.api_client.cloudstorages_api.destroy(storage_id)
+            except Exception:  # pylint: disable=broad-exception-caught
+                logger.exception("could not remove cloud storage %s", storage_id)
+        elif storage_id is not None and "not available" in str(getattr(exc, "body", "")):
+            raise InvalidArgument(
+                f"cloud storage #{storage_id} is not available: check the bucket, or its keys "
+                "with update_cloud_storage"
+            ) from exc
         raise
     return CreatedTask(
         task_id=task.id,
@@ -194,6 +217,7 @@ def create_task(
         frame_count=task.size,
         jobs=jobs_of(task),
         url=job_url(base_url, task.id),
+        cloud_storage_id=storage_id,
     )
 
 

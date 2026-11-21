@@ -28,7 +28,7 @@ reports each problem as a CVAT issue on the right frame of the right job.
 | `create_annotations` | **write** | Add missing objects or tags (rectangles by box, polygons/polylines/points by points), all checked first, then added in one step. `job_id` writes into one job, e.g. ground truth. |
 | `update_annotations` | **write** | Correct existing objects or tags by id: label, box or points, attributes, occluded; only what changes is given. `job_id` edits one job's objects. |
 | `delete_annotations` | **write** | Remove objects or tags by explicit ids (shape and tag ids are separate lists), all or none. `job_id` deletes from one job. |
-| `create_task` | **write** | Create a task from images in `CVAT_MCP_WORKDIR` or from URLs, with labels or a project; waits for CVAT to process the data and leaves nothing behind if the upload fails. |
+| `create_task` | **write** | Create a task from images in `CVAT_MCP_WORKDIR`, from URLs or from an S3-compatible bucket link (`cloud_url`: a folder, glob or object; reuses the bucket's cloud storage), with labels or a project; waits for CVAT to process the data and leaves nothing behind if the upload fails. |
 | `update_task` | **write** | Rename a task, assign it, move it into a project or add labels (never remove them). |
 | `delete_task` | **write** | Delete a task owned by the token's CVAT account, with all its jobs, annotations and issues. |
 | `list_cloud_storages` | read | The cloud storages (buckets) CVAT knows: bucket, endpoint, prefix, owner and whether it has keys; never the keys. |

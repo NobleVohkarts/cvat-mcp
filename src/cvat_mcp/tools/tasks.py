@@ -40,14 +40,21 @@ def create_task(
     project_id: int | None = None,
     files: Paths | None = None,
     urls: Paths | None = None,
+    cloud_url: str | None = None,
     segment_size: int | None = None,
 ) -> CreatedTask:
     """Use to create a task, only when the user asks: images from files or folders inside the
     server's work directory (folders expand recursively, hidden files skipped; all images are
-    sorted by name in natural order, file names must be unique) or from http(s) URLs, with labels
-    given inline or taken from a project (project_id). Waits until CVAT has processed the data;
-    if the upload fails, no task is left behind. Returns the task id, frame count, jobs and a
-    CVAT UI link."""
+    sorted by name in natural order, file names must be unique), from http(s) URLs, or from an
+    S3-compatible bucket (cloud_url: a bucket link such as
+    https://<account>.r2.cloudflarestorage.com/bucket/folder/ or s3://bucket/folder/; a folder
+    is taken recursively, a link without a file extension counts as a folder, * and ? are
+    globs). The bucket's CVAT cloud storage is reused, or registered without keys for a public
+    bucket; a private bucket must be registered first with create_cloud_storage. Frames are
+    named by their full key. Use cloud_url, not urls, for bucket links. Labels are given inline
+    or taken from a project (project_id). Waits until CVAT has processed the data; if the upload
+    fails, no task is left behind. Returns the task id, frame count, jobs, the cloud storage id
+    and a CVAT UI link."""
     return task_edits.create_task(
         get_client(ctx),
         settings.url,
@@ -57,6 +64,7 @@ def create_task(
         project_id,
         files,
         urls,
+        cloud_url,
         segment_size,
     )
 
