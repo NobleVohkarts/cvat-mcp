@@ -21,6 +21,7 @@ reports each problem as a CVAT issue on the right frame of the right job.
 | `render_frame` | both | Look at a frame: JPEG with every box and a semi-transparent `#id label` caption drawn, plus a legend with exact boxes in original pixels. `include_clean=True` adds the same frame without annotations, for crowded frames. |
 | `get_frame_annotations` | both | Get exact data for one frame's objects and tags: id, label, type, box (plus points for polygons, polylines and points), attributes, source. |
 | `export_dataset` | both | Save a task as a dataset file in a CVAT format (e.g. `COCO 1.0`) inside `CVAT_MCP_WORKDIR`; waits for CVAT's background export, never overwrites. |
+| `create_report` | both | Measure a task's annotation jobs against its ground-truth job (CVAT quality control): waits for a fresh report, returns counts, scores and conflicts by frame with the ids involved; needs a token that can write. |
 | `list_issues` | both | See the issues already filed on a task or one frame: message, position, author, resolved, replies, and `own` (filed under the token's CVAT account). |
 | `create_issue` | **write** | Report one problem to the annotator: an issue on a frame of a job, at an object's box or a given region. |
 | `delete_issue` | **write** | Remove one of the token account's own issues (with its comments), e.g. to rewrite issues: list → create the new → delete the old. |
@@ -51,7 +52,7 @@ give the server a token of a separate reviewer account if those must be protecte
 | Principle | Where it lives |
 | --- | --- |
 | **A tool is a user task, not an endpoint.** Verb + object names; each description says when to use the tool and how it differs from its neighbours. | `tools/*.py` docstrings |
-| **Asynchrony stays inside.** Tools wait for CVAT background work themselves. | `export_dataset` returns only when CVAT's background export (`202` + `rq_id`) is done and downloaded (`services/exports.py`) |
+| **Asynchrony stays inside.** Tools wait for CVAT background work themselves. | `export_dataset` returns only when CVAT's background export (`202` + `rq_id`) is done and downloaded (`services/exports.py`); `create_report` waits for the quality report request (`services/quality.py`) |
 | **Protect the model's context.** `limit` + `total`, summaries instead of raw data, pydantic responses with only the needed fields, images downscaled to `max_side` and sent as JPEG. | `services/*.py` models, `render.py` |
 | **Security.** What isn't in the mode isn't registered; `ToolAnnotations` hints; Personal Access Token only (the server never stores or acts with a password); file paths only inside `CVAT_MCP_WORKDIR`; the token is never logged or returned. | `server.tool()`; `config.resolve_in_workdir` (used by `export_dataset`); remote access: `auth.py` |
 | **Errors are written for the model.** 401/403/404/400 and argument mistakes become one-line hints with the next step. mcp shows only `ToolError` text, so every tool is wrapped. | `errors.explain`, `server.tool_errors`, `server.reject_unknown_arguments` |

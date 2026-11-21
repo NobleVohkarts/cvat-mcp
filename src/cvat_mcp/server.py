@@ -93,6 +93,8 @@ Typical flow: list_tasks -> get_task_overview (labels, jobs and their frame rang
 -> render_frame for each frame to review (look for missing objects, wrong labels and boxes
 that miss their object) -> get_frame_annotations for exact ids and boxes
 -> list_issues for issues already filed there -> report the problems to the user{WRITE_STEPS}.
+To measure annotation jobs against the task's ground-truth job, call create_report, then
+render_frame the conflict frames.
 All frame numbers are task frame numbers (0-based), not job-relative; coordinates are original
 image pixels [x1, y1, x2, y2].
 {READ_ONLY_NOTE}
