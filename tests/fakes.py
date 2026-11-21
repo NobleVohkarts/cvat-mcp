@@ -65,3 +65,16 @@ def fake_task(
 
 def fake_client(task, **repos):
     return Obj(tasks=Obj(retrieve=lambda _id: task), **repos)
+
+
+def gt_job(shapes=(), included=(0, 2), task_id=1, job_id=30, **kw):
+    return Obj(
+        id=job_id,
+        task_id=task_id,
+        type="ground_truth",
+        start_frame=min(included),
+        stop_frame=max(included),
+        get_meta=lambda: Obj(included_frames=list(included)),
+        get_annotations=lambda: Obj(shapes=list(shapes), tracks=[], tags=[]),
+        **kw,
+    )
