@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.services.annotations import check_frame
-from cvat_mcp.services.tasks import JobInfo, job_info
+from cvat_mcp.services.tasks import JobInfo, job_info, task_frames
 from cvat_mcp.services.users import require_own, user_id
 
 logger = logging.getLogger("cvat_mcp")
@@ -81,19 +81,12 @@ def create_gt_job(
         return GtJob(job_id=created.id, task_id=task_id, frames=sorted(frames))
     try:
         meta, _ = jobs_api.retrieve_data_meta(created.id)
-        chosen = _task_frames(task, meta.included_frames)
+        chosen = task_frames(task.get_meta(), meta.included_frames)
     except Exception:  # pylint: disable=broad-exception-caught
         # the job exists: failing now would make the model retry into "only one GT job"
         logger.warning("could not read the frames of new GT job %s", created.id, exc_info=True)
         chosen = None
     return GtJob(job_id=created.id, task_id=task_id, frames=chosen)
-
-
-def _task_frames(task, data_frames) -> list[int]:
-    """Task frame numbers (0-based) for data frame numbers, as CVAT stores GT frames."""
-    data = task.get_meta()
-    step = int(data.frame_filter.split("=")[1]) if data.frame_filter.startswith("step=") else 1
-    return sorted((f - data.start_frame) // step for f in data_frames)
 
 
 def delete_gt_job(client: Client, job_id: int) -> DeletedJob:

@@ -1,6 +1,9 @@
+import json
+import logging
 from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import Literal
 
 from cvat_sdk import Client
@@ -9,7 +12,7 @@ from cvat_sdk.attributes import attribute_vals_from_dict, attribute_value_valida
 from pydantic import BaseModel, ConfigDict, Field
 
 from cvat_mcp.errors import InvalidArgument
-from cvat_mcp.services.annotations import check_frame
+from cvat_mcp.services.annotations import Scope, scope_of
 from cvat_mcp.services.issues import check_bbox, find_job_for_frame, job_url
 
 ShapeType = Literal["rectangle", "polygon", "polyline", "points"]
@@ -60,9 +63,11 @@ class AnnotationEdit(BaseModel):
     action: str
     objects: list[EditedObject]
     url: str | None = None
+    job_id: int | None = None  # set when one job's annotations were edited (e.g. ground truth)
 
 
-def check_editable(task) -> None:
+def check_editable(scope: Scope) -> None:
+    task = scope.task
     if str(task.validation_mode) == "gt_pool":
         # CVAT's task annotations include the ground-truth job in this mode
         raise InvalidArgument(
@@ -70,8 +75,8 @@ def check_editable(task) -> None:
             "use the CVAT UI"
         )
     # shortcut: a task PATCH writes overlap frames into both jobs and deletes only one copy;
-    # upgrade = job-level PATCH per frame's job.
-    if task.overlap:
+    # upgrade = job-level PATCH per frame's job. One job's PATCH (job_id) has no such problem.
+    if task.overlap and scope.job is None:
         raise InvalidArgument(
             f"task {task.id} has overlapping jobs (overlap {task.overlap}); editing its "
             "annotations is not supported here, use the CVAT UI"
@@ -165,9 +170,9 @@ def _check_unique(refs: list[tuple[str, int]]) -> None:
         seen.add((kind, id_))
 
 
-def _not_found(kind: str, ids) -> InvalidArgument:
+def _not_found(kind: str, ids, scope: Scope) -> InvalidArgument:
     return InvalidArgument(
-        f"{kind} id(s) {', '.join(map(str, ids))} not among this task's {kind}s (tracks are "
+        f"{kind} id(s) {', '.join(map(str, ids))} not among {scope.name} {kind}s (tracks are "
         "read-only and not listed here); use get_frame_annotations for the ids on a frame"
     )
 
@@ -181,29 +186,44 @@ def _by_id(task) -> dict[str, dict]:
     }
 
 
+logger = logging.getLogger("cvat_mcp")
+
 Sent = list[tuple[str, object]]  # (kind, request) in item order
 
 
-def _patch(client: Client, action: str, task_id: int, sent: Sent):
+def _patch(client: Client, action: str, scope: Scope, sent: Sent):
     # The SDK's update_annotations() drops the response, which holds the new ids.
-    data, _ = client.api_client.tasks_api.partial_update_annotations(
+    on_job = scope.job is not None
+    api = client.api_client.jobs_api if on_job else client.api_client.tasks_api
+    data, response = api.partial_update_annotations(
         action,
-        task_id,
+        scope.job_id if on_job else scope.task.id,
         patched_labeled_data_request=models.PatchedLabeledDataRequest(
             shapes=[r for k, r in sent if k == "shape"],
             tags=[r for k, r in sent if k == "tag"],
             tracks=[],
         ),
     )
-    return data
+    if not on_job:
+        return data
+    if action != "create":  # only a create needs the answer (the new ids)
+        return None
+    # The SDK's schema has no body for the job PATCH, but CVAT sends one. The write is done, so
+    # an unreadable answer must not fail the call: the model would retry and duplicate objects.
+    try:
+        body = json.loads(response.data, object_hook=lambda d: SimpleNamespace(**d))
+    except ValueError:
+        logger.warning("unreadable answer to a job annotations PATCH", exc_info=True)
+        body = None
+    return SimpleNamespace(shapes=getattr(body, "shapes", []), tags=getattr(body, "tags", []))
 
 
 def _result(
-    action: str, task_id: int, labels, sent: Sent, ids=None, url: str | None = None
+    action: str, scope: Scope, labels, sent: Sent, ids=None, url: str | None = None
 ) -> AnnotationEdit:
     names = {label.id: label.name for label in labels}
     return AnnotationEdit(
-        task_id=task_id,
+        task_id=scope.task.id,
         action=action,
         objects=[
             EditedObject(
@@ -215,6 +235,7 @@ def _result(
             for i, (kind, r) in enumerate(sent)
         ],
         url=url,
+        job_id=scope.job_id,
     )
 
 
@@ -227,7 +248,11 @@ def _key(obj, kind: str) -> tuple:
 
 
 def create_annotations(
-    client: Client, base_url: str, task_id: int, objects: list[NewObject]
+    client: Client,
+    base_url: str,
+    task_id: int,
+    objects: list[NewObject],
+    job_id: int | None = None,
 ) -> AnnotationEdit:
     # Argument checks first: they need no requests.
     points = []
@@ -235,12 +260,13 @@ def create_annotations(
         with _item(index):
             points.append(check_geometry(obj.type, obj.bbox, obj.points))
     task = client.tasks.retrieve(task_id)
-    check_editable(task)
+    scope = scope_of(client, task, job_id)
+    check_editable(scope)
     labels = task.get_labels()
     sent = []
     for index, (obj, obj_points) in enumerate(zip(objects, points)):
         with _item(index):
-            check_frame(obj.frame, task.size)
+            scope.check_frame(obj.frame)
             label = label_for(labels, obj.label, obj.type)
             attributes = attribute_values(label, obj.attributes, {})
         common = {"frame": obj.frame, "label_id": label.id, "attributes": attributes}
@@ -253,9 +279,10 @@ def create_annotations(
             sent.append(("shape", request))
 
     first = objects[0].frame
-    job = find_job_for_frame(task.get_jobs(), first)  # before the write: nothing may fail after it
+    # before the write: nothing may fail after it
+    job = scope.job or find_job_for_frame(task.get_jobs(), first)
 
-    data = _patch(client, "create", task_id, sent)
+    data = _patch(client, "create", scope, sent)
     # Pair ids by content: across jobs CVAT returns the objects grouped by job, not in order.
     new_ids = defaultdict(list)
     for kind, created in (("shape", data.shapes), ("tag", data.tags)):
@@ -263,7 +290,7 @@ def create_annotations(
             new_ids[_key(c, kind)].append(c.id)
     return _result(
         "created",
-        task_id,
+        scope,
         labels,
         sent,
         ids=[(new_ids[_key(r, kind)] or [None]).pop(0) for kind, r in sent],
@@ -271,7 +298,9 @@ def create_annotations(
     )
 
 
-def update_annotations(client: Client, task_id: int, objects: list[ObjectChange]) -> AnnotationEdit:
+def update_annotations(
+    client: Client, task_id: int, objects: list[ObjectChange], job_id: int | None = None
+) -> AnnotationEdit:
     # Argument checks first: they need no requests.
     _check_unique([(c.kind, c.id) for c in objects])
     for index, change in enumerate(objects):
@@ -281,16 +310,17 @@ def update_annotations(client: Client, task_id: int, objects: list[ObjectChange]
                 if change.occluded is not None:
                     raise InvalidArgument("occluded is for shapes only")
     task = client.tasks.retrieve(task_id)
-    check_editable(task)
+    scope = scope_of(client, task, job_id)
+    check_editable(scope)
     labels = task.get_labels()
     label_by_id = {label.id: label for label in labels}
-    found = _by_id(task)
+    found = _by_id(scope.source)
     sent = []
     for index, change in enumerate(objects):
         with _item(index):
             obj = found[change.kind].get(change.id)
             if obj is None:
-                raise _not_found(change.kind, [change.id])
+                raise _not_found(change.kind, [change.id], scope)
             type_ = "tag" if change.kind == "tag" else str(obj.type)
             if change.label is not None and type_ == "skeleton":
                 # its elements carry the old label's sublabels
@@ -318,12 +348,16 @@ def update_annotations(client: Client, task_id: int, objects: list[ObjectChange]
             }
         sent.append((change.kind, REQUEST[change.kind](**data)))
 
-    _patch(client, "update", task_id, sent)
-    return _result("updated", task_id, labels, sent)
+    _patch(client, "update", scope, sent)
+    return _result("updated", scope, labels, sent)
 
 
 def delete_annotations(
-    client: Client, task_id: int, shape_ids: list[int], tag_ids: list[int]
+    client: Client,
+    task_id: int,
+    shape_ids: list[int],
+    tag_ids: list[int],
+    job_id: int | None = None,
 ) -> AnnotationEdit:
     """Delete objects named by explicit ids, all or none.
 
@@ -334,13 +368,14 @@ def delete_annotations(
     refs = [("shape", i) for i in shape_ids] + [("tag", i) for i in tag_ids]
     _check_unique(refs)
     task = client.tasks.retrieve(task_id)
-    check_editable(task)
-    found = _by_id(task)
+    scope = scope_of(client, task, job_id)
+    check_editable(scope)
+    found = _by_id(scope.source)
     for kind, ids in (("shape", shape_ids), ("tag", tag_ids)):
         missing = [i for i in ids if i not in found[kind]]
         if missing:
-            raise _not_found(kind, missing)
+            raise _not_found(kind, missing, scope)
     sent = [(kind, REQUEST[kind](**found[kind][i].to_dict())) for kind, i in refs]
 
-    _patch(client, "delete", task_id, sent)
-    return _result("deleted", task_id, task.get_labels(), sent)
+    _patch(client, "delete", scope, sent)
+    return _result("deleted", scope, task.get_labels(), sent)

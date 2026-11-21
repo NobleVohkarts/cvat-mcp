@@ -18,16 +18,16 @@ reports each problem as a CVAT issue on the right frame of the right job.
 | `server_info` | both | See CVAT and SDK versions, compatibility, the current user, the mode and the available tools. Call first or when something fails. |
 | `list_tasks` | both | Find tasks (newest first, `limit` ≤ 100) with frame count, status, job progress and the `total` of all matches. |
 | `get_task_overview` | both | Understand one task: labels, jobs with frame ranges, stage, state, assignee, objects per label. |
-| `render_frame` | both | Look at a frame: JPEG with every box and a semi-transparent `#id label` caption drawn, plus a legend with exact boxes in original pixels. `include_clean=True` adds the same frame without annotations, for crowded frames. |
-| `get_frame_annotations` | both | Get exact data for one frame's objects and tags: id, label, type, box (plus points for polygons, polylines and points), attributes, source. |
+| `render_frame` | both | Look at a frame: JPEG with every box and a semi-transparent `#id label` caption drawn, plus a legend with exact boxes in original pixels. `include_clean=True` adds the same frame without annotations, for crowded frames. `job_id` draws one job's annotations (e.g. ground truth). |
+| `get_frame_annotations` | both | Get exact data for one frame's objects and tags: id, label, type, box (plus points for polygons, polylines and points), attributes, source. `job_id` reads one job's annotations (e.g. ground truth). |
 | `export_dataset` | both | Save a task as a dataset file in a CVAT format (e.g. `COCO 1.0`) inside `CVAT_MCP_WORKDIR`; waits for CVAT's background export, never overwrites. |
 | `create_report` | both | Measure a task's annotation jobs against its ground-truth job (CVAT quality control): waits for a fresh report, returns counts, scores and conflicts by frame with the ids involved; needs a token that can write. |
 | `list_issues` | both | See the issues already filed on a task or one frame: message, position, author, resolved, replies, and `own` (filed under the token's CVAT account). |
 | `create_issue` | **write** | Report one problem to the annotator: an issue on a frame of a job, at an object's box or a given region. |
 | `delete_issue` | **write** | Remove one of the token account's own issues (with its comments), e.g. to rewrite issues: list → create the new → delete the old. |
-| `create_annotations` | **write** | Add missing objects or tags (rectangles by box, polygons/polylines/points by points), all checked first, then added in one step. |
-| `update_annotations` | **write** | Correct existing objects or tags by id: label, box or points, attributes, occluded; only what changes is given. |
-| `delete_annotations` | **write** | Remove objects or tags by explicit ids (shape and tag ids are separate lists), all or none. |
+| `create_annotations` | **write** | Add missing objects or tags (rectangles by box, polygons/polylines/points by points), all checked first, then added in one step. `job_id` writes into one job, e.g. ground truth. |
+| `update_annotations` | **write** | Correct existing objects or tags by id: label, box or points, attributes, occluded; only what changes is given. `job_id` edits one job's objects. |
+| `delete_annotations` | **write** | Remove objects or tags by explicit ids (shape and tag ids are separate lists), all or none. `job_id` deletes from one job. |
 | `create_task` | **write** | Create a task from images in `CVAT_MCP_WORKDIR` or from URLs, with labels or a project; waits for CVAT to process the data and leaves nothing behind if the upload fails. |
 | `update_task` | **write** | Rename a task, assign it, move it into a project or add labels (never remove them). |
 | `delete_task` | **write** | Delete a task owned by the token's CVAT account, with all its jobs, annotations and issues. |
@@ -39,8 +39,10 @@ In write mode the model can fix annotations, and the instructions say to do so o
 user asks. Each annotation tool checks every item (frame, label and its type, attribute values,
 geometry) before it writes, then applies the whole list in one CVAT request, or nothing. Deletes
 take explicit ids only; the SDK's `remove_annotations()`, which deletes everything when given an
-empty list, is never used. Tracks, ground-truth annotations and tasks with overlapping jobs stay
-read-only here. Tasks can be created and edited; `delete_task` and `delete_issue` are limited to
+empty list, is never used. Tracks stay read-only here, and so do tasks with overlapping jobs
+unless one job is edited (`job_id`). Ground-truth annotations are reached with `job_id` of the
+GT job; the instructions say to edit ground truth only when the user explicitly asks, since
+annotators are measured against it. Tasks can be created and edited; `delete_task` and `delete_issue` are limited to
 what the token's CVAT account owns, so anyone else's tasks and issues stay untouched. Jobs can be
 reassigned and moved through stages; ground-truth jobs can be created, and deleted in the
 account's own tasks. Annotation jobs can't be created or deleted: CVAT makes them from the task's

@@ -75,7 +75,9 @@ if WRITE_MODE:
         "update_task, delete_task) only when the user asks; delete_task removes only tasks owned "
         "by this server's CVAT account. Change jobs (update_job) or create and delete "
         "ground-truth jobs (create_gt_job, delete_gt_job) only when the user asks; delete_gt_job "
-        "removes only ground-truth jobs of tasks owned by this server's CVAT account"
+        "removes only ground-truth jobs of tasks owned by this server's CVAT account. "
+        "Ground-truth annotations: pass job_id of the ground-truth job to the annotation tools; "
+        "edit ground truth only when the user explicitly asks"
     )
     READ_ONLY_NOTE = ""
 else:
@@ -94,7 +96,8 @@ Typical flow: list_tasks -> get_task_overview (labels, jobs and their frame rang
 that miss their object) -> get_frame_annotations for exact ids and boxes
 -> list_issues for issues already filed there -> report the problems to the user{WRITE_STEPS}.
 To measure annotation jobs against the task's ground-truth job, call create_report, then
-render_frame the conflict frames.
+render_frame the conflict frames, once as they are and once with
+job_id of the ground-truth job to see the ground truth.
 All frame numbers are task frame numbers (0-based), not job-relative; coordinates are original
 image pixels [x1, y1, x2, y2].
 {READ_ONLY_NOTE}

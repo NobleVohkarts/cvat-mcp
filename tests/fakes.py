@@ -46,6 +46,8 @@ def fake_task(
     overlap=0,
     labels=tuple(LABELS),
     validation_mode=None,
+    start_frame=0,
+    frame_filter="",
     **kw,
 ):
     return Obj(
@@ -56,7 +58,9 @@ def fake_task(
         get_annotations=lambda: Obj(shapes=list(shapes), tracks=list(tracks), tags=list(tags)),
         get_labels=lambda: list(labels),
         get_meta=lambda: Obj(
-            frames=meta_frames or [Obj(width=640, height=480) for _ in range(size)]
+            frames=meta_frames or [Obj(width=640, height=480) for _ in range(size)],
+            start_frame=start_frame,
+            frame_filter=frame_filter,
         ),
         get_jobs=lambda: list(jobs),
         **kw,
@@ -65,3 +69,21 @@ def fake_task(
 
 def fake_client(task, **repos):
     return Obj(tasks=Obj(retrieve=lambda _id: task), **repos)
+
+
+def gt_job(shapes=(), included=(0, 2), task_id=1, job_id=30, deleted=(), **kw):
+    return Obj(
+        id=job_id,
+        task_id=task_id,
+        type="ground_truth",
+        start_frame=min(included),
+        stop_frame=max(included),
+        get_meta=lambda: Obj(included_frames=list(included), deleted_frames=list(deleted)),
+        get_annotations=lambda: Obj(shapes=list(shapes), tracks=[], tags=[]),
+        **kw,
+    )
+
+
+def job_client(task, job, **repos):
+    """A fake client whose jobs.retrieve returns `job`."""
+    return fake_client(task, jobs=Obj(retrieve=lambda _id: job), **repos)

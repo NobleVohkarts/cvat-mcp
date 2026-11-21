@@ -1,7 +1,8 @@
 import pytest
-from fakes import Obj, fake_client, fake_task, shape, tag
+from fakes import Obj, fake_client, fake_task, gt_job, job_client, shape, tag
 
 from cvat_mcp.services.annotations import check_frame, get_frame_annotations, shape_bbox
+from cvat_mcp.services.tasks import task_frames
 
 
 def test_shape_bbox_rectangle():
@@ -100,3 +101,55 @@ def test_polyline_and_points_have_points():
     shapes = [shape(1, 1, 3, [0, 0, 5, 5], type="polyline"), shape(2, 1, 3, [1, 1], type="points")]
     result = get_frame_annotations(fake_client(fake_task(shapes)), 1, 3)
     assert [o.points for o in result.objects] == [[0, 0, 5, 5], [1, 1]]
+
+
+def test_job_annotations_of_a_gt_job():
+    task = fake_task([shape(1, 1, 2, [0, 0, 5, 5])])
+    job = gt_job([shape(2, 2, 2, [10, 10, 50, 50])])
+    result = get_frame_annotations(job_client(task, job), 1, 2, job_id=30)
+    assert [o.id for o in result.objects] == [2] and result.job_id == 30
+
+
+def test_job_frame_outside_gt_job():
+    task = fake_task()
+    with pytest.raises(ValueError, match="frame 1 is not in job 30.*0, 2"):
+        get_frame_annotations(job_client(task, gt_job()), 1, 1, job_id=30)
+
+
+def test_job_of_another_task():
+    task = fake_task()
+    with pytest.raises(ValueError, match="belongs to task 9"):
+        get_frame_annotations(job_client(task, gt_job(task_id=9)), 1, 2, job_id=30)
+
+
+def test_annotation_job_frames_are_its_range():
+    task = fake_task()
+    job = Obj(id=20, task_id=1, type="annotation", start_frame=20, stop_frame=39)
+    with pytest.raises(ValueError, match="frame 5 is not in job 20"):
+        get_frame_annotations(job_client(task, job), 1, 5, job_id=20)
+
+
+def test_task_frames_convert_data_frames():
+    meta = Obj(start_frame=10, frame_filter="step=2")
+    assert task_frames(meta, [14, 10]) == [0, 2]
+
+
+def test_gt_job_frames_are_task_frames():
+    # data frames 10, 14 of a task starting at data frame 10 with step 2 are task frames 0, 2
+    task = fake_task(start_frame=10, frame_filter="step=2")
+    client = job_client(task, gt_job(included=(10, 14)))
+    with pytest.raises(ValueError, match="its frames: 0, 2"):
+        get_frame_annotations(client, 1, 1, job_id=30)
+
+
+def test_without_job_id_nothing_changes():
+    task = fake_task([shape(1, 1, 2, [0, 0, 5, 5])])
+    result = get_frame_annotations(fake_client(task), 1, 2)
+    assert [o.id for o in result.objects] == [1] and result.job_id is None
+
+
+def test_disabled_gt_frames_are_not_job_frames():
+    # CVAT lists disabled validation frames as the GT job's deleted frames (task frame numbers)
+    client = job_client(fake_task(), gt_job(included=(0, 2), deleted=(2,)))
+    with pytest.raises(ValueError, match="frame 2 is not in job 30.*its frames: 0$"):
+        get_frame_annotations(client, 1, 2, job_id=30)

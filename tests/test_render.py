@@ -1,6 +1,6 @@
 import io
 
-from fakes import fake_client, fake_task, shape
+from fakes import fake_client, fake_task, gt_job, job_client, shape
 from PIL import Image
 
 from cvat_mcp.render import (
@@ -146,3 +146,11 @@ def test_overlapping_fallback_caption_is_opaque():
     out, _ = render(Image.new("RGB", (800, 600)), boxes, {"car": "#ff0000"}, 800)
     # left padding of the first spot (above the box), covered again by a fallback caption
     assert out.getpixel((100, 98)) == (255, 0, 0)
+
+
+def test_render_frame_uses_the_job():
+    task = fake_task([shape(1, 1, 0, [0, 0, 5, 5])], get_frame=_frame_png)
+    job = gt_job([shape(2, 2, 0, [10, 10, 50, 50])], included=(0, 2))
+    client = job_client(task, job)
+    _, text = render_frame(client, 1, 0, 1280, job_id=30)
+    assert "#2" in text and "#1 " not in text
