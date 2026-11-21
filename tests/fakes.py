@@ -56,7 +56,9 @@ def fake_task(
         get_annotations=lambda: Obj(shapes=list(shapes), tracks=list(tracks), tags=list(tags)),
         get_labels=lambda: list(labels),
         get_meta=lambda: Obj(
-            frames=meta_frames or [Obj(width=640, height=480) for _ in range(size)]
+            frames=meta_frames or [Obj(width=640, height=480) for _ in range(size)],
+            start_frame=0,
+            frame_filter="",
         ),
         get_jobs=lambda: list(jobs),
         **kw,

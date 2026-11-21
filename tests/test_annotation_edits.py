@@ -1,7 +1,7 @@
 from unittest.mock import Mock
 
 import pytest
-from fakes import LABELS, Obj, fake_client, fake_task, shape, tag
+from fakes import LABELS, Obj, fake_client, fake_task, gt_job, shape, tag
 
 from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.services.annotation_edits import (
@@ -358,3 +358,103 @@ def test_create_fetches_jobs_before_writing():
             client, "http://cvat", 1, [NewObject(frame=3, label="car", bbox=[1, 1, 4, 4])]
         )
     api.partial_update_annotations.assert_not_called()
+
+
+def _gt_client(
+    response=None, gt_shapes=(), task_shapes=(), overlap=0, validation_mode=None, job=None
+):
+    tasks_api, jobs_api = Mock(), Mock()
+    jobs_api.partial_update_annotations.return_value = (response, None)
+    task = fake_task(
+        task_shapes,
+        jobs=JOBS,
+        overlap=overlap,
+        validation_mode=validation_mode,
+        labels=(*LABELS, TAG_LABEL),
+    )
+    job = job or gt_job(gt_shapes)
+    client = fake_client(
+        task,
+        jobs=Obj(retrieve=lambda _id: job),
+        api_client=Obj(tasks_api=tasks_api, jobs_api=jobs_api),
+    )
+    return client, tasks_api, jobs_api
+
+
+def _job_sent(jobs_api, action):
+    (call,) = jobs_api.partial_update_annotations.call_args_list
+    assert call.args == (action, 30)
+    return call.kwargs["patched_labeled_data_request"]
+
+
+BOX = NewObject(frame=2, label="car", bbox=[1, 1, 4, 4])
+
+
+def test_create_in_gt_job():
+    client, tasks_api, jobs_api = _gt_client(Obj(shapes=[shape(501, 1, 2, [1, 1, 4, 4])], tags=[]))
+    result = create_annotations(client, "http://cvat", 1, [BOX], job_id=30)
+    (sent,) = _job_sent(jobs_api, "create").shapes
+    assert (sent.frame, sent.label_id) == (2, 1)
+    tasks_api.partial_update_annotations.assert_not_called()
+    assert (result.objects[0].id, result.job_id) == (501, 30)
+    assert result.url == "http://cvat/tasks/1/jobs/30?frame=2"
+
+
+def test_create_in_gt_job_refuses_other_frames():
+    client, tasks_api, jobs_api = _gt_client()
+    with pytest.raises(InvalidArgument, match=r"objects\[0\]: frame 1 is not in job 30"):
+        create_annotations(
+            client,
+            "http://cvat",
+            1,
+            [NewObject(frame=1, label="car", bbox=[1, 1, 4, 4])],
+            job_id=30,
+        )
+    jobs_api.partial_update_annotations.assert_not_called()
+    tasks_api.partial_update_annotations.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda c: create_annotations(c, "http://cvat", 1, [BOX], job_id=30),
+        lambda c: update_annotations(c, 1, [ObjectChange(id=1, occluded=True)], job_id=30),
+        lambda c: delete_annotations(c, 1, [1], [], job_id=30),
+    ],
+)
+def test_job_of_another_task_refused(edit):
+    client, _, jobs_api = _gt_client(job=gt_job([shape(1, 1, 2, [1, 1, 4, 4])], task_id=9))
+    with pytest.raises(InvalidArgument, match="belongs to task 9"):
+        edit(client)
+    jobs_api.partial_update_annotations.assert_not_called()
+
+
+def test_update_and_delete_use_the_jobs_objects():
+    client, tasks_api, jobs_api = _gt_client(
+        gt_shapes=[shape(7, 1, 2, [1, 1, 4, 4])], task_shapes=[shape(1, 1, 2, [1, 1, 4, 4])]
+    )
+    with pytest.raises(InvalidArgument, match="not among job 30's shapes"):
+        delete_annotations(client, 1, [1], [], job_id=30)
+    jobs_api.partial_update_annotations.assert_not_called()
+    delete_annotations(client, 1, [7], [], job_id=30)
+    assert [s.id for s in _job_sent(jobs_api, "delete").shapes] == [7]
+    tasks_api.partial_update_annotations.assert_not_called()
+
+
+def test_update_in_gt_job():
+    client, _, jobs_api = _gt_client(gt_shapes=[shape(7, 1, 2, [1, 1, 4, 4])])
+    result = update_annotations(client, 1, [ObjectChange(id=7, label="person")], job_id=30)
+    (sent,) = _job_sent(jobs_api, "update").shapes
+    assert (sent.id, sent.label_id, result.job_id) == (7, 2, 30)
+
+
+def test_job_path_allows_overlap_but_not_gt_pool():
+    client, _, jobs_api = _gt_client(
+        Obj(shapes=[shape(501, 1, 2, [1, 1, 4, 4])], tags=[]), overlap=5
+    )
+    create_annotations(client, "http://cvat", 1, [BOX], job_id=30)
+    jobs_api.partial_update_annotations.assert_called_once()
+    client, _, jobs_api = _gt_client(validation_mode="gt_pool")
+    with pytest.raises(InvalidArgument, match="ground-truth pool"):
+        create_annotations(client, "http://cvat", 1, [BOX], job_id=30)
+    jobs_api.partial_update_annotations.assert_not_called()
