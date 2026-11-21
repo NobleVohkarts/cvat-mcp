@@ -6,11 +6,18 @@ from pydantic import BaseModel
 
 from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.services.annotations import check_frame
+from cvat_mcp.services.issues import require_own
 from cvat_mcp.services.task_edits import user_id
 from cvat_mcp.services.tasks import JobInfo, job_info
 
 Stage = Literal["annotation", "validation", "acceptance"]
 State = Literal["new", "in progress", "rejected", "completed"]
+
+
+class DeletedJob(BaseModel):
+    job_id: int
+    task_id: int
+    frame_count: int
 
 
 class GtJob(BaseModel):
@@ -65,3 +72,18 @@ def create_gt_job(
         task_id=task_id,
         frames=list(client.jobs.retrieve(created.id).get_meta().included_frames),
     )
+
+
+def delete_gt_job(client: Client, job_id: int) -> DeletedJob:
+    """Delete a ground-truth job with its annotations, only in a task this server's user owns."""
+    job = client.jobs.retrieve(job_id)
+    if str(job.type) != "ground_truth":
+        raise InvalidArgument(
+            f"job {job_id} is an {job.type} job; CVAT makes those from the task's segments, so "
+            "they can't be deleted one by one (delete the task instead)"
+        )
+    task = client.tasks.retrieve(job.task_id)
+    require_own(client, task, f"task #{task.id}", "tasks' ground-truth jobs")
+    # The SDK's Job has no remove(), so this goes to the API directly.
+    client.api_client.jobs_api.destroy(job_id)
+    return DeletedJob(job_id=job_id, task_id=job.task_id, frame_count=job.frame_count)

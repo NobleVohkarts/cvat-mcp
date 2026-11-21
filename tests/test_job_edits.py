@@ -4,7 +4,7 @@ import pytest
 from fakes import Obj, fake_client
 
 from cvat_mcp.errors import InvalidArgument
-from cvat_mcp.services.job_edits import create_gt_job, update_job
+from cvat_mcp.services.job_edits import create_gt_job, delete_gt_job, update_job
 
 ADMIN = Obj(id=1, username="admin")
 
@@ -137,3 +137,37 @@ def test_create_gt_job_refusals(kw, match):
     with pytest.raises(InvalidArgument, match=match):
         _create(client, **kw)
     jobs_api.create.assert_not_called()
+
+
+def _delete_client(job_type="ground_truth", owner=ADMIN):
+    job = _job(id=30, type=job_type, frame_count=2)
+    task = Obj(id=5, owner=owner)
+    jobs_api = Obj(destroy=Mock())
+    client = fake_client(
+        task,
+        jobs=Obj(retrieve=lambda _id: job),
+        users=Obj(retrieve_current_user=lambda: ADMIN),
+        api_client=Obj(jobs_api=jobs_api),
+    )
+    return client, jobs_api
+
+
+def test_delete_gt_job():
+    client, jobs_api = _delete_client()
+    result = delete_gt_job(client, 30)
+    jobs_api.destroy.assert_called_once_with(30)
+    assert (result.job_id, result.task_id, result.frame_count) == (30, 5, 2)
+
+
+def test_delete_refuses_annotation_job():
+    client, jobs_api = _delete_client(job_type="annotation")
+    with pytest.raises(InvalidArgument, match="segments.*delete the task"):
+        delete_gt_job(client, 30)
+    jobs_api.destroy.assert_not_called()
+
+
+def test_delete_refuses_foreign_task():
+    client, jobs_api = _delete_client(owner=Obj(id=2, username="alice"))
+    with pytest.raises(InvalidArgument, match="alice.*CVAT UI"):
+        delete_gt_job(client, 30)
+    jobs_api.destroy.assert_not_called()
