@@ -1,9 +1,15 @@
+from collections import defaultdict
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Literal
 
+from cvat_sdk import Client
+from cvat_sdk.api_client import models
 from pydantic import BaseModel, ConfigDict, Field
 
 from cvat_mcp.errors import InvalidArgument
-from cvat_mcp.services.issues import check_bbox
+from cvat_mcp.services.annotations import check_frame
+from cvat_mcp.services.issues import check_bbox, find_job_for_frame
 
 ShapeType = Literal["rectangle", "polygon", "polyline", "points"]
 MIN_POINTS = {"polygon": 3, "polyline": 2, "points": 1}
@@ -133,3 +139,148 @@ def attribute_values(label, given: dict[str, str], current: dict[int, str]) -> l
         _check_value(specs[name], value)
         values[specs[name].id] = value
     return [{"spec_id": a.id, "value": values[a.id]} for a in label.attributes if a.id in values]
+
+
+@contextmanager
+def _item(index: int) -> Iterator[None]:
+    """Name the list item an argument error is about."""
+    try:
+        yield
+    except InvalidArgument as exc:
+        raise InvalidArgument(f"objects[{index}]: {exc}") from exc
+
+
+def _check_unique(refs: list[tuple[str, int]]) -> None:
+    seen = set()
+    for kind, id_ in refs:
+        if (kind, id_) in seen:
+            raise InvalidArgument(f"{kind} #{id_} is listed twice")
+        seen.add((kind, id_))
+
+
+def _not_found(kind: str, ids) -> InvalidArgument:
+    return InvalidArgument(
+        f"{kind} id(s) {', '.join(map(str, ids))} not among this task's {kind}s (tracks are "
+        "read-only and not listed here); use get_frame_annotations for the ids on a frame"
+    )
+
+
+def _attribute_requests(values: list[dict]) -> list[models.AttributeValRequest]:
+    return [models.AttributeValRequest(**v) for v in values]
+
+
+def _patch(client: Client, action: str, task_id: int, shapes: list, tags: list):
+    # The SDK's update_annotations() drops the response, which holds the new ids.
+    data, _ = client.api_client.tasks_api.partial_update_annotations(
+        action,
+        task_id,
+        patched_labeled_data_request=models.PatchedLabeledDataRequest(
+            shapes=shapes, tags=tags, tracks=[]
+        ),
+    )
+    return data
+
+
+def _key(obj, kind: str) -> tuple:
+    if kind == "tag":
+        return (kind, obj.frame, obj.label_id)
+    return (kind, obj.frame, obj.label_id, str(obj.type), tuple(round(p, 2) for p in obj.points))
+
+
+def create_annotations(
+    client: Client, base_url: str, task_id: int, objects: list[NewObject]
+) -> AnnotationEdit:
+    task = client.tasks.retrieve(task_id)
+    check_editable(task)
+    labels = task.get_labels()
+    sent = []  # (kind, request) in item order
+    for index, obj in enumerate(objects):
+        with _item(index):
+            check_frame(obj.frame, task.size)
+            label = label_for(labels, obj.label, obj.type)
+            points = check_geometry(obj.type, obj.bbox, obj.points)
+            attributes = _attribute_requests(attribute_values(label, obj.attributes, {}))
+        common = {"frame": obj.frame, "label_id": label.id, "attributes": attributes}
+        if obj.type == "tag":
+            sent.append(("tag", models.LabeledImageRequest(**common)))
+        else:
+            request = models.LabeledShapeRequest(
+                type=obj.type, points=points, occluded=obj.occluded, **common
+            )
+            sent.append(("shape", request))
+
+    data = _patch(client, "create", task_id, *_split(sent))
+    # Pair ids by content: across jobs CVAT returns the objects grouped by job, not in order.
+    new_ids = defaultdict(list)
+    for kind, created in (("shape", data.shapes), ("tag", data.tags)):
+        for c in created:
+            new_ids[_key(c, kind)].append(c.id)
+    names = {label.id: label.name for label in labels}
+    first = objects[0].frame
+    job = find_job_for_frame(task.get_jobs(), first)
+    base = f"{base_url.rstrip('/')}/tasks/{task_id}"
+    return AnnotationEdit(
+        task_id=task_id,
+        action="created",
+        objects=[
+            EditedObject(
+                id=new_ids[_key(r, kind)].pop(0), kind=kind, frame=r.frame, label=names[r.label_id]
+            )
+            for kind, r in sent
+        ],
+        url=f"{base}/jobs/{job.id}?frame={first}" if job else base,
+    )
+
+
+def _split(sent: list[tuple[str, object]]) -> tuple[list, list]:
+    return [r for k, r in sent if k == "shape"], [r for k, r in sent if k == "tag"]
+
+
+def update_annotations(client: Client, task_id: int, objects: list[ObjectChange]) -> AnnotationEdit:
+    task = client.tasks.retrieve(task_id)
+    check_editable(task)
+    labels = task.get_labels()
+    by_id = {label.id: label for label in labels}
+    annotations = task.get_annotations()
+    found = {
+        "shape": {s.id: s for s in annotations.shapes},
+        "tag": {t.id: t for t in annotations.tags},
+    }
+    _check_unique([(c.kind, c.id) for c in objects])
+    sent = []
+    for index, change in enumerate(objects):
+        with _item(index):
+            obj = found[change.kind].get(change.id)
+            if obj is None:
+                raise _not_found(change.kind, [change.id])
+            type_ = "tag" if change.kind == "tag" else str(obj.type)
+            label = label_for(labels, change.label, type_) if change.label else by_id[obj.label_id]
+            # CVAT's update replaces the whole object, so send every field, changed or not.
+            data = obj.to_dict()
+            if change.bbox is not None or change.points is not None:
+                if type_ not in ("rectangle", "tag", *MIN_POINTS):
+                    raise InvalidArgument(
+                        f"the geometry of a {type_} can't be changed here (label, attributes "
+                        "and occluded can); use the CVAT UI"
+                    )
+                data["points"] = check_geometry(type_, change.bbox, change.points)
+            if change.occluded is not None:
+                if change.kind == "tag":
+                    raise InvalidArgument("occluded is for shapes only")
+                data["occluded"] = change.occluded
+            current = {a.spec_id: a.value for a in obj.attributes}
+            values = attribute_values(label, change.attributes or {}, current)
+            data |= {"label_id": label.id, "attributes": _attribute_requests(values)}
+        model = models.LabeledImageRequest if change.kind == "tag" else models.LabeledShapeRequest
+        sent.append((change.kind, model(**data)))
+
+    _patch(client, "update", task_id, *_split(sent))
+    names = {label.id: label.name for label in labels}
+    return AnnotationEdit(
+        task_id=task_id,
+        action="updated",
+        objects=[
+            EditedObject(id=r.id, kind=kind, frame=r.frame, label=names[r.label_id])
+            for kind, r in sent
+        ],
+    )
