@@ -21,10 +21,14 @@ reports each problem as a CVAT issue on the right frame of the right job.
 | `render_frame` | both | Look at a frame: JPEG with every box and a semi-transparent `#id label` caption drawn, plus a legend with exact boxes in original pixels. `include_clean=True` adds the same frame without annotations, for crowded frames. |
 | `get_frame_annotations` | both | Get exact data for one frame's objects: id, label, type, box, attributes, source. |
 | `export_dataset` | both | Save a task as a dataset file in a CVAT format (e.g. `COCO 1.0`) inside `CVAT_MCP_WORKDIR`; waits for CVAT's background export, never overwrites. |
+| `list_issues` | both | See the issues already filed on a task or one frame: message, position, author, resolved, and `own` (filed by this server's user). |
 | `create_issue` | **write** | Report one problem to the annotator: an issue on a frame of a job, at an object's box or a given region. |
+| `delete_issue` | **write** | Remove one of the server user's own issues (with its comments), e.g. to rewrite issues: list → delete → create. |
 
 Deleting or changing tasks, jobs and annotations is deliberately not available. The server's
-instructions tell the model so, and it points the user to the CVAT UI.
+instructions tell the model so, and it points the user to the CVAT UI. The one deletion is
+`delete_issue`, limited to issues the server's own CVAT user filed; anyone else's issues stay
+untouched.
 
 ## Design
 
@@ -73,7 +77,7 @@ cp .env.example .env   # then fill in CVAT_ACCESS_TOKEN
 | --- | --- | --- |
 | `CVAT_URL` | `http://localhost:8080` | CVAT server URL |
 | `CVAT_ACCESS_TOKEN` | — (required) | Personal Access Token (CVAT UI → profile → Access tokens). Write mode needs a token **without** "read only". |
-| `CVAT_MCP_MODE` | `read-only` | `read-only` or `write` (adds `create_issue`) |
+| `CVAT_MCP_MODE` | `read-only` | `read-only` or `write` (adds `create_issue` and `delete_issue`) |
 | `CVAT_MCP_WORKDIR` | `workdir` | The only directory the server may read or write files in |
 | `CVAT_MCP_TRANSPORT` | `stdio` | `http` serves Streamable HTTP with OAuth (set by `scripts/serve-public.sh`) |
 | `CVAT_MCP_PUBLIC_URL` | — | Public `https` URL in HTTP mode (the tunnel URL) |

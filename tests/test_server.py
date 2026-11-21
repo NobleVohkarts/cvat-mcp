@@ -19,13 +19,17 @@ READ_TOOLS = [
     "export_dataset",
     "get_frame_annotations",
     "get_task_overview",
+    "list_issues",
     "list_tasks",
     "render_frame",
     "server_info",
 ]
 LIST_TOOLS = """
-import json, cvat_mcp.server as s, cvat_mcp.tools
-print(json.dumps({"tools": sorted(s.REGISTERED_TOOLS), "instructions": s.INSTRUCTIONS}))
+import anyio, json, cvat_mcp.server as s, cvat_mcp.tools
+destructive = [t.name for t in anyio.run(s.mcp.list_tools) if t.annotations.destructive_hint]
+print(json.dumps({
+    "tools": sorted(s.REGISTERED_TOOLS), "instructions": s.INSTRUCTIONS, "destructive": destructive
+}))
 """
 
 
@@ -57,13 +61,16 @@ def test_read_only_mode_registers_only_read_tools(monkeypatch, mode):
     assert "Creating issues is disabled" in result["instructions"]
     assert "create_issue" not in result["instructions"]
     assert "Issues belong" not in result["instructions"]
+    assert "delete_issue" not in result["instructions"]
 
 
-def test_write_mode_adds_create_issue(monkeypatch):
+def test_write_mode_adds_issue_tools(monkeypatch):
     result = registered(monkeypatch, "write")
-    assert result["tools"] == sorted(READ_TOOLS + ["create_issue"])
+    assert result["tools"] == sorted(READ_TOOLS + ["create_issue", "delete_issue"])
     assert "only when the user asks" in result["instructions"]
     assert "Issues belong to the job" in result["instructions"]
+    assert "delete_issue the old ones, then create_issue" in result["instructions"]
+    assert result["destructive"] == ["delete_issue"]
     assert "Creating issues is disabled" not in result["instructions"]
 
 

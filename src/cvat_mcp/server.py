@@ -67,7 +67,9 @@ if WRITE_MODE:
     FILE_ISSUES = (
         " -> create_issue, one per problem, only when the user asks to file issues "
         '(reviewing is not such a request). Issues belong to the job of type "annotation" '
-        "whose frame range contains the frame"
+        "whose frame range contains the frame. To rewrite or replace issues, list_issues for the "
+        "frame, delete_issue the old ones, then create_issue the new ones; delete_issue removes "
+        "only issues this server's CVAT user filed (own=true)"
     )
     READ_ONLY_NOTE = ""
 else:
@@ -83,7 +85,7 @@ Mode: {settings.mcp_mode}.
 Typical flow: list_tasks -> get_task_overview (labels, jobs and their frame ranges)
 -> render_frame for each frame to review (look for missing objects, wrong labels and boxes
 that miss their object) -> get_frame_annotations for exact ids and boxes
--> report the problems to the user{FILE_ISSUES}.
+-> list_issues for issues already filed there -> report the problems to the user{FILE_ISSUES}.
 All frame numbers are task frame numbers (0-based), not job-relative; coordinates are original
 image pixels [x1, y1, x2, y2].
 {READ_ONLY_NOTE}

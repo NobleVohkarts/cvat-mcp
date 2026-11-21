@@ -1,9 +1,10 @@
 from cvat_sdk import Client
 from cvat_sdk.api_client import models
+from cvat_sdk.core.helpers import get_paginated_collection
 from pydantic import BaseModel
 
 from cvat_mcp.errors import InvalidArgument
-from cvat_mcp.services.annotations import shape_bbox
+from cvat_mcp.services.annotations import check_frame, shape_bbox
 
 
 class IssueRef(BaseModel):
@@ -12,6 +13,30 @@ class IssueRef(BaseModel):
     frame: int
     position: list[float]
     url: str
+
+
+class IssueInfo(BaseModel):
+    issue_id: int
+    job_id: int
+    frame: int
+    position: list[float]
+    message: str
+    resolved: bool
+    author: str | None
+    comments: int
+    own: bool
+
+
+class IssueList(BaseModel):
+    task_id: int
+    frame: int | None
+    issues: list[IssueInfo]
+
+
+class DeletedIssue(BaseModel):
+    issue_id: int
+    job_id: int
+    frame: int
 
 
 def check_bbox(bbox: list[float]) -> None:
@@ -81,3 +106,57 @@ def create_issue(
         position=position,
         url=f"{base_url.rstrip('/')}/tasks/{job.task_id}/jobs/{job_id}?frame={frame}",
     )
+
+
+def list_issues(client: Client, task_id: int, frame: int | None) -> IssueList:
+    task = client.tasks.retrieve(task_id)
+    filters = {}
+    if frame is not None:
+        check_frame(frame, task.size)
+        filters["frame_id"] = frame
+    api = client.api_client
+    # An explicit org context: without it the comments endpoint answers an empty list.
+    found = get_paginated_collection(
+        api.issues_api.list_endpoint, org_id=task.organization, task_id=task_id, **filters
+    )
+    # CVAT keeps an issue's message as its first comment; comments filter by job, not task.
+    messages = {}
+    for job_id in {i.job for i in found}:
+        comments = get_paginated_collection(
+            api.comments_api.list_endpoint, org_id=task.organization, job_id=job_id, **filters
+        )
+        for comment in sorted(comments, key=lambda c: c.id):
+            messages.setdefault(comment.issue, comment.message)
+    me = client.users.retrieve_current_user().id
+    return IssueList(
+        task_id=task_id,
+        frame=frame,
+        issues=[
+            IssueInfo(
+                issue_id=i.id,
+                job_id=i.job,
+                frame=i.frame,
+                position=i.position,
+                message=messages.get(i.id, ""),
+                resolved=i.resolved,
+                author=i.owner.username if i.owner else None,
+                comments=i.comments.count,
+                own=i.owner is not None and i.owner.id == me,
+            )
+            for i in sorted(found, key=lambda i: (i.frame, i.id))
+        ],
+    )
+
+
+def delete_issue(client: Client, issue_id: int) -> DeletedIssue:
+    """Delete one issue, only if this server's user filed it."""
+    issue = client.issues.retrieve(issue_id)
+    me = client.users.retrieve_current_user()
+    if issue.owner is None or issue.owner.id != me.id:
+        author = issue.owner.username if issue.owner else "a deleted user"
+        raise InvalidArgument(
+            f"issue #{issue_id} was filed by {author}, not by this server's user {me.username}; "
+            "only its own issues can be deleted here, others in the CVAT UI"
+        )
+    issue.remove()
+    return DeletedIssue(issue_id=issue_id, job_id=issue.job, frame=issue.frame)

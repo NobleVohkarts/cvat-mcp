@@ -13,7 +13,7 @@ _HINTS = {
     "Token in the CVAT UI and restart the server.",
     403: "CVAT denied permission for this action. The current user may lack access to this "
     "resource, or the access token is read-only (write actions need a token without 'read only').",
-    404: "CVAT: not found. The task, job or frame id does not exist or is not visible to this user. "
+    404: "CVAT: not found. The task, job, issue or frame id does not exist or is not visible to this user. "
     "Use list_tasks and get_task_overview to find valid ids.",
 }
 
