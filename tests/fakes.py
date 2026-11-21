@@ -22,7 +22,14 @@ def tag(id, label_id, frame, **kw):  # pylint: disable=redefined-builtin
 
 LABELS = [
     Obj(
-        id=1, name="car", color="#ff0000", type="rectangle", attributes=[Obj(id=10, name="parked")]
+        id=1,
+        name="car",
+        color="#ff0000",
+        type="rectangle",
+        attributes=[
+            Obj(id=10, name="parked", input_type="checkbox", values=["false"]),
+            Obj(id=11, name="color", input_type="select", values=["red", "blue"]),
+        ],
     ),
     Obj(id=2, name="person", color="#00ff00", type="rectangle", attributes=[]),
 ]
