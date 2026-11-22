@@ -106,6 +106,12 @@ def import_annotations(
                 client.api_client.cloudstorages_api.destroy(storage_id)
             except Exception:  # pylint: disable=broad-exception-caught
                 logger.exception("could not remove cloud storage %s", storage_id)
+        if isinstance(exc, ApiException) and exc.status == 409:  # CVAT: one import at a time
+            what = f"job {job_id}" if job else f"task {task.id}"
+            raise InvalidArgument(
+                f"another annotation import into {what} is still running (CVAT retries a "
+                "failing import for about a minute); wait for it to end, then call again"
+            ) from exc
         refused = isinstance(exc, BackgroundRequestException) or (
             isinstance(exc, ApiException) and exc.status == 400
         )

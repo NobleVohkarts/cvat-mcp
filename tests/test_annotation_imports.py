@@ -1,6 +1,7 @@
 from unittest.mock import Mock
 
 import pytest
+from cvat_sdk.api_client.exceptions import ApiException
 from cvat_sdk.core.exceptions import BackgroundRequestException
 from fakes import Obj, cloud_storage, fake_cloudstorages_api, fake_task, gt_job, shape, tag
 
@@ -218,3 +219,10 @@ def test_unexpected_error_passes_through_and_forgets_new_storage(tmp_path):
     with pytest.raises(RuntimeError, match="boom"):
         _import(client, tmp_path, task_id=1, cloud_url="s3://open-bucket/labels.json")
     client.api_client.cloudstorages_api.destroy.assert_called_once_with(7)
+
+
+def test_import_already_running_is_explained(tmp_path):
+    client = _cloud_client(_task(), gt_job())
+    client.api_client.jobs_api.create_annotations.side_effect = ApiException(409, "Conflict")
+    with pytest.raises(InvalidArgument, match="into job 30 is still running.*call again"):
+        _import(client, tmp_path, job_id=30, cloud_url=f"{R2}/cvat/labels.json")

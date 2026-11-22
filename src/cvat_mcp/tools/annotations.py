@@ -126,7 +126,8 @@ def import_annotations(
     frames, so a file for all images works. mode "append" adds to the annotations already there
     (importing the same file twice duplicates the objects); "replace" first deletes all the
     target's annotations, so use it only when the user asks to replace them. Returns the object
-    counts after the import."""
+    counts after the import. A file CVAT can't import takes about a minute to fail (CVAT retries
+    it); wait for the answer instead of calling again."""
     return annotation_imports.import_annotations(
         get_client(ctx), settings.mcp_workdir, job_id, task_id, cloud_url, file, format, mode
     )
