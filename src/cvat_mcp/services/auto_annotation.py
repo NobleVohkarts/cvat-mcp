@@ -1,6 +1,9 @@
 import importlib
+import threading
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Literal
 
 import PIL.Image
@@ -12,9 +15,14 @@ from cvat_sdk.auto_annotation.driver import _AnnotationMapper, _DetectionFunctio
 from cvat_sdk.auto_annotation.exceptions import BadFunctionError
 from pydantic import BaseModel
 
-from cvat_mcp.errors import InvalidArgument
-from cvat_mcp.services.annotation_edits import REQUEST, object_key, patch_annotations
-from cvat_mcp.services.annotations import Scope, shape_bbox
+from cvat_mcp.errors import InvalidArgument, explain
+from cvat_mcp.services.annotation_edits import (
+    REQUEST,
+    check_editable,
+    object_key,
+    patch_annotations,
+)
+from cvat_mcp.services.annotations import Scope, scope_of, shape_bbox
 
 Function = Literal["detection", "instance_segmentation", "keypoint_detection", "classification"]
 Mode = Literal["append", "replace"]
@@ -47,6 +55,37 @@ class AutoObject(BaseModel):
     label: str
     type: str
     bbox: list[float] | None = None
+
+
+class AutoAnnotationRun(BaseModel):
+    run_id: str
+    state: Literal["running", "finished", "failed"]
+    task_id: int
+    job_id: int | None
+    function: str
+    model: str
+    mode: str
+    frames_total: int
+    frames_done: int
+    added: dict[str, int]
+    skipped: dict[str, int]
+    started: datetime
+    finished: datetime | None = None
+    error: str | None = None
+
+
+class AutoAnnotation(BaseModel):
+    task_id: int
+    job_id: int | None
+    function: str
+    model: str
+    mode: str
+    frames: list[int]
+    objects: list[AutoObject]
+    skipped: dict[str, int]  # the function's label -> detections dropped (no such task label)
+    seconds: float
+    note: str | None = None
+    run: AutoAnnotationRun | None = None  # set for a background run (no frames given)
 
 
 @dataclass
@@ -219,3 +258,93 @@ def annotate(
         progress.skipped.update(skipped)
         progress.frames_done += len(chunk)
         progress.saved_frames += chunk
+
+
+# One model run at a time: the CPU is the bottleneck, and two runs would also double the memory.
+_LOCK = threading.Lock()
+_ACTIVE: str | None = None  # the background run holding the lock; None for a frame run
+
+
+def _acquire(run_id: str | None = None) -> None:
+    global _ACTIVE  # pylint: disable=global-statement
+    if not _LOCK.acquire(blocking=False):
+        if _ACTIVE is None:
+            raise InvalidArgument("another auto_annotate call is in progress; try again shortly")
+        raise InvalidArgument(
+            f"background run {_ACTIVE} is in progress; follow it with "
+            f"get_auto_annotation_run(run_id={_ACTIVE!r}) and try again when it ends"
+        )
+    _ACTIVE = run_id
+
+
+def _release() -> None:
+    global _ACTIVE  # pylint: disable=global-statement
+    _ACTIVE = None
+    _LOCK.release()
+
+
+def resolve_scope(client: Client, task_id: int | None, job_id: int | None) -> Scope:
+    if (task_id is None) == (job_id is None):
+        raise InvalidArgument("pass exactly one of task_id or job_id")
+    if task_id is None:
+        task_id = client.jobs.retrieve(job_id).task_id
+    task = client.tasks.retrieve(task_id)
+    if str(task.dimension) == "3d":
+        raise InvalidArgument(f"task {task.id} is a 3D task; auto-annotation supports 2D images")
+    scope = scope_of(client, task, job_id)
+    check_editable(scope)
+    return scope
+
+
+def _note(progress: Progress, labels) -> str | None:
+    if progress.objects:
+        return None
+    names = ", ".join(sorted(label.name for label in labels))
+    if progress.skipped:
+        return f"nothing matched: the function's labels are not among the task's ({names})"
+    return "the model found nothing above conf_threshold on these frames"
+
+
+def auto_annotate_frames(
+    client: Client,
+    task_id: int | None,
+    job_id: int | None,
+    frames: list[int],
+    opts: RunOptions,
+    chunk_size: int,
+) -> AutoAnnotation:
+    started = time.monotonic()
+    scope = resolve_scope(client, task_id, job_id)
+    frames = target_frames(scope, frames)
+    labels = scope.task.get_labels()
+    progress = Progress()
+    _acquire()
+    try:
+        fn = load_function(opts)
+        if opts.mode == "replace":
+            clear_frames(client, scope, frames)
+        annotate(client, scope, labels, fn, opts, frames, chunk_size, progress)
+    except Exception as exc:
+        if not progress.saved_frames:
+            raise
+        # The model would otherwise retry the whole call and duplicate the saved objects.
+        ids = ", ".join(str(o.id) for o in progress.objects)
+        raise InvalidArgument(
+            f"auto-annotation failed after saving frames "
+            f"{', '.join(map(str, progress.saved_frames))} (object ids: {ids or 'none'}): "
+            f"{explain(exc) or exc}. Those frames are done: do not repeat them."
+        ) from exc
+    finally:
+        _release()
+    return AutoAnnotation(
+        task_id=scope.task.id,
+        job_id=scope.job_id,
+        function=opts.function,
+        model=opts.model,
+        mode=opts.mode,
+        frames=frames,
+        objects=progress.objects,
+        skipped=dict(progress.skipped),
+        seconds=round(time.monotonic() - started, 1),
+        note=_note(progress, labels),
+    )

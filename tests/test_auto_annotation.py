@@ -76,7 +76,11 @@ def _echo_api():
 
 def _setup(size=5, **task_kw):
     task = fake_task(
-        size=size, labels=LABELS, get_frame=lambda n, quality=None: io.BytesIO(PNG), **task_kw
+        size=size,
+        labels=LABELS,
+        dimension="2d",
+        get_frame=lambda n, quality=None: io.BytesIO(PNG),
+        **task_kw,
     )
     api = _echo_api()
     client = fake_client(task, api_client=Obj(tasks_api=api), logger=Mock())
@@ -212,3 +216,94 @@ def test_target_frames_refused(frames, match):
 def test_unknown_model_lists_choices():
     with pytest.raises(InvalidArgument, match="maskrcnn_resnet50_fpn_v2"):
         aa.load_function(_opts(function="instance_segmentation", model="nope"))
+
+
+class BenchOnly(FakeFunction):
+    def detect(self, context, image):
+        return [cvataa.rectangle(1, [0, 0, 5, 5])]
+
+
+@pytest.fixture
+def use_function(monkeypatch):
+    def use(fn):
+        monkeypatch.setattr(aa, "load_function", lambda _opts: fn)
+        return fn
+
+    return use
+
+
+def test_frame_run_returns_objects(use_function):
+    use_function(FakeFunction())
+    client, _, _ = _setup()
+    result = aa.auto_annotate_frames(client, 1, None, [1, 0], _opts(), 10)
+    assert result.frames == [0, 1]
+    assert [(o.id, o.frame, o.label) for o in result.objects] == [(100, 0, "car"), (101, 1, "car")]
+    assert result.skipped == {"bench": 2}
+    assert (result.task_id, result.job_id, result.mode, result.run) == (1, None, "append", None)
+    assert result.model == "fasterrcnn_resnet50_fpn_v2"
+    assert result.note is None
+
+
+def test_frame_run_replace_clears_only_those_frames(use_function):
+    use_function(FakeFunction())
+    client, _, api = _setup(
+        shapes=[
+            shape(1, 1, 0, [0, 0, 1, 1]),
+            shape(2, 1, 1, [0, 0, 1, 1]),
+            shape(3, 1, 2, [0, 0, 1, 1]),
+        ]
+    )
+    aa.auto_annotate_frames(client, 1, None, [0, 1], _opts(mode="replace"), 10)
+    (deleted,) = _sent(api, "delete")
+    assert sorted(s.id for s in deleted.shapes) == [1, 2]
+    actions = [c.args[0] for c in api.partial_update_annotations.call_args_list]
+    assert actions == ["delete", "create"]
+
+
+def test_frame_run_busy_is_refused(use_function):
+    use_function(FakeFunction())
+    client, _, api = _setup()
+    assert aa._LOCK.acquire(blocking=False)
+    try:
+        with pytest.raises(InvalidArgument, match="in progress"):
+            aa.auto_annotate_frames(client, 1, None, [0], _opts(), 10)
+    finally:
+        aa._LOCK.release()
+    api.partial_update_annotations.assert_not_called()
+
+
+def test_frame_run_partial_failure_lists_saved(use_function):
+    use_function(FakeFunction(fail_on=3))
+    client, _, _ = _setup()
+    with pytest.raises(InvalidArgument) as error:
+        aa.auto_annotate_frames(client, 1, None, [0, 1, 2, 3], _opts(), 2)
+    message = str(error.value)
+    assert "frames 0, 1" in message
+    assert "100, 101" in message
+    assert "do not repeat" in message
+    assert "model crashed" in message
+    assert not aa._LOCK.locked()
+
+
+def test_frame_run_lock_released_after_error(use_function):
+    use_function(FakeFunction(fail_on=1))
+    client, _, _ = _setup()
+    with pytest.raises(RuntimeError):
+        aa.auto_annotate_frames(client, 1, None, [0], _opts(), 10)
+    assert not aa._LOCK.locked()
+
+
+def test_frame_run_nothing_matched_has_note(use_function):
+    use_function(BenchOnly())
+    client, _, _ = _setup()
+    result = aa.auto_annotate_frames(client, 1, None, [0], _opts(), 10)
+    assert result.objects == []
+    assert result.skipped == {"bench": 1}
+    assert "car, person" in result.note
+
+
+@pytest.mark.parametrize("task_id, job_id", [(None, None), (1, 30)])
+def test_exactly_one_target(task_id, job_id):
+    client, _, _ = _setup()
+    with pytest.raises(InvalidArgument, match="exactly one"):
+        aa.auto_annotate_frames(client, task_id, job_id, [0], _opts(), 10)
