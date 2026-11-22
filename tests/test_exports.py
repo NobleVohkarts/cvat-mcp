@@ -39,6 +39,17 @@ def test_check_format_lists_valid_names_for_the_dimension(name):
         check_format(Obj(api_client=FORMATS), name, "2d")
 
 
+def test_check_format_import_direction_reads_importers():
+    importers = [Obj(name="YOLO 1.1", enabled=True, dimension="2d")]
+    formats = Obj(
+        retrieve_annotation_formats=lambda: (Obj(exporters=EXPORTERS, importers=importers), None)
+    )
+    client = Obj(api_client=Obj(server_api=formats))
+    check_format(client, "YOLO 1.1", "2d", "import")
+    with pytest.raises(InvalidArgument, match=r"unknown import format 'COCO 1.0'.*: YOLO 1.1$"):
+        check_format(client, "COCO 1.0", "2d", "import")
+
+
 def test_reserved_names_differ_while_exports_run(tmp_path):
     with reserve_path(tmp_path / "a.zip") as first, reserve_path(tmp_path / "a.zip") as second:
         assert first != second

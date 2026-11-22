@@ -4,6 +4,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Literal
 
 from cvat_sdk import Client
 from cvat_sdk.core.proxies.types import Location
@@ -48,12 +49,18 @@ def reserve_path(path: Path) -> Iterator[Path]:
             _reserved.discard(candidate)
 
 
-def check_format(client: Client, format_name: str, dimension: str) -> None:
+def check_format(
+    client: Client,
+    format_name: str,
+    dimension: str,
+    direction: Literal["export", "import"] = "export",
+) -> None:
     formats, _ = client.api_client.server_api.retrieve_annotation_formats()
-    names = sorted(f.name for f in formats.exporters if f.enabled and str(f.dimension) == dimension)
+    listed = formats.importers if direction == "import" else formats.exporters
+    names = sorted(f.name for f in listed if f.enabled and str(f.dimension) == dimension)
     if format_name not in names:
         raise InvalidArgument(
-            f"unknown export format '{format_name}'; "
+            f"unknown {direction} format '{format_name}'; "
             f"valid for a {dimension} task: {', '.join(names)}"
         )
 
