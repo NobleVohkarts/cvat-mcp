@@ -15,6 +15,10 @@ dependencies = [
     "pydantic-settings>=2",
 ]
 
+[project.optional-dependencies]
+# torch and torchvision are listed so [tool.uv.sources] can pin them to the CPU builds
+auto-annotation = ["cvat-sdk[pytorch]==2.83.0", "torch", "torchvision"]
+
 [project.scripts]
 cvat-mcp = "cvat_mcp.__main__:main"
 
@@ -26,6 +30,15 @@ dev = [
     "pylint==4.0.9",
     "pytest>=8",
 ]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = {index = "pytorch-cpu"}
+torchvision = {index = "pytorch-cpu"}
 
 [build-system]
 requires = ["setuptools>=77"]

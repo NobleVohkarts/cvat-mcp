@@ -3,6 +3,7 @@ import logging
 import sys
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from importlib.util import find_spec
 from typing import TypeVar
 from urllib.parse import urlsplit
 
@@ -29,7 +30,7 @@ settings = Settings()
 def _connect(s: Settings) -> tuple[Client, str]:
     # make_client() also checks the server version and logs a warning if it is unsupported.
     try:
-        client = make_client(s.url, access_token=s.access_token.get_secret_value())
+        client = open_client(s)
         user = client.users.retrieve_current_user()
     except HTTPError:
         sys.exit(f"cvat-mcp: cannot reach CVAT at {s.url}. Is the server running? Check CVAT_URL.")
@@ -42,6 +43,11 @@ def _connect(s: Settings) -> tuple[Client, str]:
         sys.exit(f"cvat-mcp: CVAT at {s.url} answered {e.status} {e.reason} during login.")
     logger.info("connected to CVAT at %s as %s", s.url, user.username)
     return client, user.username
+
+
+def open_client(s: Settings = settings) -> Client:
+    """A new CVAT client (also for background runs, which outlive a request); raises, never exits."""
+    return make_client(s.url, access_token=s.access_token.get_secret_value())
 
 
 def check_cvat() -> None:
@@ -63,6 +69,15 @@ async def lifespan(_server: MCPServer) -> AsyncIterator[Client]:
 
 
 WRITE_MODE = settings.mcp_mode == "write"
+# The auto-annotation tools need the optional extra: `uv sync --extra auto-annotation`.
+AUTO_ANNOTATION = all(find_spec(m) is not None for m in ("torch", "torchvision", "skimage"))
+AUTO_ANNOTATION_STEPS = (
+    "; auto-annotate (auto_annotate) only when the user asks: with frames it waits and returns "
+    "the objects (check them with render_frame), without frames it runs over the whole task or "
+    "job in the background (follow it with get_auto_annotation_run)"
+    if AUTO_ANNOTATION
+    else ""
+)
 if WRITE_MODE:
     WRITE_STEPS = (
         " -> create_issue, one per problem, only when the user asks to file issues "
@@ -84,7 +99,7 @@ if WRITE_MODE:
         "update_cloud_storage, delete_cloud_storage) only when the user asks; keys go only to "
         "create_cloud_storage and update_cloud_storage, never repeat keys back"
         "; import annotation files (import_annotations) only when the user asks; it appends "
-        "unless the user asks to replace"
+        "unless the user asks to replace" + AUTO_ANNOTATION_STEPS
     )
     READ_ONLY_NOTE = ""
 else:
@@ -204,15 +219,16 @@ def tool_errors(fn: F) -> F:
 
 
 def tool(
-    *, write: bool = False, structured_output: bool | None = None, **hints
+    *, write: bool = False, enabled: bool = True, structured_output: bool | None = None, **hints
 ) -> Callable[[F], F]:
     """Register a tool, wrapped with model-facing error messages.
 
-    Write tools are registered only in write mode: what isn't in the mode doesn't exist.
+    Write tools are registered only in write mode, and `enabled=False` tools (a missing optional
+    extra) not at all: what isn't available doesn't exist.
     """
 
     def decorator(fn: F) -> F:
-        if write and not WRITE_MODE:
+        if not enabled or (write and not WRITE_MODE):
             return fn
         defaults = {"read_only_hint": not write, "open_world_hint": False}
         if write:

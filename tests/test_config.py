@@ -82,3 +82,11 @@ def test_http_mode_accepts_https_or_local(monkeypatch, url):
     monkeypatch.setenv("CVAT_MCP_TRANSPORT", "http")
     monkeypatch.setenv("CVAT_MCP_PUBLIC_URL", url)
     assert Settings().public_url == url
+
+
+def test_aa_chunk_size_default_and_minimum(monkeypatch):
+    monkeypatch.setenv("CVAT_ACCESS_TOKEN", "secret-value")
+    assert Settings().mcp_aa_chunk_size == 10
+    monkeypatch.setenv("CVAT_MCP_AA_CHUNK_SIZE", "0")
+    with pytest.raises(ValidationError, match="mcp_aa_chunk_size"):
+        Settings()

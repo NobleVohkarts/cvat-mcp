@@ -29,6 +29,8 @@ reports each problem as a CVAT issue on the right frame of the right job.
 | `update_annotations` | **write** | Correct existing objects or tags by id: label, box or points, attributes, occluded; only what changes is given. `job_id` edits one job's objects. |
 | `delete_annotations` | **write** | Remove objects or tags by explicit ids (shape and tag ids are separate lists), all or none. `job_id` deletes from one job. |
 | `import_annotations` | **write** | Load an annotation file in any CVAT import format (default `COCO 1.0`) into a job (e.g. ground truth) or a task, from a bucket link to one file (`cloud_url`; CVAT reads it through the bucket's cloud storage) or a file in `CVAT_MCP_WORKDIR`; appends unless `mode="replace"`; returns the object counts. |
+| `auto_annotate` | **write** (with the extra) | Run a built-in torchvision model from the CVAT SDK (detection boxes, instance-segmentation polygons or masks, keypoint skeletons, classification tags) on 1–20 frames (waits, returns the new objects) or on a whole task or job (background run). Saves results in chunks of `CVAT_MCP_AA_CHUNK_SIZE` frames, matches labels by name and counts the skipped ones; appends unless `mode="replace"` (shapes and tags of the run's frames, never tracks); one run at a time. |
+| `get_auto_annotation_run` | **write** (with the extra) | Progress of background `auto_annotate` runs: state, frames done, objects per label, error. In memory only; a restart forgets them. |
 | `create_task` | **write** | Create a task from images in `CVAT_MCP_WORKDIR`, from URLs or from an S3-compatible bucket link (`cloud_url`: a folder, glob or object; reuses the bucket's cloud storage), with labels or a project; waits for CVAT to process the data and leaves nothing behind if the upload fails. |
 | `update_task` | **write** | Rename a task, assign it, move it into a project or add labels (never remove them). |
 | `delete_task` | **write** | Delete a task owned by the token's CVAT account, with all its jobs, annotations and issues. |
@@ -98,12 +100,18 @@ uv sync
 cp .env.example .env   # then fill in CVAT_ACCESS_TOKEN
 ```
 
+Optional: `uv sync --extra auto-annotation` adds CPU builds of torch and torchvision (about 1 GB)
+and, in write mode, the `auto_annotate` and `get_auto_annotation_run` tools. Without the extra
+those two tools don't exist. `uv run` keeps the extra; a later plain `uv sync` removes it again.
+Each model downloads its weights (about 170 MB) into `~/.cache/torch` on first use.
+
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `CVAT_URL` | `http://localhost:8080` | CVAT server URL |
 | `CVAT_ACCESS_TOKEN` | — (required) | Personal Access Token (CVAT UI → profile → Access tokens). Write mode needs a token **without** "read only". |
 | `CVAT_MCP_MODE` | `read-only` | `read-only` or `write` (adds the write tools for issues, annotations, tasks and jobs) |
 | `CVAT_MCP_WORKDIR` | `workdir` | The only directory the server may read or write files in |
+| `CVAT_MCP_AA_CHUNK_SIZE` | `10` | Frames `auto_annotate` processes before it saves them in one upload (progress and crash-safety move in these steps) |
 | `CVAT_MCP_TRANSPORT` | `stdio` | `http` serves Streamable HTTP with OAuth (set by `scripts/serve-public.sh`) |
 | `CVAT_MCP_PUBLIC_URL` | — | Public `https` URL in HTTP mode (the tunnel URL) |
 | `CVAT_MCP_PORT` | `8765` | Local port in HTTP mode; bound to `127.0.0.1` only |
