@@ -3,7 +3,7 @@ import itertools
 import logging
 import threading
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -159,18 +159,16 @@ def target_frames(scope: Scope, frames: list[int] | None) -> list[int]:
     return sorted(frames)
 
 
-def clear_frames(client: Client, scope: Scope, frames: list[int]) -> None:
-    """Delete the scope's shapes and tags on those frames by explicit ids; tracks stay."""
+def _old_objects(scope: Scope, frames: list[int]) -> dict[int, list]:
+    """The scope's shapes and tags on those frames, as delete requests by frame; tracks stay."""
     wanted = set(frames)
     annotations = scope.source.get_annotations()
-    sent = [
-        (kind, REQUEST[kind](**obj.to_dict()))
-        for kind, objs in (("shape", annotations.shapes), ("tag", annotations.tags))
-        for obj in objs
-        if obj.frame in wanted
-    ]
-    if sent:
-        patch_annotations(client, "delete", scope, sent)
+    by_frame = defaultdict(list)
+    for kind, objs in (("shape", annotations.shapes), ("tag", annotations.tags)):
+        for obj in objs:
+            if obj.frame in wanted:
+                by_frame[obj.frame].append((kind, REQUEST[kind](**obj.to_dict())))
+    return by_frame
 
 
 def _bad_function(opts: RunOptions, exc: BadFunctionError) -> InvalidArgument:
@@ -219,6 +217,9 @@ def annotate(
         )
     except BadFunctionError as exc:
         raise _bad_function(opts, exc) from exc
+    # Fetched once, before any write; each chunk's old objects go just before its new ones, so a
+    # failure costs at most one chunk's old annotations.
+    old = _old_objects(scope, frames) if opts.mode == "replace" else {}
 
     for start in range(0, len(frames), chunk_size):
         chunk = frames[start : start + chunk_size]
@@ -235,17 +236,19 @@ def annotate(
                 conv_mask_to_poly=opts.polygons,
             )
             output = fn.detect(context, image)
-            skipped.update(
-                function_names[a.label_id]
-                for a in output
-                if function_names.get(a.label_id) not in task_names
-            )
+            for a in output:  # an id outside the spec is the mapper's error to report
+                name = function_names.get(a.label_id)
+                if name is not None and name not in task_names:
+                    skipped[name] += 1
             try:
                 tags, shapes = mapper.validate_and_remap(output, frame)
             except BadFunctionError as exc:
                 raise _bad_function(opts, exc) from exc
             sent += [("shape", s) for s in shapes] + [("tag", t) for t in tags]
 
+        stale = [item for frame in chunk for item in old.get(frame, [])]
+        if stale:
+            patch_annotations(client, "delete", scope, stale)
         ids = create_objects(client, scope, sent) if sent else []
         if progress.keep_objects:
             progress.objects += _objects(sent, ids, names)
@@ -326,8 +329,6 @@ def auto_annotate_frames(
     _acquire()
     try:
         fn = load_function(opts)
-        if opts.mode == "replace":
-            clear_frames(client, scope, frames)
         annotate(client, scope, labels, fn, opts, frames, chunk_size, progress)
     except Exception as exc:
         if not progress.saved_frames:
@@ -384,8 +385,6 @@ def _run(run: AutoAnnotationRun, progress: Progress, client_factory, opts, fn, f
         client = client_factory()
         task = client.tasks.retrieve(run.task_id)
         scope = scope_of(client, task, run.job_id)
-        if opts.mode == "replace":
-            clear_frames(client, scope, frames)
         annotate(client, scope, task.get_labels(), fn, opts, frames, size, progress)
         run.state = "finished"
     except Exception as exc:  # pylint: disable=broad-exception-caught  # recorded for the model
@@ -451,7 +450,8 @@ def start_run(
 
 def get_runs(run_id: str | None) -> AutoAnnotationRuns:
     if run_id is None:
-        return AutoAnnotationRuns(runs=[_snapshot(r) for r in reversed(_RUNS)])
+        # a copy: another request's start_run may add a run meanwhile
+        return AutoAnnotationRuns(runs=[_snapshot(r) for r in reversed(list(_RUNS))])
     if run_id not in _RUNS:
         known = ", ".join(_RUNS) or "none since the server started"
         raise InvalidArgument(f"unknown run_id {run_id!r}; known runs: {known}")

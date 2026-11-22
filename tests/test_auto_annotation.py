@@ -11,6 +11,7 @@ from fakes import Obj, fake_client, fake_task, shape, tag
 
 from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.services import auto_annotation as aa
+from cvat_mcp.services.annotation_edits import create_objects
 from cvat_mcp.services.annotations import Scope
 
 LABELS = [
@@ -155,9 +156,8 @@ def test_label_type_mismatch_is_invalid_argument():
         aa.annotate(client, Scope(task), LABELS, fn, _opts(), [0], 10, aa.Progress())
 
 
-def test_clear_frames_deletes_shapes_and_tags_not_tracks():
-    task = fake_task(
-        labels=LABELS,
+def test_replace_deletes_shapes_and_tags_not_tracks():
+    client, task, api = _setup(
         shapes=[
             shape(1, 1, 1, [0, 0, 1, 1]),
             shape(2, 1, 2, [0, 0, 1, 1]),
@@ -166,19 +166,102 @@ def test_clear_frames_deletes_shapes_and_tags_not_tracks():
         tags=[tag(4, 2, 2), tag(5, 2, 3)],
         tracks=[Obj(id=9, frame=1, label_id=1, shapes=[])],
     )
-    api = _echo_api()
-    client = fake_client(task, api_client=Obj(tasks_api=api))
-    aa.clear_frames(client, Scope(task), [1, 2])
+    aa.annotate(
+        client,
+        Scope(task),
+        LABELS,
+        FakeFunction(),
+        _opts(mode="replace"),
+        [1, 2],
+        10,
+        aa.Progress(),
+    )
     (deleted,) = _sent(api, "delete")
     assert sorted(s.id for s in deleted.shapes) == [1, 2]
     assert [t.id for t in deleted.tags] == [4]
     assert deleted.tracks == []
 
 
-def test_clear_frames_with_nothing_there_sends_nothing():
+def test_replace_with_nothing_there_deletes_nothing():
     client, task, api = _setup()
-    aa.clear_frames(client, Scope(task), [0])
-    api.partial_update_annotations.assert_not_called()
+    aa.annotate(
+        client, Scope(task), LABELS, FakeFunction(), _opts(mode="replace"), [0], 10, aa.Progress()
+    )
+    assert _sent(api, "delete") == []
+
+
+def test_replace_clears_chunk_by_chunk():
+    # A crash in chunk 2 must leave frames 2.. with their old annotations.
+    client, task, api = _setup(shapes=[shape(i + 1, 1, i, [0, 0, 1, 1]) for i in range(5)])
+    with pytest.raises(RuntimeError):
+        aa.annotate(
+            client,
+            Scope(task),
+            LABELS,
+            FakeFunction(fail_on=3),
+            _opts(mode="replace"),
+            [0, 1, 2, 3, 4],
+            2,
+            aa.Progress(),
+        )
+    (deleted,) = _sent(api, "delete")
+    assert sorted(s.id for s in deleted.shapes) == [1, 2]
+
+
+def test_replace_with_mismatched_labels_deletes_nothing(use_function):
+    client, _, api = _setup(shapes=[shape(1, 1, 0, [0, 0, 1, 1])])
+    fn = use_function(FakeFunction())
+    fn.spec = cvataa.DetectionFunctionSpec(
+        labels=[cvataa.skeleton_label_spec("car", 0, [cvataa.keypoint_spec("nose", 0)])]
+    )
+    with pytest.raises(InvalidArgument, match="'car'"):
+        aa.auto_annotate_frames(client, 1, None, [0], _opts(mode="replace"), 10)
+    assert _sent(api, "delete") == []
+
+
+class UnknownLabel(FakeFunction):
+    def detect(self, context, image):
+        return [cvataa.rectangle(7, [0, 0, 5, 5])]
+
+
+def test_output_with_unknown_label_id_is_invalid_argument():
+    client, task, _ = _setup()
+    with pytest.raises(InvalidArgument, match="unknown"):
+        aa.annotate(client, Scope(task), LABELS, UnknownLabel(), _opts(), [0], 10, aa.Progress())
+
+
+def test_create_objects_pairs_skeletons():
+    # Skeleton requests have no points of their own; the key must come from the elements.
+    skeleton = cvataa.skeleton(1, [cvataa.keypoint(0, [5, 6])])
+    skeleton.frame = 0
+    answer = Obj(
+        shapes=[
+            Obj(
+                id=55,
+                frame=0,
+                label_id=1,
+                type=skeleton.type,
+                points=[],
+                occluded=False,
+                elements=[Obj(points=[5.0, 6.0])],
+            )
+        ],
+        tags=[],
+    )
+    api = Mock()
+    api.partial_update_annotations.return_value = (answer, None)
+    task = fake_task(labels=LABELS)
+    client = fake_client(task, api_client=Obj(tasks_api=api))
+    assert create_objects(client, Scope(task), [("shape", skeleton)]) == [55]
+
+
+def test_create_objects_never_fails_after_the_write():
+    api = Mock()
+    api.partial_update_annotations.return_value = (Obj(shapes=[Obj(id=1)], tags=[]), None)
+    task = fake_task(labels=LABELS)
+    client = fake_client(task, api_client=Obj(tasks_api=api))
+    sent = [("shape", cvataa.rectangle(1, [0, 0, 1, 1]))]
+    assert create_objects(client, Scope(task), sent) == [None]
 
 
 def test_check_options_threshold_out_of_range():
@@ -368,9 +451,9 @@ def test_background_replace_clears_all_target_frames(use_function):
     )
     result = aa.start_run(request_client, lambda: run_client, 1, None, _opts(mode="replace"), 2)
     _finish(result.run.run_id)
-    (deleted,) = _sent(run_api, "delete")
-    assert sorted(s.id for s in deleted.shapes) == [1, 2]
-    assert deleted.tracks == []
+    deletes = _sent(run_api, "delete")  # one per chunk that had old objects: frames 0 and 4
+    assert [[s.id for s in d.shapes] for d in deletes] == [[1], [2]]
+    assert all(d.tracks == [] for d in deletes)
 
 
 def test_get_runs_unknown_id():

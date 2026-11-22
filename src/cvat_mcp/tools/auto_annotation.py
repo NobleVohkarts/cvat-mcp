@@ -44,8 +44,9 @@ def auto_annotate(
     returns the new objects: check them with render_frame. Without frames it starts a background
     run and returns its run_id: follow it with get_auto_annotation_run. Results are saved in
     chunks as they finish. mode "append" adds objects (running twice duplicates them);
-    "replace" first deletes the shapes and tags on the run's frames (never tracks), only when the
-    user asks. One run at a time. The first use of a model downloads its weights (~170 MB)."""
+    "replace" swaps the shapes and tags on the run's frames for the new ones, chunk by chunk
+    (never tracks), only when the user asks. One run at a time. The first use of a model
+    downloads its weights (~170 MB)."""
     opts = auto_annotation.check_options(function, model, conf_threshold, polygons, mode)
     client, size = get_client(ctx), settings.mcp_aa_chunk_size
     if frames is None:

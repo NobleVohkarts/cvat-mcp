@@ -243,20 +243,29 @@ def _key(obj, kind: str) -> tuple:
     # Not attributes: CVAT may answer with defaults filled in, and then nothing would match.
     if kind == "tag":
         return (kind, obj.frame, obj.label_id)
-    points = tuple(round(p, 2) for p in obj.points)
+    if str(obj.type) == "skeleton":  # a skeleton's points are its elements'
+        points = [v for element in obj.elements for v in element.points]
+    else:
+        points = obj.points
     # an unset occluded is stored as False
-    return (kind, obj.frame, obj.label_id, str(obj.type), points, getattr(obj, "occluded", False))
+    rounded = tuple(round(p, 2) for p in points)
+    return (kind, obj.frame, obj.label_id, str(obj.type), rounded, getattr(obj, "occluded", False))
 
 
 def create_objects(client: Client, scope: Scope, sent: Sent) -> list[int | None]:
     """Create the objects in one PATCH; their new ids in `sent` order (None if unmatched)."""
     data = patch_annotations(client, "create", scope, sent)
-    # Pair ids by content: across jobs CVAT returns the objects grouped by job, not in order.
-    new_ids = defaultdict(list)
-    for kind, created in (("shape", data.shapes), ("tag", data.tags)):
-        for c in created:
-            new_ids[_key(c, kind)].append(c.id)
-    return [(new_ids[_key(r, kind)] or [None]).pop(0) for kind, r in sent]
+    # The write is done: pairing must not fail the call, or the model retries and duplicates.
+    try:
+        # Pair ids by content: across jobs CVAT returns the objects grouped by job, not in order.
+        new_ids = defaultdict(list)
+        for kind, created in (("shape", data.shapes), ("tag", data.tags)):
+            for c in created:
+                new_ids[_key(c, kind)].append(c.id)
+        return [(new_ids[_key(r, kind)] or [None]).pop(0) for kind, r in sent]
+    except (AttributeError, TypeError):
+        logger.warning("could not pair CVAT's answer with the created objects", exc_info=True)
+        return [None] * len(sent)
 
 
 def create_annotations(
