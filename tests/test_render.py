@@ -11,7 +11,7 @@ from cvat_mcp.render import (
     render,
     render_frame,
 )
-from cvat_mcp.services.annotations import FrameObject
+from cvat_mcp.services.annotations import FrameObject, shape_bbox
 
 CAR = FrameObject(
     id=1,
@@ -22,6 +22,10 @@ CAR = FrameObject(
     source="manual",
     occluded=False,
 )
+
+
+def _red(pixel):
+    return pixel[0] > 200 and pixel[1] < 80
 
 
 def _black():
@@ -36,9 +40,35 @@ def test_downscales_to_max_side():
 
 def test_box_drawn_at_scaled_position():
     out, _ = render(_black(), [CAR], {"car": "#ff0000"}, 400)
-    r, g, _b = out.getpixel((50, 100))  # left edge, mid-height of the scaled box
-    assert r > 200 and g < 80
+    assert _red(out.getpixel((50, 100)))  # left edge, mid-height of the scaled box
     assert out.getpixel((100, 87)) == (0, 0, 0)  # inside the box stays untouched
+
+
+def _shape(type_, points):
+    bbox = shape_bbox(shape(1, 1, 0, points, type=type_))
+    return CAR.model_copy(update={"type": type_, "points": points, "bbox": bbox})
+
+
+TRIANGLE = [100, 100, 300, 100, 100, 300]
+
+
+def test_polygon_drawn_by_its_points_not_its_box():
+    out, _ = render(_black(), [_shape("polygon", TRIANGLE)], {"car": "#ff0000"}, 800)
+    assert _red(out.getpixel((200, 200)))  # on the diagonal edge
+    assert _red(out.getpixel((100, 200)))  # the closing edge
+    assert out.getpixel((300, 250)) == (0, 0, 0)  # the box's right edge is not drawn
+
+
+def test_polyline_is_left_open():
+    out, _ = render(_black(), [_shape("polyline", TRIANGLE)], {"car": "#ff0000"}, 800)
+    assert _red(out.getpixel((200, 200)))
+    assert out.getpixel((100, 200)) == (0, 0, 0)  # no closing edge
+
+
+def test_points_drawn_as_dots():
+    out, _ = render(_black(), [_shape("points", [400, 400, 500, 450])], {"car": "#ff0000"}, 800)
+    assert _red(out.getpixel((400, 400))) and _red(out.getpixel((500, 450)))
+    assert out.getpixel((500, 425)) == (0, 0, 0)  # the box's right edge is not drawn
 
 
 def test_never_upscales():
