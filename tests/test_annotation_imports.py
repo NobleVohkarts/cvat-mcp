@@ -216,8 +216,17 @@ def test_local_failure_is_explained_too(tmp_path):
     assert "cloud storage" not in str(error.value)
 
 
-def test_unexpected_error_passes_through_and_forgets_new_storage(tmp_path):
-    client = _cloud_client(_task(), storages=(), wait_error=RuntimeError("boom"))
+def test_lost_wait_keeps_new_storage_while_cvat_imports(tmp_path):
+    # the import was queued: CVAT still reads the file through the storage after we stop waiting
+    client = _cloud_client(_task(), storages=(), wait_error=ConnectionError("reset"))
+    with pytest.raises(ConnectionError):
+        _import(client, tmp_path, task_id=1, cloud_url="s3://open-bucket/labels.json")
+    client.api_client.cloudstorages_api.destroy.assert_not_called()
+
+
+def test_failed_start_forgets_new_storage(tmp_path):
+    client = _cloud_client(_task(), storages=())
+    client.api_client.tasks_api.create_annotations.side_effect = RuntimeError("boom")
     with pytest.raises(RuntimeError, match="boom"):
         _import(client, tmp_path, task_id=1, cloud_url="s3://open-bucket/labels.json")
     client.api_client.cloudstorages_api.destroy.assert_called_once_with(7)
@@ -226,6 +235,11 @@ def test_unexpected_error_passes_through_and_forgets_new_storage(tmp_path):
 def test_import_already_running_is_explained(tmp_path):
     client = _cloud_client(_task(), gt_job(dimension="2d"))
     client.api_client.jobs_api.create_annotations.side_effect = ApiException(409, "Conflict")
-    with pytest.raises(ApiException) as error:
+    with pytest.raises(InvalidArgument, match="into job 30 is still running") as error:
         _import(client, tmp_path, job_id=30, cloud_url=f"{R2}/cvat/labels.json")
-    assert "still busy" in explain(error.value) and "call again" in explain(error.value)
+    assert "duplicate" in str(error.value) and "check" in str(error.value)
+
+
+def test_other_409s_keep_the_generic_message():
+    # e.g. CloudStorageMissingError when reading frames: waiting would not help
+    assert explain(ApiException(409, "Conflict")).startswith("CVAT answered 409 Conflict")

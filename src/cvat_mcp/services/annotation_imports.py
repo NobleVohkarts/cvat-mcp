@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Literal
 
 from cvat_sdk import Client
+from cvat_sdk.api_client.exceptions import ApiException
 from pydantic import BaseModel
 
 from cvat_mcp.config import resolve_in_workdir
@@ -81,6 +82,7 @@ def import_annotations(
     storage_id, registered = resolve_storage(client, ref) if ref else (None, False)  # may register
 
     started = time.monotonic()
+    queued = False  # CVAT has the import: it reads the file through the storage from now on
     try:
         if path is not None:
             target.import_annotations(format_name, path, import_mode=mode, status_check_period=1)
@@ -97,10 +99,20 @@ def import_annotations(
                 _parse_response=False,
             )
             rq_id = json.loads(response.data)["rq_id"]  # as the SDK's AnnotationUploader reads it
+            queued = True
             client.wait_for_completion(rq_id, status_check_period=1)
     except BaseException as exc:
-        if registered:
+        if registered and (not queued or is_refusal(exc)):  # never under a running import
             forget_storage(client, storage_id)
+        if isinstance(exc, ApiException) and exc.status == 409:  # CVAT: one import at a time
+            what = f"job {job_id}" if job_id is not None else f"task {task_id}"
+            raise InvalidArgument(
+                f"another annotation import into {what} is still running, most likely an earlier "
+                "call whose answer the client stopped waiting for (a failing import takes about a "
+                "minute). Don't import again in append mode, that would duplicate the objects: "
+                "wait a minute, then check the target's objects (get_task_overview, or "
+                "get_frame_annotations with job_id for a job)"
+            ) from exc
         if not is_refusal(exc):
             raise
         hint = "check that the file's image file names match the task's frame names and that "
