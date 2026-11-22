@@ -41,6 +41,39 @@ def test_box_drawn_at_scaled_position():
     assert out.getpixel((100, 87)) == (0, 0, 0)  # inside the box stays untouched
 
 
+def _shape(type_, points):
+    xs, ys = points[0::2], points[1::2]
+    return CAR.model_copy(
+        update={"type": type_, "points": points, "bbox": [min(xs), min(ys), max(xs), max(ys)]}
+    )
+
+
+TRIANGLE = [100, 100, 300, 100, 100, 300]
+
+
+def _red(pixel):
+    return pixel[0] > 200 and pixel[1] < 80
+
+
+def test_polygon_drawn_by_its_points_not_its_box():
+    out, _ = render(_black(), [_shape("polygon", TRIANGLE)], {"car": "#ff0000"}, 800)
+    assert _red(out.getpixel((200, 200)))  # on the diagonal edge
+    assert _red(out.getpixel((100, 200)))  # the closing edge
+    assert out.getpixel((300, 250)) == (0, 0, 0)  # the box's right edge is not drawn
+
+
+def test_polyline_is_left_open():
+    out, _ = render(_black(), [_shape("polyline", TRIANGLE)], {"car": "#ff0000"}, 800)
+    assert _red(out.getpixel((200, 200)))
+    assert out.getpixel((100, 200)) == (0, 0, 0)  # no closing edge
+
+
+def test_points_drawn_as_dots():
+    out, _ = render(_black(), [_shape("points", [400, 400, 500, 450])], {"car": "#ff0000"}, 800)
+    assert _red(out.getpixel((400, 400))) and _red(out.getpixel((500, 450)))
+    assert out.getpixel((500, 425)) == (0, 0, 0)  # the box's right edge is not drawn
+
+
 def test_never_upscales():
     out, scale = render(_black(), [CAR], {"car": "#ff0000"}, 2048)
     assert out.size == (800, 600) and scale == 1.0

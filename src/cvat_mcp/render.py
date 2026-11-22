@@ -51,7 +51,7 @@ def resize(image: Image.Image, max_side: int) -> tuple[Image.Image, float]:
 def annotate(
     image: Image.Image, objects: list[FrameObject], colors: dict[str, str], scale: float
 ) -> Image.Image:
-    """A copy of the (already resized) frame with boxes and semi-transparent captions."""
+    """A copy of the (already resized) frame with shapes and semi-transparent captions."""
     out = image.copy()
     side = max(out.size)
     width = max(2, round(side / 400))
@@ -59,7 +59,18 @@ def annotate(
     draw = ImageDraw.Draw(out, "RGBA")  # RGBA fills blend into the RGB frame
     boxes = [(obj, tuple(v * scale for v in obj.bbox)) for obj in objects]
     for obj, box in boxes:
-        draw.rectangle(box, outline=colors.get(obj.label, FALLBACK_COLOR), width=width)
+        color = colors.get(obj.label, FALLBACK_COLOR)
+        xy = [v * scale for v in obj.points] if obj.points else None
+        if obj.type == "polygon" and xy:
+            draw.polygon(xy, outline=color, width=width)
+        elif obj.type == "polyline" and xy:
+            draw.line(xy, fill=color, width=width, joint="curve")
+        elif obj.type == "points" and xy:
+            r = 2 * width
+            for x, y in zip(xy[0::2], xy[1::2]):
+                draw.ellipse((x - r, y - r, x + r, y + r), fill=color)
+        else:  # rectangles, and shapes without vertices (masks, skeletons, ellipses) as boxes
+            draw.rectangle(box, outline=color, width=width)
     taken: list[Rect] = []
     for obj, box in boxes:  # captions after all boxes, so no outline crosses a caption
         color = colors.get(obj.label, FALLBACK_COLOR)

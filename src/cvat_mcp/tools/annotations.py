@@ -43,8 +43,9 @@ def render_frame(
     job_id: JobId = None,
 ) -> list:
     """Use to look at a frame: returns the image (longest side up to max_side, 256..2048) with
-    every object's box and `#id label` caption drawn on it, plus a text legend with exact boxes
-    in original pixels. Check visually for missing objects, wrong labels and boxes that miss
+    every object drawn on it (rectangles as boxes, polygons and polylines by their points,
+    points as dots) with an `#id label` caption, plus a text legend with exact boxes in original
+    pixels. Check visually for missing objects, wrong labels and boxes that miss
     their object. Set include_clean=True for crowded frames: you also get the same frame
     without annotations, so nothing is hidden under captions. Use get_frame_annotations for
     attributes."""
