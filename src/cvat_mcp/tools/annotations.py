@@ -5,8 +5,9 @@ from pydantic import Field
 
 from cvat_mcp import render
 from cvat_mcp.server import get_client, settings, tool
-from cvat_mcp.services import annotation_edits, annotations
+from cvat_mcp.services import annotation_edits, annotation_imports, annotations
 from cvat_mcp.services.annotation_edits import AnnotationEdit, NewObject, ObjectChange
+from cvat_mcp.services.annotation_imports import DEFAULT_FORMAT, ImportedAnnotations, Mode
 from cvat_mcp.services.annotations import FrameAnnotations
 
 Ids = Annotated[list[int], Field(max_length=100)]
@@ -100,4 +101,33 @@ def delete_annotations(
     from get_frame_annotations; unknown ids are refused and nothing is deleted."""
     return annotation_edits.delete_annotations(
         get_client(ctx), task_id, shape_ids or [], tag_ids or [], job_id
+    )
+
+
+# open world: CVAT reads cloud_url from the bucket's host; destructive: mode="replace"
+@tool(write=True, destructive_hint=True, open_world_hint=True)
+def import_annotations(
+    ctx: Context,
+    job_id: int | None = None,
+    task_id: int | None = None,
+    cloud_url: str | None = None,
+    file: str | None = None,
+    format: str = DEFAULT_FORMAT,  # pylint: disable=redefined-builtin  # CVAT's name for it
+    mode: Mode = "append",
+) -> ImportedAnnotations:
+    """Use to load an annotation file into CVAT, only when the user asks: into a job (job_id: an
+    annotation or ground-truth job) or a whole task (task_id). The file is either cloud_url, a
+    bucket link to one file (e.g. https://<account>.r2.cloudflarestorage.com/bucket/annotations/
+    labels.json or s3://bucket/labels.json; CVAT reads it through the bucket's cloud storage,
+    which is reused, or registered without keys for a public bucket; register a private bucket
+    first with create_cloud_storage), or file, a path in the server's work directory. format is
+    any CVAT import format (default COCO 1.0). The image file names in the file must match the
+    task's frame names (a missing folder prefix is fine); a ground-truth job keeps only its own
+    frames, so a file for all images works. mode "append" adds to the annotations already there
+    (importing the same file twice duplicates the objects); "replace" first deletes all the
+    target's annotations, so use it only when the user asks to replace them. Returns the object
+    counts after the import. A file CVAT can't import takes about a minute to fail (CVAT retries
+    it); wait for the answer instead of calling again."""
+    return annotation_imports.import_annotations(
+        get_client(ctx), settings.mcp_workdir, job_id, task_id, cloud_url, file, format, mode
     )

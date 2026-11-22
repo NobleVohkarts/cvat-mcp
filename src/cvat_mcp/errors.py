@@ -37,3 +37,10 @@ def explain(exc: Exception) -> str | None:
             f"CVAT answered {exc.status} {exc.reason}. Try again; if it repeats, call server_info."
         )
     return None
+
+
+def is_refusal(exc: Exception) -> bool:
+    """CVAT turned down the input (a failed background job or a 400), not a server fault."""
+    return isinstance(exc, BackgroundRequestException) or (
+        isinstance(exc, ApiException) and exc.status == 400
+    )
