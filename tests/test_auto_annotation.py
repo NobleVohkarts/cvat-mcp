@@ -1,5 +1,6 @@
 import io
 import itertools
+import threading
 from importlib.util import find_spec
 from unittest.mock import Mock
 
@@ -83,7 +84,7 @@ def _setup(size=5, **task_kw):
         **task_kw,
     )
     api = _echo_api()
-    client = fake_client(task, api_client=Obj(tasks_api=api), logger=Mock())
+    client = fake_client(task, api_client=Obj(tasks_api=api), logger=Mock(), close=Mock())
     return client, task, api
 
 
@@ -307,3 +308,102 @@ def test_exactly_one_target(task_id, job_id):
     client, _, _ = _setup()
     with pytest.raises(InvalidArgument, match="exactly one"):
         aa.auto_annotate_frames(client, task_id, job_id, [0], _opts(), 10)
+
+
+def _start(fn, use_function, **setup_kw):
+    """Start a background run whose thread uses its own fake client; returns what tests check."""
+    use_function(fn)
+    request_client, _, request_api = _setup()
+    run_client, _, run_api = _setup(**setup_kw)
+    result = aa.start_run(request_client, lambda: run_client, 1, None, _opts(), 2)
+    return result, request_api, run_client, run_api
+
+
+def _finish(run_id):
+    aa._THREADS[run_id].join(timeout=10)
+    (run,) = aa.get_runs(run_id).runs
+    return run
+
+
+def test_background_run_finishes(use_function):
+    result, _, _, _ = _start(FakeFunction(), use_function)
+    assert result.run.state == "running"
+    assert (result.run.frames_total, result.objects) == (5, [])
+    run = _finish(result.run.run_id)
+    assert (run.state, run.frames_done, run.added, run.skipped) == (
+        "finished",
+        5,
+        {"car": 5},
+        {"bench": 5},
+    )
+    assert run.finished is not None and run.error is None
+    assert not aa._LOCK.locked()
+
+
+def test_background_run_failure_recorded_and_lock_released(use_function):
+    result, _, run_client, _ = _start(FakeFunction(fail_on=3), use_function)
+    run = _finish(result.run.run_id)
+    assert (run.state, run.frames_done) == ("failed", 2)
+    assert "model crashed" in run.error
+    assert not aa._LOCK.locked()
+    run_client.close.assert_called_once()
+
+
+def test_background_run_uses_own_client(use_function):
+    result, request_api, run_client, run_api = _start(FakeFunction(), use_function)
+    _finish(result.run.run_id)
+    request_api.partial_update_annotations.assert_not_called()
+    assert len(_sent(run_api)) == 3  # 5 frames in chunks of 2
+    run_client.close.assert_called_once()
+
+
+def test_background_replace_clears_all_target_frames(use_function):
+    use_function(FakeFunction())
+    request_client, _, _ = _setup()
+    run_client, _, run_api = _setup(
+        shapes=[shape(1, 1, 0, [0, 0, 1, 1]), shape(2, 1, 4, [0, 0, 1, 1])],
+        tracks=[Obj(id=9, frame=1, label_id=1, shapes=[])],
+    )
+    result = aa.start_run(request_client, lambda: run_client, 1, None, _opts(mode="replace"), 2)
+    _finish(result.run.run_id)
+    (deleted,) = _sent(run_api, "delete")
+    assert sorted(s.id for s in deleted.shapes) == [1, 2]
+    assert deleted.tracks == []
+
+
+def test_get_runs_unknown_id():
+    with pytest.raises(InvalidArgument, match="unknown run_id"):
+        aa.get_runs("run-0")
+
+
+def test_get_runs_lists_newest_first(use_function):
+    first, _, _, _ = _start(FakeFunction(), use_function)
+    _finish(first.run.run_id)
+    second, _, _, _ = _start(FakeFunction(), use_function)
+    _finish(second.run.run_id)
+    ids = [r.run_id for r in aa.get_runs(None).runs]
+    assert ids.index(second.run.run_id) < ids.index(first.run.run_id)
+    assert "restart" in aa.get_runs(None).note
+
+
+class Blocking(FakeFunction):
+    def __init__(self):
+        super().__init__()
+        self.go = threading.Event()
+
+    def detect(self, context, image):
+        self.go.wait(timeout=10)
+        return super().detect(context, image)
+
+
+def test_call_while_background_run_names_run_id(use_function):
+    fn = Blocking()
+    result, _, _, _ = _start(fn, use_function)
+    run_id = result.run.run_id
+    try:
+        client, _, _ = _setup()
+        with pytest.raises(InvalidArgument, match=f"background run {run_id} is in progress"):
+            aa.auto_annotate_frames(client, 1, None, [0], _opts(), 10)
+    finally:
+        fn.go.set()
+    assert _finish(run_id).state == "finished"

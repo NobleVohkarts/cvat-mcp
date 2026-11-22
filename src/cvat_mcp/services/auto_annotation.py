@@ -1,9 +1,12 @@
 import importlib
+import itertools
+import logging
 import threading
 import time
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 
 import PIL.Image
@@ -348,3 +351,123 @@ def auto_annotate_frames(
         seconds=round(time.monotonic() - started, 1),
         note=_note(progress, labels),
     )
+
+
+class AutoAnnotationRuns(BaseModel):
+    runs: list[AutoAnnotationRun]
+    note: str = (
+        "runs are kept in memory since the server started; a restart forgets them, and a run in "
+        "progress stops (the frames it saved stay in CVAT)"
+    )
+
+
+logger = logging.getLogger(__name__)
+
+# shortcut: runs live in memory and are never pruned (a few hundred bytes each); persist them
+# if the server ever needs to resume runs after a restart.
+_RUNS: dict[str, tuple[AutoAnnotationRun, Progress]] = {}
+_THREADS: dict[str, threading.Thread] = {}
+_RUN_NUMBERS = itertools.count(1)
+
+
+def _snapshot(run_id: str) -> AutoAnnotationRun:
+    run, progress = _RUNS[run_id]
+    return run.model_copy(
+        update={
+            "frames_done": progress.frames_done,
+            "added": dict(progress.added),
+            "skipped": dict(progress.skipped),
+        }
+    )
+
+
+def _run(run: AutoAnnotationRun, progress: Progress, client_factory, opts, fn, frames, size):
+    client = None
+    try:
+        # Its own client: the request's client may close when the MCP session ends.
+        client = client_factory()
+        task = client.tasks.retrieve(run.task_id)
+        scope = scope_of(client, task, run.job_id)
+        if opts.mode == "replace":
+            clear_frames(client, scope, frames)
+        annotate(client, scope, task.get_labels(), fn, opts, frames, size, progress)
+        run.state = "finished"
+    except Exception as exc:  # pylint: disable=broad-exception-caught  # recorded for the model
+        logger.exception("auto-annotation run %s failed", run.run_id)
+        run.state = "failed"
+        run.error = explain(exc) or f"{type(exc).__name__}: {exc}"
+    finally:
+        run.finished = datetime.now(timezone.utc)
+        if client is not None:
+            client.close()
+        _release()
+
+
+def start_run(
+    client: Client,
+    client_factory: Callable[[], Client],
+    task_id: int | None,
+    job_id: int | None,
+    opts: RunOptions,
+    chunk_size: int,
+) -> AutoAnnotation:
+    """Check everything here, then annotate all the target's frames in a background thread."""
+    started = time.monotonic()
+    scope = resolve_scope(client, task_id, job_id)
+    frames = target_frames(scope, None)
+    if not frames:
+        raise InvalidArgument(f"task {scope.task.id} has no frames to annotate")
+    run_id = f"run-{next(_RUN_NUMBERS)}"
+    _acquire(run_id)
+    try:
+        fn = load_function(opts)  # in this thread, so a bad model or download fails the call
+    except BaseException:
+        _release()
+        raise
+    run = AutoAnnotationRun(
+        run_id=run_id,
+        state="running",
+        task_id=scope.task.id,
+        job_id=scope.job_id,
+        function=opts.function,
+        model=opts.model,
+        mode=opts.mode,
+        frames_total=len(frames),
+        frames_done=0,
+        added={},
+        skipped={},
+        started=datetime.now(timezone.utc),
+    )
+    progress = Progress()
+    _RUNS[run_id] = (run, progress)
+    answer = _snapshot(run_id)  # before the thread can change it
+    thread = threading.Thread(
+        target=_run,
+        args=(run, progress, client_factory, opts, fn, frames, chunk_size),
+        name=f"auto-annotation {run_id}",
+        daemon=True,
+    )
+    _THREADS[run_id] = thread
+    thread.start()
+    return AutoAnnotation(
+        task_id=scope.task.id,
+        job_id=scope.job_id,
+        function=opts.function,
+        model=opts.model,
+        mode=opts.mode,
+        frames=[],
+        objects=[],
+        skipped={},
+        seconds=round(time.monotonic() - started, 1),
+        note=f"running in the background; follow it with get_auto_annotation_run(run_id={run_id!r})",
+        run=answer,
+    )
+
+
+def get_runs(run_id: str | None) -> AutoAnnotationRuns:
+    if run_id is None:
+        return AutoAnnotationRuns(runs=[_snapshot(r) for r in reversed(_RUNS)])
+    if run_id not in _RUNS:
+        known = ", ".join(_RUNS) or "none since the server started"
+        raise InvalidArgument(f"unknown run_id {run_id!r}; known runs: {known}")
+    return AutoAnnotationRuns(runs=[_snapshot(run_id)])

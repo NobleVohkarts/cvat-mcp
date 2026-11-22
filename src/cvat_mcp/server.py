@@ -44,6 +44,11 @@ def _connect(s: Settings) -> tuple[Client, str]:
     return client, user.username
 
 
+def open_client() -> Client:
+    """A new CVAT client for work that outlives a request (background runs); raises, never exits."""
+    return make_client(settings.url, access_token=settings.access_token.get_secret_value())
+
+
 def check_cvat() -> None:
     """Exit with one line if CVAT is unreachable or rejects the token."""
     client, _ = _connect(settings)
