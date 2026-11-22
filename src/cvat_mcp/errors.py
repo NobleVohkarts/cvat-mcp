@@ -13,6 +13,8 @@ _HINTS = {
     "Token in the CVAT UI and restart the server.",
     403: "CVAT denied permission for this action. The current user may lack access to this "
     "resource, or the access token is read-only (write actions need a token without 'read only').",
+    409: "CVAT is still busy with an earlier request on the same task or job (it retries a "
+    "failing import for about a minute): wait for it to end, then call again.",
     404: "CVAT: not found. The task, job, issue or frame id does not exist or is not visible to "
     "this user. Use list_tasks, get_task_overview or list_issues to find valid ids.",
 }
@@ -37,3 +39,10 @@ def explain(exc: Exception) -> str | None:
             f"CVAT answered {exc.status} {exc.reason}. Try again; if it repeats, call server_info."
         )
     return None
+
+
+def is_refusal(exc: Exception) -> bool:
+    """CVAT turned down the input (a failed background job or a 400), not a server fault."""
+    return isinstance(exc, BackgroundRequestException) or (
+        isinstance(exc, ApiException) and exc.status == 400
+    )

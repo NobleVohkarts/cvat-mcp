@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 from typing import NamedTuple
 from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
@@ -11,6 +12,8 @@ from pydantic import BaseModel
 from cvat_mcp.errors import InvalidArgument, explain
 from cvat_mcp.services.tasks import clamp_limit
 from cvat_mcp.services.users import is_own, require_own
+
+logger = logging.getLogger("cvat_mcp")
 
 S3 = "AWS_S3_BUCKET"
 NOT_S3 = (
@@ -329,7 +332,22 @@ def resolve_storage(client: Client, ref: BucketRef) -> tuple[int, bool]:
         raise InvalidArgument(
             f"bucket {ref.bucket!r} could not be registered without keys; if it is private, "
             "register it with create_cloud_storage(url, access_key_id, secret_access_key) (with "
-            "region for an AWS bucket outside us-east-1), then call create_task again "
+            "region for an AWS bucket outside us-east-1), then call again "
             f"({exc})"
         ) from None
     return storage.id, True
+
+
+def forget_storage(client: Client, storage_id: int) -> None:
+    """Remove a storage that a failed call registered: it is no use without what it was for."""
+    try:
+        client.api_client.cloudstorages_api.destroy(storage_id)
+    except Exception:  # pylint: disable=broad-exception-caught
+        logger.exception("could not remove cloud storage %s", storage_id)
+
+
+def keys_hint(storage_id: int) -> str:
+    return (
+        f", and that cloud storage #{storage_id} can read the bucket (its keys: "
+        "update_cloud_storage)"
+    )

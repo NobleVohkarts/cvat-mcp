@@ -7,16 +7,20 @@ from urllib.parse import urlsplit
 
 from cvat_sdk import Client
 from cvat_sdk.api_client import models
-from cvat_sdk.api_client.exceptions import ApiException
 from cvat_sdk.attributes import attribute_value_validator
-from cvat_sdk.core.exceptions import BackgroundRequestException
 from cvat_sdk.core.proxies.tasks import ResourceType
 from pydantic import BaseModel, ConfigDict, Field
 
 from cvat_mcp.config import resolve_in_workdir
-from cvat_mcp.errors import InvalidArgument, explain
+from cvat_mcp.errors import InvalidArgument, explain, is_refusal
 from cvat_mcp.services.annotation_edits import check_value
-from cvat_mcp.services.cloud_storages import cloud_source, parse_bucket_url, resolve_storage
+from cvat_mcp.services.cloud_storages import (
+    cloud_source,
+    forget_storage,
+    keys_hint,
+    parse_bucket_url,
+    resolve_storage,
+)
 from cvat_mcp.services.issues import job_url
 from cvat_mcp.services.tasks import JobInfo, jobs_of
 from cvat_mcp.services.users import require_own, user_id
@@ -188,20 +192,13 @@ def create_task(
         if pattern:
             params["filename_pattern"] = pattern
 
-    def forget_storage():
-        """A storage this call registered is no use without its task."""
-        if registered:
-            try:
-                client.api_client.cloudstorages_api.destroy(storage_id)
-            except Exception:  # pylint: disable=broad-exception-caught
-                logger.exception("could not remove cloud storage %s", storage_id)
-
     try:
         task = client.tasks.create(
             models.TaskWriteRequest(**{k: v for k, v in spec.items() if v is not None})
         )
     except BaseException:
-        forget_storage()
+        if registered:
+            forget_storage(client, storage_id)
         raise
     # Two steps instead of create_from_data(), which loses the task when the upload fails.
     try:
@@ -217,17 +214,12 @@ def create_task(
             task.remove()  # an empty task is no use to anyone
         except Exception:  # pylint: disable=broad-exception-caught
             logger.exception("could not remove task %s after its upload failed", task.id)
-        forget_storage()
-        refused = isinstance(exc, BackgroundRequestException) or (
-            isinstance(exc, ApiException) and exc.status == 400
-        )
-        if storage_id is not None and refused:
+        if registered:
+            forget_storage(client, storage_id)
+        if storage_id is not None and is_refusal(exc):
             hint = f"check that cloud_url {cloud_url!r} names a folder or object with images"
             if not registered:
-                hint += (
-                    f", and that cloud storage #{storage_id} can read the bucket (its keys: "
-                    "update_cloud_storage)"
-                )
+                hint += keys_hint(storage_id)
             raise InvalidArgument(f"{explain(exc).rstrip()}; {hint}") from exc
         raise
     return CreatedTask(

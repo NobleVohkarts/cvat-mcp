@@ -5,7 +5,7 @@ from cvat_sdk.api_client.exceptions import ApiException
 from cvat_sdk.core.exceptions import BackgroundRequestException
 from fakes import Obj, cloud_storage, fake_cloudstorages_api, fake_task, gt_job, shape, tag
 
-from cvat_mcp.errors import InvalidArgument
+from cvat_mcp.errors import InvalidArgument, explain
 from cvat_mcp.services.annotation_imports import import_annotations
 
 IMPORTERS = [
@@ -84,9 +84,11 @@ def test_local_file_imports_into_task(tmp_path):
 
 def test_local_file_imports_into_job_with_replace(tmp_path):
     (tmp_path / "gt.json").write_text("{}")
-    job = gt_job(shapes=[SHAPES[0]], import_annotations=Mock())
+    job = gt_job(shapes=[SHAPES[0]], dimension="2d", import_annotations=Mock())
     task = _task()
-    result = _import(_client(task, job), tmp_path, job_id=30, file="gt.json", mode="replace")
+    client = _client(task, job)
+    result = _import(client, tmp_path, job_id=30, file="gt.json", mode="replace")
+    client.tasks.retrieve.assert_not_called()  # the job knows its task and dimension
     job.import_annotations.assert_called_once_with(
         "COCO 1.0", tmp_path / "gt.json", import_mode="replace", status_check_period=1
     )
@@ -100,7 +102,7 @@ def test_local_file_imports_into_job_with_replace(tmp_path):
     [
         ("missing.json", "no such file in the work directory: 'missing.json'"),
         ("../x.json", "inside CVAT_MCP_WORKDIR"),
-        ("folder", "'folder' is not a file"),
+        ("folder", "no such file in the work directory: 'folder'"),
     ],
 )
 def test_local_file_must_exist_in_workdir(tmp_path, name, match):
@@ -140,7 +142,7 @@ def _cloud_client(task, job=None, storages=(STORAGE_1,), wait_error=None):
 
 
 def test_cloud_import_into_gt_job_uses_storage(tmp_path):
-    job = gt_job(shapes=[SHAPES[0]])
+    job = gt_job(shapes=[SHAPES[0]], dimension="2d")
     client = _cloud_client(_task(), job)
     result = _import(client, tmp_path, job_id=30, cloud_url=f"{R2}/cvat/annotations/street.json")
     client.api_client.jobs_api.create_annotations.assert_called_once_with(
@@ -222,7 +224,8 @@ def test_unexpected_error_passes_through_and_forgets_new_storage(tmp_path):
 
 
 def test_import_already_running_is_explained(tmp_path):
-    client = _cloud_client(_task(), gt_job())
+    client = _cloud_client(_task(), gt_job(dimension="2d"))
     client.api_client.jobs_api.create_annotations.side_effect = ApiException(409, "Conflict")
-    with pytest.raises(InvalidArgument, match="into job 30 is still running.*call again"):
+    with pytest.raises(ApiException) as error:
         _import(client, tmp_path, job_id=30, cloud_url=f"{R2}/cvat/labels.json")
+    assert "still busy" in explain(error.value) and "call again" in explain(error.value)
