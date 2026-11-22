@@ -1,6 +1,7 @@
 # Importing a tool module registers its tools on the server.
 from cvat_mcp.tools import (  # noqa: F401
     annotations,
+    auto_annotation,
     cloud_storages,
     exports,
     issues,

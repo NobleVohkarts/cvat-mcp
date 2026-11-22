@@ -8,6 +8,7 @@ import inspect
 import json
 import subprocess
 import sys
+from importlib.util import find_spec
 
 import pytest
 from cvat_sdk.api_client.exceptions import ApiException
@@ -15,6 +16,16 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 import cvat_mcp
 
+# The auto-annotation tools exist only with the extra installed (torch, torchvision, skimage).
+AUTO_ANNOTATION = all(find_spec(m) is not None for m in ("torch", "torchvision", "skimage"))
+AA_TOOLS = ["auto_annotate", "get_auto_annotation_run"] if AUTO_ANNOTATION else []
+AA_WRITE = ["auto_annotate"] if AUTO_ANNOTATION else []  # destructive and open world
+WITHOUT_EXTRA = """
+import importlib.util
+real = importlib.util.find_spec
+hidden = ("torch", "torchvision", "skimage")
+importlib.util.find_spec = lambda name, package=None: None if name in hidden else real(name, package)
+"""
 READ_TOOLS = [
     "create_report",
     "export_dataset",
@@ -96,12 +107,12 @@ def test_write_mode_adds_write_tools(monkeypatch):
         "update_quality_settings",
         "update_task",
     ]
-    assert result["tools"] == sorted(READ_TOOLS + write_tools)
+    assert result["tools"] == sorted(READ_TOOLS + write_tools + AA_TOOLS)
     assert "only when the user asks" in result["instructions"]
     assert "Issues belong to the job" in result["instructions"]
     assert "create_issue the new ones, then delete_issue the old ones" in result["instructions"]
     assert "only when the user asks to fix" in result["instructions"]
-    assert sorted(result["destructive"]) == [
+    assert sorted(result["destructive"]) == AA_WRITE + [  # replace clears the run's frames
         "delete_annotations",
         "delete_cloud_storage",
         "delete_gt_job",
@@ -126,7 +137,7 @@ def test_write_mode_adds_write_tools(monkeypatch):
     assert "create_task" in result["instructions"]
     assert "only tasks owned by" in result["instructions"]
     # urls and bucket links make CVAT fetch from any host
-    assert sorted(result["open_world"]) == [
+    assert sorted(result["open_world"]) == AA_WRITE + [  # first use downloads model weights
         "create_cloud_storage",
         "create_task",
         "import_annotations",  # CVAT reads the file from the bucket
@@ -137,6 +148,22 @@ def test_write_mode_adds_write_tools(monkeypatch):
     assert "keys go only to create_cloud_storage and update_cloud_storage" in result["instructions"]
     assert "never repeat keys" in result["instructions"]
     assert "disabled" not in result["instructions"]
+    assert ("get_auto_annotation_run" in result["instructions"]) == AUTO_ANNOTATION
+
+
+def test_write_mode_without_the_extra_has_no_auto_annotation(monkeypatch):
+    result = run(WITHOUT_EXTRA + LIST_TOOLS, monkeypatch, "write")
+    assert result.returncode == 0, result.stderr
+    listed = json.loads(result.stdout)
+    assert not {"auto_annotate", "get_auto_annotation_run"} & set(listed["tools"])
+    assert "auto_annotate" not in listed["instructions"]
+
+
+@pytest.mark.skipif(not AUTO_ANNOTATION, reason="needs the auto-annotation extra")
+def test_read_only_mode_has_no_auto_annotation(monkeypatch):
+    result = registered(monkeypatch, "read-only")
+    assert "auto_annotate" not in result["tools"]
+    assert "auto_annotate" not in result["instructions"]
 
 
 def test_bad_mode_fails_at_startup(monkeypatch):
