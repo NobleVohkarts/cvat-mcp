@@ -239,13 +239,24 @@ def _result(
     )
 
 
-def object_key(obj, kind: str) -> tuple:
+def _key(obj, kind: str) -> tuple:
     # Not attributes: CVAT may answer with defaults filled in, and then nothing would match.
     if kind == "tag":
         return (kind, obj.frame, obj.label_id)
     points = tuple(round(p, 2) for p in obj.points)
-    # auto-annotation output leaves occluded unset; CVAT stores that as False
+    # an unset occluded is stored as False
     return (kind, obj.frame, obj.label_id, str(obj.type), points, getattr(obj, "occluded", False))
+
+
+def create_objects(client: Client, scope: Scope, sent: Sent) -> list[int | None]:
+    """Create the objects in one PATCH; their new ids in `sent` order (None if unmatched)."""
+    data = patch_annotations(client, "create", scope, sent)
+    # Pair ids by content: across jobs CVAT returns the objects grouped by job, not in order.
+    new_ids = defaultdict(list)
+    for kind, created in (("shape", data.shapes), ("tag", data.tags)):
+        for c in created:
+            new_ids[_key(c, kind)].append(c.id)
+    return [(new_ids[_key(r, kind)] or [None]).pop(0) for kind, r in sent]
 
 
 def create_annotations(
@@ -283,18 +294,12 @@ def create_annotations(
     # before the write: nothing may fail after it
     job = scope.job or find_job_for_frame(task.get_jobs(), first)
 
-    data = patch_annotations(client, "create", scope, sent)
-    # Pair ids by content: across jobs CVAT returns the objects grouped by job, not in order.
-    new_ids = defaultdict(list)
-    for kind, created in (("shape", data.shapes), ("tag", data.tags)):
-        for c in created:
-            new_ids[object_key(c, kind)].append(c.id)
     return _result(
         "created",
         scope,
         labels,
         sent,
-        ids=[(new_ids[object_key(r, kind)] or [None]).pop(0) for kind, r in sent],
+        ids=create_objects(client, scope, sent),
         url=job_url(base_url, task_id, job.id, first) if job else job_url(base_url, task_id),
     )
 

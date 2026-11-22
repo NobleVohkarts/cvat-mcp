@@ -3,7 +3,7 @@ import itertools
 import logging
 import threading
 import time
-from collections import Counter, defaultdict
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -22,7 +22,7 @@ from cvat_mcp.errors import InvalidArgument, explain
 from cvat_mcp.services.annotation_edits import (
     REQUEST,
     check_editable,
-    object_key,
+    create_objects,
     patch_annotations,
 )
 from cvat_mcp.services.annotations import Scope, scope_of, shape_bbox
@@ -37,9 +37,10 @@ DEFAULT_MODELS: dict[str, str] = {
     "keypoint_detection": "keypointrcnn_resnet50_fpn",
     "classification": "resnet50",
 }
-_MODULES = {f: f"cvat_sdk.auto_annotation.functions.torchvision_{f}" for f in DEFAULT_MODELS}
 # Detection models that also fit the segmentation / keypoint functions.
 _MODEL_PART = {"instance_segmentation": "maskrcnn", "keypoint_detection": "keypointrcnn"}
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -69,9 +70,9 @@ class AutoAnnotationRun(BaseModel):
     model: str
     mode: str
     frames_total: int
-    frames_done: int
-    added: dict[str, int]
-    skipped: dict[str, int]
+    frames_done: int = 0
+    added: dict[str, int] = {}
+    skipped: dict[str, int] = {}
     started: datetime
     finished: datetime | None = None
     error: str | None = None
@@ -83,9 +84,9 @@ class AutoAnnotation(BaseModel):
     function: str
     model: str
     mode: str
-    frames: list[int]
-    objects: list[AutoObject]
-    skipped: dict[str, int]  # the function's label -> detections dropped (no such task label)
+    frames: list[int] = []
+    objects: list[AutoObject] = []
+    skipped: dict[str, int] = {}  # the function's label -> detections dropped (no such task label)
     seconds: float
     note: str | None = None
     run: AutoAnnotationRun | None = None  # set for a background run (no frames given)
@@ -93,7 +94,7 @@ class AutoAnnotation(BaseModel):
 
 @dataclass
 class Progress:
-    frames_done: int = 0
+    keep_objects: bool = True  # False for background runs: nobody reads them, and they'd pile up
     added: Counter = field(default_factory=Counter)
     skipped: Counter = field(default_factory=Counter)
     objects: list[AutoObject] = field(default_factory=list)
@@ -103,8 +104,6 @@ class Progress:
 def check_options(
     function: Function, model: str | None, conf_threshold: float, polygons: bool, mode: Mode
 ) -> RunOptions:
-    if function not in DEFAULT_MODELS:
-        raise InvalidArgument(f"function must be one of: {', '.join(DEFAULT_MODELS)}")
     if not 0 <= conf_threshold <= 1:
         raise InvalidArgument("conf_threshold must be between 0 and 1")
     return RunOptions(function, model or DEFAULT_MODELS[function], conf_threshold, polygons, mode)
@@ -136,7 +135,8 @@ def load_function(opts: RunOptions):
             f"unknown {opts.function} model {opts.model!r}; choose one of: {', '.join(choices)}"
         )
     _loaded = None  # free the old model before loading the new one
-    fn = importlib.import_module(_MODULES[opts.function]).create(opts.model)
+    module = importlib.import_module(f"cvat_sdk.auto_annotation.functions.torchvision_{key[0]}")
+    fn = module.create(opts.model)
     _loaded = (key, fn)
     return fn
 
@@ -152,10 +152,9 @@ def target_frames(scope: Scope, frames: list[int] | None) -> list[int]:
         )
     if len(set(frames)) != len(frames):
         raise InvalidArgument("a frame is listed twice")
-    deleted = set(allowed)
     for frame in frames:
         scope.check_frame(frame)
-        if frame not in deleted:
+        if frame not in allowed:
             raise InvalidArgument(f"frame {frame} is deleted in task {scope.task.id}")
     return sorted(frames)
 
@@ -209,6 +208,7 @@ def annotate(
     """Run fn on frames, saving each chunk of chunk_size frames in one upload."""
     function_names = {label.id: label.name for label in fn.spec.labels}
     names = {label.id: label.name for label in labels}
+    task_names = set(names.values())
     try:
         mapper = _AnnotationMapper(
             client.logger,
@@ -238,7 +238,7 @@ def annotate(
             skipped.update(
                 function_names[a.label_id]
                 for a in output
-                if function_names.get(a.label_id) not in names.values()
+                if function_names.get(a.label_id) not in task_names
             )
             try:
                 tags, shapes = mapper.validate_and_remap(output, frame)
@@ -246,20 +246,11 @@ def annotate(
                 raise _bad_function(opts, exc) from exc
             sent += [("shape", s) for s in shapes] + [("tag", t) for t in tags]
 
-        ids = []
-        if sent:
-            data = patch_annotations(client, "create", scope, sent)
-            # Pair ids by content, as create_annotations does.
-            new_ids = defaultdict(list)
-            for kind, created in (("shape", data.shapes), ("tag", data.tags)):
-                for c in created:
-                    new_ids[object_key(c, kind)].append(c.id)
-            ids = [(new_ids[object_key(r, kind)] or [None]).pop(0) for kind, r in sent]
-
-        progress.objects += _objects(sent, ids, names)
+        ids = create_objects(client, scope, sent) if sent else []
+        if progress.keep_objects:
+            progress.objects += _objects(sent, ids, names)
         progress.added.update(names[r.label_id] for _, r in sent)
         progress.skipped.update(skipped)
-        progress.frames_done += len(chunk)
         progress.saved_frames += chunk
 
 
@@ -289,14 +280,25 @@ def _release() -> None:
 def resolve_scope(client: Client, task_id: int | None, job_id: int | None) -> Scope:
     if (task_id is None) == (job_id is None):
         raise InvalidArgument("pass exactly one of task_id or job_id")
-    if task_id is None:
-        task_id = client.jobs.retrieve(job_id).task_id
-    task = client.tasks.retrieve(task_id)
+    job = client.jobs.retrieve(job_id) if job_id is not None else None
+    task = client.tasks.retrieve(job.task_id if job is not None else task_id)
     if str(task.dimension) == "3d":
         raise InvalidArgument(f"task {task.id} is a 3D task; auto-annotation supports 2D images")
-    scope = scope_of(client, task, job_id)
+    scope = Scope(task, job)
     check_editable(scope)
     return scope
+
+
+def _answer(scope: Scope, opts: RunOptions, started: float, **rest) -> AutoAnnotation:
+    return AutoAnnotation(
+        task_id=scope.task.id,
+        job_id=scope.job_id,
+        function=opts.function,
+        model=opts.model,
+        mode=opts.mode,
+        seconds=round(time.monotonic() - started, 1),
+        **rest,
+    )
 
 
 def _note(progress: Progress, labels) -> str | None:
@@ -339,16 +341,13 @@ def auto_annotate_frames(
         ) from exc
     finally:
         _release()
-    return AutoAnnotation(
-        task_id=scope.task.id,
-        job_id=scope.job_id,
-        function=opts.function,
-        model=opts.model,
-        mode=opts.mode,
+    return _answer(
+        scope,
+        opts,
+        started,
         frames=frames,
         objects=progress.objects,
         skipped=dict(progress.skipped),
-        seconds=round(time.monotonic() - started, 1),
         note=_note(progress, labels),
     )
 
@@ -361,12 +360,9 @@ class AutoAnnotationRuns(BaseModel):
     )
 
 
-logger = logging.getLogger(__name__)
-
 # shortcut: runs live in memory and are never pruned (a few hundred bytes each); persist them
 # if the server ever needs to resume runs after a restart.
 _RUNS: dict[str, tuple[AutoAnnotationRun, Progress]] = {}
-_THREADS: dict[str, threading.Thread] = {}
 _RUN_NUMBERS = itertools.count(1)
 
 
@@ -374,7 +370,7 @@ def _snapshot(run_id: str) -> AutoAnnotationRun:
     run, progress = _RUNS[run_id]
     return run.model_copy(
         update={
-            "frames_done": progress.frames_done,
+            "frames_done": len(progress.saved_frames),
             "added": dict(progress.added),
             "skipped": dict(progress.skipped),
         }
@@ -433,32 +429,21 @@ def start_run(
         model=opts.model,
         mode=opts.mode,
         frames_total=len(frames),
-        frames_done=0,
-        added={},
-        skipped={},
         started=datetime.now(timezone.utc),
     )
-    progress = Progress()
+    progress = Progress(keep_objects=False)
     _RUNS[run_id] = (run, progress)
     answer = _snapshot(run_id)  # before the thread can change it
-    thread = threading.Thread(
+    threading.Thread(
         target=_run,
         args=(run, progress, client_factory, opts, fn, frames, chunk_size),
         name=f"auto-annotation {run_id}",
         daemon=True,
-    )
-    _THREADS[run_id] = thread
-    thread.start()
-    return AutoAnnotation(
-        task_id=scope.task.id,
-        job_id=scope.job_id,
-        function=opts.function,
-        model=opts.model,
-        mode=opts.mode,
-        frames=[],
-        objects=[],
-        skipped={},
-        seconds=round(time.monotonic() - started, 1),
+    ).start()
+    return _answer(
+        scope,
+        opts,
+        started,
         note=f"running in the background; follow it with get_auto_annotation_run(run_id={run_id!r})",
         run=answer,
     )

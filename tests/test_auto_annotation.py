@@ -116,7 +116,6 @@ def test_annotate_saves_per_chunk():
     progress = aa.Progress()
     aa.annotate(client, Scope(task), LABELS, FakeFunction(), _opts(), [0, 1, 2, 3, 4], 2, progress)
     assert [sorted({s.frame for s in r.shapes}) for r in _sent(api)] == [[0, 1], [2, 3], [4]]
-    assert progress.frames_done == 5
     assert progress.saved_frames == [0, 1, 2, 3, 4]
     assert progress.added == {"car": 5}
     assert progress.skipped == {"bench": 5}
@@ -320,7 +319,9 @@ def _start(fn, use_function, **setup_kw):
 
 
 def _finish(run_id):
-    aa._THREADS[run_id].join(timeout=10)
+    for thread in threading.enumerate():
+        if thread.name == f"auto-annotation {run_id}":
+            thread.join(timeout=10)
     (run,) = aa.get_runs(run_id).runs
     return run
 
@@ -337,6 +338,7 @@ def test_background_run_finishes(use_function):
         {"bench": 5},
     )
     assert run.finished is not None and run.error is None
+    assert aa._RUNS[run.run_id][1].objects == []  # background runs keep no object list
     assert not aa._LOCK.locked()
 
 

@@ -30,7 +30,7 @@ settings = Settings()
 def _connect(s: Settings) -> tuple[Client, str]:
     # make_client() also checks the server version and logs a warning if it is unsupported.
     try:
-        client = make_client(s.url, access_token=s.access_token.get_secret_value())
+        client = open_client(s)
         user = client.users.retrieve_current_user()
     except HTTPError:
         sys.exit(f"cvat-mcp: cannot reach CVAT at {s.url}. Is the server running? Check CVAT_URL.")
@@ -45,9 +45,9 @@ def _connect(s: Settings) -> tuple[Client, str]:
     return client, user.username
 
 
-def open_client() -> Client:
-    """A new CVAT client for work that outlives a request (background runs); raises, never exits."""
-    return make_client(settings.url, access_token=settings.access_token.get_secret_value())
+def open_client(s: Settings = settings) -> Client:
+    """A new CVAT client (also for background runs, which outlive a request); raises, never exits."""
+    return make_client(s.url, access_token=s.access_token.get_secret_value())
 
 
 def check_cvat() -> None:
