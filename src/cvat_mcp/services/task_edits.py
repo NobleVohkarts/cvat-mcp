@@ -7,13 +7,16 @@ from urllib.parse import urlsplit
 
 from cvat_sdk import Client
 from cvat_sdk.api_client import models
+from cvat_sdk.api_client.exceptions import ApiException
 from cvat_sdk.attributes import attribute_value_validator
+from cvat_sdk.core.exceptions import BackgroundRequestException
 from cvat_sdk.core.proxies.tasks import ResourceType
 from pydantic import BaseModel, ConfigDict, Field
 
 from cvat_mcp.config import resolve_in_workdir
-from cvat_mcp.errors import InvalidArgument
+from cvat_mcp.errors import InvalidArgument, explain
 from cvat_mcp.services.annotation_edits import check_value
+from cvat_mcp.services.cloud_storages import cloud_source, parse_bucket_url, resolve_storage
 from cvat_mcp.services.issues import job_url
 from cvat_mcp.services.tasks import JobInfo, jobs_of
 from cvat_mcp.services.users import require_own, user_id
@@ -96,6 +99,8 @@ class CreatedTask(BaseModel):
     frame_count: int
     jobs: list[JobInfo]
     url: str
+    cloud_storage_id: int | None = None  # the bucket's CVAT storage, for cloud_url
+    cloud_storage_registered: bool = False  # this call registered it (without keys)
 
 
 def _listed(directory: Path, workdir: Path) -> list[Path]:
@@ -150,6 +155,7 @@ def create_task(
     project_id: int | None,
     files: list[str] | None,
     urls: list[str] | None,
+    cloud_url: str | None,
     segment_size: int | None,
 ) -> CreatedTask:
     # Argument checks first: they need no requests.
@@ -159,34 +165,70 @@ def create_task(
         raise InvalidArgument(
             "pass exactly one of labels or project_id (a project's tasks use its labels)"
         )
-    if (files is None) == (urls is None):
-        raise InvalidArgument("pass exactly one of files or urls")
-    if files is not None:
-        resources, resource_type = resolve_files(workdir, files), ResourceType.LOCAL
-    else:
-        _check_urls(urls)
-        resources, resource_type = urls, ResourceType.REMOTE
+    if [files, urls, cloud_url].count(None) != 2:
+        raise InvalidArgument("pass exactly one of files, urls or cloud_url")
     spec = {"name": name, "project_id": project_id, "segment_size": segment_size}
     if labels is not None:
         spec["labels"] = label_requests(labels)
+    params = {"sorting_method": "natural"}
+    storage_id, registered = None, False
+    if files is not None:
+        resources, resource_type = resolve_files(workdir, files), ResourceType.LOCAL
+    elif urls is not None:
+        _check_urls(urls)
+        resources, resource_type = urls, ResourceType.REMOTE
+    else:
+        ref = parse_bucket_url(cloud_url)
+        resources, pattern = cloud_source(ref.key)
+        resource_type = ResourceType.SHARE
+        # match storages on what is selected: "street" is the folder "street/"
+        selected = ref._replace(key=resources[0] if resources else pattern)
+        storage_id, registered = resolve_storage(client, selected)  # last check: may register
+        params |= {"cloud_storage_id": storage_id, "use_cache": True}
+        if pattern:
+            params["filename_pattern"] = pattern
 
-    task = client.tasks.create(
-        models.TaskWriteRequest(**{k: v for k, v in spec.items() if v is not None})
-    )
+    def forget_storage():
+        """A storage this call registered is no use without its task."""
+        if registered:
+            try:
+                client.api_client.cloudstorages_api.destroy(storage_id)
+            except Exception:  # pylint: disable=broad-exception-caught
+                logger.exception("could not remove cloud storage %s", storage_id)
+
+    try:
+        task = client.tasks.create(
+            models.TaskWriteRequest(**{k: v for k, v in spec.items() if v is not None})
+        )
+    except BaseException:
+        forget_storage()
+        raise
     # Two steps instead of create_from_data(), which loses the task when the upload fails.
     try:
         task.upload_data(
             resources=resources,
             resource_type=resource_type,
-            params={"sorting_method": "natural"},
+            params=params,
             wait_for_completion=True,  # also refreshes the task (size)
             status_check_period=1,  # the default 5 s makes even a one-image task take 5 s
         )
-    except BaseException:
+    except BaseException as exc:
         try:
             task.remove()  # an empty task is no use to anyone
         except Exception:  # pylint: disable=broad-exception-caught
             logger.exception("could not remove task %s after its upload failed", task.id)
+        forget_storage()
+        refused = isinstance(exc, BackgroundRequestException) or (
+            isinstance(exc, ApiException) and exc.status == 400
+        )
+        if storage_id is not None and refused:
+            hint = f"check that cloud_url {cloud_url!r} names a folder or object with images"
+            if not registered:
+                hint += (
+                    f", and that cloud storage #{storage_id} can read the bucket (its keys: "
+                    "update_cloud_storage)"
+                )
+            raise InvalidArgument(f"{explain(exc).rstrip()}; {hint}") from exc
         raise
     return CreatedTask(
         task_id=task.id,
@@ -194,6 +236,8 @@ def create_task(
         frame_count=task.size,
         jobs=jobs_of(task),
         url=job_url(base_url, task.id),
+        cloud_storage_id=storage_id,
+        cloud_storage_registered=registered,
     )
 
 

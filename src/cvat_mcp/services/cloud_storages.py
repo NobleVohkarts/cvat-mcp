@@ -216,25 +216,31 @@ def create_cloud_storage(
 ) -> CloudStorageStatus:
     """Register a whole S3-compatible bucket; CVAT checks that it can reach it."""
     ref = parse_bucket_url(url)
-    credentials = _credentials(access_key_id, secret_access_key) or {
-        "credentials_type": models.CredentialsTypeEnum("ANONYMOUS_ACCESS")
-    }
+    credentials = _credentials(access_key_id, secret_access_key)
     if existing := find_storage(client, ref, None, whole_bucket=True):
         raise InvalidArgument(
             f"bucket {ref.bucket!r} is already registered as cloud storage #{existing.id}: use "
             "it, or change its keys with update_cloud_storage"
         )
+    storage = _register(client, ref, credentials, display_name, region)
+    return _with_status(client, storage, base_url)
+
+
+def _register(client: Client, ref: BucketRef, credentials: dict, display_name=None, region=None):
+    """Create the storage for the whole bucket; anonymous without credentials."""
     attrs = {"endpoint_url": ref.endpoint_url, "region": region or ref.region}
     request = models.CloudStorageWriteRequest(
         provider_type=models.ProviderTypeEnum(S3),
         resource=ref.bucket,
         display_name=display_name or f"{ref.bucket} ({_label(ref)})"[:63],  # CVAT's limit
         specific_attributes=urlencode({k: v for k, v in attrs.items() if v}),  # as the UI does
-        **credentials,
+        **(credentials or {"credentials_type": models.CredentialsTypeEnum("ANONYMOUS_ACCESS")}),
     )
     api = client.api_client.cloudstorages_api
-    storage, _ = _sent(lambda: api.create(request), access_key_id, secret_access_key)
-    return _with_status(client, storage, base_url)
+    storage, _ = _sent(
+        lambda: api.create(request), credentials.get("key"), credentials.get("secret_key")
+    )
+    return storage
 
 
 def update_cloud_storage(
@@ -281,3 +287,49 @@ def delete_cloud_storage(client: Client, cloud_storage_id: int) -> DeletedCloudS
         )
     api.destroy(cloud_storage_id)
     return DeletedCloudStorage(cloud_storage_id=cloud_storage_id, display_name=storage.display_name)
+
+
+class CloudSource(NamedTuple):
+    resources: list[str]  # CVAT's server_files: object keys
+    filename_pattern: str | None
+
+
+def cloud_source(key: str) -> CloudSource:
+    """What a link's key part selects: a glob, one object, or a folder (recursively)."""
+    if any(c in key for c in "*?"):  # not "[": keys like "shots[2024]/" contain it
+        return CloudSource([], key)
+    if "." in key.rsplit("/", 1)[-1]:  # a file name; "street" (no extension) is a folder
+        return CloudSource([key], None)
+    folder = key.rstrip("/")
+    # CVAT expands "folder/" by listing only that prefix (recursively); a filename_pattern
+    # makes it list the whole bucket first, which is slow on big buckets.
+    return CloudSource([f"{folder}/"], None) if folder else CloudSource([], "*")
+
+
+def resolve_storage(client: Client, ref: BucketRef) -> tuple[int, bool]:
+    """The storage serving this bucket and key, and whether this call registered it (no keys).
+
+    No match means no whole-bucket storage either, so no duplicate check before registering."""
+    me = client.users.retrieve_current_user()
+    if storage := find_storage(client, ref, me.id):
+        return storage.id, False
+    if ref.endpoint_url is None:  # an AWS link: the same name elsewhere is a different bucket
+        page, _ = client.api_client.cloudstorages_api.list(
+            resource=ref.bucket, provider_type=S3, page_size=100
+        )
+        if other := next((s for s in page.results if attributes(s).get("endpoint_url")), None):
+            raise InvalidArgument(
+                f"bucket {ref.bucket!r} is registered as cloud storage #{other.id} at "
+                f"{attributes(other)['endpoint_url']}, not on AWS: pass its https link, "
+                f"{attributes(other)['endpoint_url'].rstrip('/')}/{ref.bucket}/{ref.key}"
+            )
+    try:
+        storage = _register(client, ref, {})
+    except InvalidArgument as exc:
+        raise InvalidArgument(
+            f"bucket {ref.bucket!r} could not be registered without keys; if it is private, "
+            "register it with create_cloud_storage(url, access_key_id, secret_access_key) (with "
+            "region for an AWS bucket outside us-east-1), then call create_task again "
+            f"({exc})"
+        ) from None
+    return storage.id, True
