@@ -83,6 +83,8 @@ if WRITE_MODE:
         "; register, change or delete cloud storages (create_cloud_storage, "
         "update_cloud_storage, delete_cloud_storage) only when the user asks; keys go only to "
         "create_cloud_storage and update_cloud_storage, never repeat keys back"
+        "; import annotation files (import_annotations) only when the user asks; it appends "
+        "unless the user asks to replace"
     )
     READ_ONLY_NOTE = ""
 else:

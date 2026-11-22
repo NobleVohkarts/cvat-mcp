@@ -70,6 +70,7 @@ def test_read_only_mode_registers_only_read_tools(monkeypatch, mode):
     assert "delete_issue" not in result["instructions"]
     assert "update_annotations" not in result["instructions"]
     assert "create_cloud_storage" not in result["instructions"]
+    assert "import_annotations" not in result["instructions"]
     assert "is not available through this server" not in result["instructions"]
     assert "call create_report, then\nrender_frame the conflict frames" in result["instructions"]
     assert "job_id of the ground-truth job to see the ground truth" in result["instructions"]
@@ -88,6 +89,7 @@ def test_write_mode_adds_write_tools(monkeypatch):
         "delete_gt_job",
         "delete_issue",
         "delete_task",
+        "import_annotations",
         "update_annotations",
         "update_cloud_storage",
         "update_job",
@@ -105,6 +107,7 @@ def test_write_mode_adds_write_tools(monkeypatch):
         "delete_gt_job",
         "delete_issue",
         "delete_task",
+        "import_annotations",  # mode="replace" deletes the target's annotations first
     ]
     assert "update_job" in result["instructions"]
     assert "update_quality_settings" in result["instructions"]
@@ -126,8 +129,11 @@ def test_write_mode_adds_write_tools(monkeypatch):
     assert sorted(result["open_world"]) == [
         "create_cloud_storage",
         "create_task",
+        "import_annotations",  # CVAT reads the file from the bucket
         "update_cloud_storage",  # CVAT re-checks the bucket on every update
     ]
+    assert "import_annotations" in result["instructions"]
+    assert "appends unless" in result["instructions"]
     assert "keys go only to create_cloud_storage and update_cloud_storage" in result["instructions"]
     assert "never repeat keys" in result["instructions"]
     assert "disabled" not in result["instructions"]
