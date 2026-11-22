@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     access_token: SecretStr
     mcp_mode: Literal["read-only", "write"] = "read-only"
     mcp_workdir: Path = Path("workdir")
+    mcp_aa_chunk_size: int = Field(10, ge=1)  # frames saved per upload by auto_annotate
     # HTTP mode for remote clients (claude.ai) through a tunnel; stdio needs none of these.
     mcp_transport: Literal["stdio", "http"] = "stdio"
     mcp_public_url: str | None = Field(default=None, validate_default=True)

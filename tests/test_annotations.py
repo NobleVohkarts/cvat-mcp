@@ -1,7 +1,7 @@
 import pytest
 from fakes import Obj, fake_client, fake_task, gt_job, job_client, shape, tag
 
-from cvat_mcp.services.annotations import check_frame, get_frame_annotations, shape_bbox
+from cvat_mcp.services.annotations import Scope, check_frame, get_frame_annotations, shape_bbox
 from cvat_mcp.services.tasks import task_frames
 
 
@@ -153,3 +153,11 @@ def test_disabled_gt_frames_are_not_job_frames():
     client = job_client(fake_task(), gt_job(included=(0, 2), deleted=(2,)))
     with pytest.raises(ValueError, match="frame 2 is not in job 30.*its frames: 0$"):
         get_frame_annotations(client, 1, 2, job_id=30)
+
+
+def test_scope_frames_skip_deleted():
+    task = fake_task(size=5, deleted_frames=[1, 3])
+    assert Scope(task).frames() == [0, 2, 4]
+    job = Obj(id=7, task_id=1, type="annotation", start_frame=2, stop_frame=4)
+    assert Scope(task, job).frames() == [2, 4]
+    assert Scope(task, gt_job(included=(0, 2), deleted=(2,))).frames() == [0]

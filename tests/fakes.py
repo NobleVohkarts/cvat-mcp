@@ -49,6 +49,7 @@ def fake_task(
     validation_mode=None,
     start_frame=0,
     frame_filter="",
+    deleted_frames=(),
     **kw,
 ):
     return Obj(
@@ -62,6 +63,7 @@ def fake_task(
             frames=meta_frames or [Obj(width=640, height=480) for _ in range(size)],
             start_frame=start_frame,
             frame_filter=frame_filter,
+            deleted_frames=list(deleted_frames),
         ),
         get_jobs=lambda: list(jobs),
         **kw,

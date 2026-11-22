@@ -83,11 +83,10 @@ class Scope:
             self._meta = self.task.get_meta()
         return self._meta
 
-    def check_frame(self, frame: int) -> None:
-        check_frame(frame, self.task.size)
-        if self.job is None:
-            return
-        if self._job_frames is None:  # fetched only when a frame has to be checked
+    @property
+    def job_frames(self):
+        """The job's task frames, fetched once (only when needed)."""
+        if self._job_frames is None:
             if str(self.job.type) == "ground_truth":
                 job_meta = self.job.get_meta()
                 # deleted_frames (task frame numbers) include disabled validation frames
@@ -96,9 +95,21 @@ class Scope:
                 )
             else:
                 self._job_frames = range(self.job.start_frame, self.job.stop_frame + 1)
+        return self._job_frames
+
+    def frames(self) -> list[int]:
+        """The task's (or the job's) frames in order, without the task's deleted frames."""
+        frames = range(self.task.size) if self.job is None else sorted(self.job_frames)
+        deleted = set(self.meta.deleted_frames or [])
+        return [f for f in frames if f not in deleted]
+
+    def check_frame(self, frame: int) -> None:
+        check_frame(frame, self.task.size)
+        if self.job is None:
+            return
         # CVAT doesn't check this on job writes: an object could land outside the job's frames
-        if frame not in self._job_frames:
-            listed = sorted(self._job_frames)
+        if frame not in self.job_frames:
+            listed = sorted(self.job_frames)
             shown = ", ".join(map(str, listed[:20])) + (", …" if len(listed) > 20 else "")
             raise InvalidArgument(
                 f"frame {frame} is not in job {self.job.id} ({self.job.type}); its frames: {shown}"
