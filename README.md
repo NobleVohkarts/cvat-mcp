@@ -20,6 +20,7 @@ reports each problem as a CVAT issue on the right frame of the right job.
 | `get_task_overview` | both | Understand one task: labels, jobs with frame ranges, stage, state, assignee, objects per label. |
 | `render_frame` | both | Look at a frame: JPEG with every box and a semi-transparent `#id label` caption drawn, plus a legend with exact boxes in original pixels. `include_clean=True` adds the same frame without annotations, for crowded frames. `job_id` draws one job's annotations (e.g. ground truth). |
 | `get_frame_annotations` | both | Get exact data for one frame's objects and tags: id, label, type, box (plus points for polygons, polylines and points), attributes, source. `job_id` reads one job's annotations (e.g. ground truth). |
+| `download_annotations` | both | Read all annotations of a job (or of every annotation job of a task) as one compact JSON per job, returned as an `application/json` embedded resource. Refuses above 2000 shapes. |
 | `export_dataset` | both | Save a task as a dataset file in a CVAT format (e.g. `COCO 1.0`) inside `CVAT_MCP_WORKDIR`; waits for CVAT's background export, never overwrites. |
 | `create_report` | both | Measure a task's annotation jobs against its ground-truth job (CVAT quality control): waits for a fresh report, returns counts, scores and conflicts by frame with the ids involved; needs a token that can write. |
 | `list_issues` | both | See the issues already filed on a task or one frame: message, position, author, resolved, replies, and `own` (filed under the token's CVAT account). |

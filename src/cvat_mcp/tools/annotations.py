@@ -1,6 +1,7 @@
 from typing import Annotated
 
 from mcp.server.mcpserver import Context, Image
+from mcp.types import EmbeddedResource, TextResourceContents
 from pydantic import Field
 
 from cvat_mcp import render
@@ -31,6 +32,34 @@ def get_frame_annotations(
     the frame; use these ids and boxes for create_issue, update_annotations and
     delete_annotations."""
     return annotations.get_frame_annotations(get_client(ctx), task_id, frame, job_id)
+
+
+@tool(structured_output=False)
+def download_annotations(
+    ctx: Context,
+    task_id: int | None = None,
+    job_id: Annotated[
+        int | None,
+        Field(description="one job (any type, ground truth included) instead of the task's jobs"),
+    ] = None,
+) -> list[EmbeddedResource]:
+    """Use to read all annotations of a job at once (job_id: any job, ground truth included) or
+    of every annotation job of a task (task_id): one compact JSON per job with its frames (name,
+    size), shapes (id, frame, label, type, points as flat x, y in original pixels, group,
+    occluded, z_order, source, attributes) and tags. Tracks are not included (counted in
+    skipped_tracks). Refuses above 2000 shapes in total; then pass job_id or use
+    get_frame_annotations frame by frame. Pass exactly one of task_id or job_id."""
+    return [
+        EmbeddedResource(
+            type="resource",
+            resource=TextResourceContents(
+                uri=f"cvat://jobs/{job.job_id}/annotations.json",
+                mimeType="application/json",
+                text=job.model_dump_json(exclude_none=True),
+            ),
+        )
+        for job in annotations.download_annotations(get_client(ctx), task_id, job_id)
+    ]
 
 
 @tool(structured_output=False)

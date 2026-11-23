@@ -28,6 +28,7 @@ importlib.util.find_spec = lambda name, package=None: None if name in hidden els
 """
 READ_TOOLS = [
     "create_report",
+    "download_annotations",
     "export_dataset",
     "get_frame_annotations",
     "get_task_overview",
@@ -75,6 +76,7 @@ def registered(monkeypatch, mode):
 def test_read_only_mode_registers_only_read_tools(monkeypatch, mode):
     result = registered(monkeypatch, mode)
     assert result["tools"] == READ_TOOLS
+    assert "download_annotations for all of a job's annotations" in result["instructions"]
     assert "Write tools are disabled: the server runs in read-only mode" in result["instructions"]
     assert "create_issue" not in result["instructions"]
     assert "Issues belong" not in result["instructions"]
@@ -129,6 +131,7 @@ def test_write_mode_adds_write_tools(monkeypatch):
     annotation_tools = {
         "create_annotations",
         "delete_annotations",
+        "download_annotations",
         "get_frame_annotations",
         "render_frame",
         "update_annotations",

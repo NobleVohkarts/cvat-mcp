@@ -116,6 +116,7 @@ Mode: {settings.mcp_mode}.
 Typical flow: list_tasks -> get_task_overview (labels, jobs and their frame ranges)
 -> render_frame for each frame to review (look for missing objects, wrong labels and boxes
 that miss their object) -> get_frame_annotations for exact ids and boxes
+(download_annotations for all of a job's annotations as JSON)
 -> list_issues for issues already filed there -> report the problems to the user{WRITE_STEPS}.
 To measure annotation jobs against the task's ground-truth job, call create_report, then
 render_frame the conflict frames, once as they are and once with

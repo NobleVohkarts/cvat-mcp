@@ -1,3 +1,4 @@
+import json
 from unittest.mock import Mock
 
 import pytest
@@ -5,6 +6,7 @@ from fakes import Obj, fake_client, fake_task, gt_job, job, job_client, shape, t
 
 from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.services.annotations import JobFrame, download_annotations
+from cvat_mcp.tools import annotations as tools
 
 
 @pytest.mark.parametrize("task_id, job_id", [(None, None), (1, 5)])
@@ -130,3 +132,16 @@ def test_job_id_reads_the_jobs_task():
     [result] = download_annotations(client, None, 5)
     retrieve.assert_called_once_with(7)
     assert result.task_id == 7
+
+
+def test_tool_returns_json_resources():
+    jobs = [job(8, 0, 4, [shape(1, 1, 0, [1, 2, 3, 4])]), job(9, 5, 9)]
+    ctx = Obj(request_context=Obj(lifespan_context=fake_client(fake_task(size=10, jobs=jobs))))
+    blocks = tools.download_annotations(ctx, task_id=1)
+    assert [b.type for b in blocks] == ["resource", "resource"]
+    for block, job_id in zip(blocks, [8, 9]):
+        resource = block.resource
+        assert resource.mime_type == "application/json"
+        assert str(resource.uri) == f"cvat://jobs/{job_id}/annotations.json"
+        assert json.loads(resource.text)["job_id"] == job_id
+        assert '": ' not in resource.text  # compact
