@@ -10,7 +10,14 @@ def _with_to_dict(obj):
 
 
 def shape(id, label_id, frame, points, **kw):  # pylint: disable=redefined-builtin
-    defaults = {"type": "rectangle", "attributes": [], "source": "manual", "occluded": False}
+    defaults = {
+        "type": "rectangle",
+        "attributes": [],
+        "source": "manual",
+        "occluded": False,
+        "group": 0,
+        "z_order": 0,
+    }
     return _with_to_dict(
         Obj(id=id, label_id=label_id, frame=frame, points=points, **{**defaults, **kw})
     )
@@ -60,7 +67,8 @@ def fake_task(
         get_annotations=lambda: Obj(shapes=list(shapes), tracks=list(tracks), tags=list(tags)),
         get_labels=lambda: list(labels),
         get_meta=lambda: Obj(
-            frames=meta_frames or [Obj(width=640, height=480) for _ in range(size)],
+            frames=meta_frames
+            or [Obj(width=640, height=480, name=f"frame_{i:06}.jpg") for i in range(size)],
             start_frame=start_frame,
             frame_filter=frame_filter,
             deleted_frames=list(deleted_frames),
@@ -87,7 +95,19 @@ def gt_job(shapes=(), included=(0, 2), task_id=1, job_id=30, deleted=(), **kw):
     )
 
 
-def job_client(task, job, **repos):
+def job(job_id, start, stop, shapes=(), tags=(), tracks=(), task_id=1):
+    """An annotation job of frames start..stop."""
+    return Obj(
+        id=job_id,
+        task_id=task_id,
+        type="annotation",
+        start_frame=start,
+        stop_frame=stop,
+        get_annotations=lambda: Obj(shapes=list(shapes), tracks=list(tracks), tags=list(tags)),
+    )
+
+
+def job_client(task, job, **repos):  # pylint: disable=redefined-outer-name
     """A fake client whose jobs.retrieve returns `job`."""
     return fake_client(task, jobs=Obj(retrieve=lambda _id: job), **repos)
 
