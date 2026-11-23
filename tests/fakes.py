@@ -95,7 +95,7 @@ def gt_job(shapes=(), included=(0, 2), task_id=1, job_id=30, deleted=(), **kw):
     )
 
 
-def job(job_id, start, stop, shapes=(), tags=(), tracks=(), task_id=1):
+def annotation_job(job_id, start, stop, shapes=(), tags=(), tracks=(), task_id=1):
     """An annotation job of frames start..stop."""
     return Obj(
         id=job_id,
@@ -107,7 +107,7 @@ def job(job_id, start, stop, shapes=(), tags=(), tracks=(), task_id=1):
     )
 
 
-def job_client(task, job, **repos):  # pylint: disable=redefined-outer-name
+def job_client(task, job, **repos):
     """A fake client whose jobs.retrieve returns `job`."""
     return fake_client(task, jobs=Obj(retrieve=lambda _id: job), **repos)
 

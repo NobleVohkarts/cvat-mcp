@@ -2,7 +2,7 @@ import json
 from unittest.mock import Mock
 
 import pytest
-from fakes import Obj, fake_client, fake_task, gt_job, job, job_client, shape, tag
+from fakes import Obj, annotation_job, fake_client, fake_task, gt_job, job_client, shape, tag
 
 from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.services.annotations import JobFrame, download_annotations
@@ -19,7 +19,9 @@ def test_needs_exactly_one_target(task_id, job_id):
 
 def _one_job(shapes=(), tags=(), tracks=(), **task_kw):
     task = fake_task(size=10, **task_kw)
-    return download_annotations(job_client(task, job(5, 0, 9, shapes, tags, tracks)), None, 5)
+    return download_annotations(
+        job_client(task, annotation_job(5, 0, 9, shapes, tags, tracks)), None, 5
+    )
 
 
 def test_one_job_shape_keys_and_values():
@@ -52,12 +54,7 @@ def test_json_key_order_matches_the_spec():
     ]  # fmt: skip
     assert list(data["shapes"][0]) == [
         "id", "frame", "label", "type", "points", "group", "occluded", "z_order", "source"
-    ]  # fmt: skip
-
-
-def test_attributes_left_out_when_empty():
-    [result] = _one_job([shape(1, 1, 0, [1, 2, 3, 4])])
-    assert '"attributes"' not in result.model_dump_json(exclude_none=True)
+    ]  # fmt: skip  # no "attributes": left out when empty
 
 
 def test_tags_and_tracks():
@@ -72,7 +69,7 @@ def test_tags_and_tracks():
 
 
 def test_task_id_returns_annotation_jobs_in_order():
-    jobs = [job(9, 5, 9), job(8, 0, 4), gt_job(job_id=30)]
+    jobs = [annotation_job(9, 5, 9), annotation_job(8, 0, 4), gt_job(job_id=30)]
     result = download_annotations(fake_client(fake_task(size=10, jobs=jobs)), 1, None)
     assert [r.job_id for r in result] == [8, 9]
     assert [f.frame for f in result[0].frames] == [0, 1, 2, 3, 4]
@@ -93,11 +90,9 @@ def test_deleted_frames_dropped():
 
 
 def test_video_task_single_meta_entry():
-    video = [Obj(width=1920, height=1080, name="clip.mp4")]
-    task = fake_task(size=5, meta_frames=video)
-    [result] = download_annotations(job_client(task, job(5, 0, 4)), None, 5)
+    [result] = _one_job(meta_frames=[Obj(width=1920, height=1080, name="clip.mp4")])
     assert result.frames == [
-        JobFrame(frame=f, name="clip.mp4", width=1920, height=1080) for f in range(5)
+        JobFrame(frame=f, name="clip.mp4", width=1920, height=1080) for f in range(10)
     ]
 
 
@@ -106,7 +101,7 @@ def _shapes(n, frame):
 
 
 def test_cap_counts_all_jobs():
-    jobs = [job(8, 0, 4, _shapes(1200, 0)), job(9, 5, 9, _shapes(1200, 5))]
+    jobs = [annotation_job(8, 0, 4, _shapes(1200, 0)), annotation_job(9, 5, 9, _shapes(1200, 5))]
     with pytest.raises(InvalidArgument) as error:
         download_annotations(fake_client(fake_task(size=10, jobs=jobs)), 1, None)
     for part in ("2400", "2000", "job 8: 1200", "job 9: 1200", "job_id"):
@@ -127,7 +122,8 @@ def test_job_id_reads_the_jobs_task():
     task = fake_task(task_id=7)
     retrieve = Mock(return_value=task)
     client = Obj(
-        tasks=Obj(retrieve=retrieve), jobs=Obj(retrieve=lambda _id: job(5, 0, 3, task_id=7))
+        tasks=Obj(retrieve=retrieve),
+        jobs=Obj(retrieve=lambda _id: annotation_job(5, 0, 3, task_id=7)),
     )
     [result] = download_annotations(client, None, 5)
     retrieve.assert_called_once_with(7)
@@ -135,7 +131,7 @@ def test_job_id_reads_the_jobs_task():
 
 
 def test_tool_returns_json_resources():
-    jobs = [job(8, 0, 4, [shape(1, 1, 0, [1, 2, 3, 4])]), job(9, 5, 9)]
+    jobs = [annotation_job(8, 0, 4, [shape(1, 1, 0, [1, 2, 3, 4])]), annotation_job(9, 5, 9)]
     ctx = Obj(request_context=Obj(lifespan_context=fake_client(fake_task(size=10, jobs=jobs))))
     blocks = tools.download_annotations(ctx, task_id=1)
     assert [b.type for b in blocks] == ["resource", "resource"]

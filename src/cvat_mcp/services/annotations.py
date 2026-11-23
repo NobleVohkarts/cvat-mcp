@@ -126,10 +126,22 @@ def scope_of(client: Client, task, job_id: int | None) -> Scope:
     return Scope(task, job)
 
 
+def target_scope(client: Client, task_id: int | None, job_id: int | None) -> Scope:
+    """The scope of exactly one of a task (task_id) or a job (job_id, whose task is looked up)."""
+    if (task_id is None) == (job_id is None):
+        raise InvalidArgument("pass exactly one of task_id or job_id")
+    job = client.jobs.retrieve(job_id) if job_id is not None else None
+    return Scope(client.tasks.retrieve(job.task_id if job is not None else task_id), job)
+
+
 def _names(labels: list) -> tuple[dict[int, str], dict[int, str]]:
     """Label names and attribute names by id."""
     names = {label.id: label.name for label in labels}
     return names, {a.id: a.name for label in labels for a in label.attributes}
+
+
+def _attributes(obj, attribute_names: dict[int, str]) -> dict[str, str]:
+    return {attribute_names[a.spec_id]: a.value for a in obj.attributes}
 
 
 def _frame_meta(meta, frame: int):
@@ -162,7 +174,7 @@ def frame_annotations(scope: Scope, labels: list, frame: int) -> FrameAnnotation
                 label=names[s.label_id],
                 type=str(s.type),
                 bbox=shape_bbox(s),
-                attributes={attribute_names[a.spec_id]: a.value for a in s.attributes},
+                attributes=_attributes(s, attribute_names),
                 source=str(s.source),
                 occluded=s.occluded,
                 points=list(s.points) if str(s.type) in POINT_TYPES else None,
@@ -174,7 +186,7 @@ def frame_annotations(scope: Scope, labels: list, frame: int) -> FrameAnnotation
             FrameTag(
                 id=t.id,
                 label=names[t.label_id],
-                attributes={attribute_names[a.spec_id]: a.value for a in t.attributes},
+                attributes=_attributes(t, attribute_names),
                 source=str(t.source),
             )
             for t in annotations.tags
@@ -240,9 +252,6 @@ def job_annotations(scope: Scope, labels: list) -> JobAnnotations:
     frames = scope.frames()
     kept = set(frames)
 
-    def attributes(obj) -> dict[str, str] | None:
-        return {attribute_names[a.spec_id]: a.value for a in obj.attributes} or None
-
     def frame_info(frame: int) -> JobFrame:
         meta = _frame_meta(scope.meta, frame)
         return JobFrame(frame=frame, name=meta.name, width=meta.width, height=meta.height)
@@ -263,7 +272,7 @@ def job_annotations(scope: Scope, labels: list) -> JobAnnotations:
                 occluded=s.occluded,
                 z_order=s.z_order or 0,
                 source=str(s.source),
-                attributes=attributes(s),
+                attributes=_attributes(s, attribute_names) or None,
             )
             for s in annotations.shapes
             if s.frame in kept
@@ -274,7 +283,7 @@ def job_annotations(scope: Scope, labels: list) -> JobAnnotations:
                 frame=t.frame,
                 label=names[t.label_id],
                 source=str(t.source),
-                attributes=attributes(t),
+                attributes=_attributes(t, attribute_names) or None,
             )
             for t in annotations.tags
             if t.frame in kept
@@ -287,22 +296,19 @@ def download_annotations(
     client: Client, task_id: int | None, job_id: int | None
 ) -> list[JobAnnotations]:
     """One job's annotations (job_id, any type), or those of each annotation job of a task."""
-    if (task_id is None) == (job_id is None):
-        raise InvalidArgument("pass exactly one of job_id or task_id")
-    if job_id is not None:
-        job = client.jobs.retrieve(job_id)
-        task = client.tasks.retrieve(job.task_id)
-        jobs = [job]
+    target = target_scope(client, task_id, job_id)
+    task = target.task
+    if target.job is not None:
+        jobs = [target.job]
     else:
-        task = client.tasks.retrieve(task_id)
         jobs = sorted(
             (j for j in task.get_jobs() if str(j.type) == "annotation"),
             key=lambda j: j.start_frame,
         )
         if not jobs:
             raise InvalidArgument(f"task {task_id} has no annotation jobs")
-    labels, meta = task.get_labels(), task.get_meta()
-    results = [job_annotations(Scope(task, job, meta), labels) for job in jobs]
+    labels = task.get_labels()
+    results = [job_annotations(Scope(task, job, target.meta), labels) for job in jobs]
     total = sum(len(r.shapes) for r in results)
     if total > SHAPE_CAP:
         counts = ", ".join(f"job {r.job_id}: {len(r.shapes)}" for r in results)
