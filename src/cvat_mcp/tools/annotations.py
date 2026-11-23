@@ -45,8 +45,10 @@ def download_annotations(
 ) -> list[EmbeddedResource]:
     """Use to read all annotations of a job at once (job_id: any job, ground truth included) or
     of every annotation job of a task (task_id): one compact JSON per job with its frames (name,
-    size), shapes (id, frame, label, type, points as flat x, y in original pixels, group,
-    occluded, z_order, source, attributes) and tags. Tracks are not included (counted in
+    size), shapes (id, frame, label, type, points as flat x, y in original pixels, rotation in
+    degrees when not 0, group, occluded, z_order, source, attributes) and tags. Points are
+    CVAT's own: masks hold RLE counts followed by [left, top, right, bottom], and a skeleton's
+    points are empty (its keypoints are not included). Tracks are not included (counted in
     skipped_tracks). Refuses above 2000 shapes in total; then pass job_id or use
     get_frame_annotations frame by frame. Pass exactly one of task_id or job_id."""
     return [

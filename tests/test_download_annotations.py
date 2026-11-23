@@ -141,3 +141,17 @@ def test_tool_returns_json_resources():
         assert str(resource.uri) == f"cvat://jobs/{job_id}/annotations.json"
         assert json.loads(resource.text)["job_id"] == job_id
         assert '": ' not in resource.text  # compact
+
+
+def test_rotation_kept_when_not_zero():
+    rotated = shape(1, 1, 0, [100, 100, 200, 150], rotation=30.0)
+    [result] = _one_job([rotated, shape(2, 1, 0, [1, 2, 3, 4])])
+    first, second = result.model_dump(exclude_none=True)["shapes"]
+    assert first["rotation"] == 30.0
+    assert "rotation" not in second  # left out when 0, like attributes
+
+
+def test_tool_description_explains_masks_and_skeletons():
+    doc = tools.download_annotations.__doc__
+    assert "masks" in doc and "RLE" in doc
+    assert "skeleton" in doc and "keypoints are not included" in doc

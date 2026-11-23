@@ -17,6 +17,7 @@ def shape(id, label_id, frame, points, **kw):  # pylint: disable=redefined-built
         "occluded": False,
         "group": 0,
         "z_order": 0,
+        "rotation": 0.0,
     }
     return _with_to_dict(
         Obj(id=id, label_id=label_id, frame=frame, points=points, **{**defaults, **kw})

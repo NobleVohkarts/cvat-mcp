@@ -220,6 +220,7 @@ class JobShape(BaseModel):
     label: str
     type: str
     points: list[float]
+    rotation: float | None = None  # degrees, left out when 0
     group: int
     occluded: bool
     z_order: int
@@ -268,6 +269,7 @@ def job_annotations(scope: Scope, labels: list) -> JobAnnotations:
                 label=names[s.label_id],
                 type=str(s.type),
                 points=list(s.points),
+                rotation=s.rotation or None,
                 group=s.group or 0,
                 occluded=s.occluded,
                 z_order=s.z_order or 0,
