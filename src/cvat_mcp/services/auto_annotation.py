@@ -25,7 +25,7 @@ from cvat_mcp.services.annotation_edits import (
     create_objects,
     patch_annotations,
 )
-from cvat_mcp.services.annotations import Scope, scope_of, shape_bbox
+from cvat_mcp.services.annotations import Scope, scope_of, shape_bbox, target_scope
 
 Function = Literal["detection", "instance_segmentation", "keypoint_detection", "classification"]
 Mode = Literal["append", "replace"]
@@ -281,13 +281,11 @@ def _release() -> None:
 
 
 def resolve_scope(client: Client, task_id: int | None, job_id: int | None) -> Scope:
-    if (task_id is None) == (job_id is None):
-        raise InvalidArgument("pass exactly one of task_id or job_id")
-    job = client.jobs.retrieve(job_id) if job_id is not None else None
-    task = client.tasks.retrieve(job.task_id if job is not None else task_id)
-    if str(task.dimension) == "3d":
-        raise InvalidArgument(f"task {task.id} is a 3D task; auto-annotation supports 2D images")
-    scope = Scope(task, job)
+    scope = target_scope(client, task_id, job_id)
+    if str(scope.task.dimension) == "3d":
+        raise InvalidArgument(
+            f"task {scope.task.id} is a 3D task; auto-annotation supports 2D images"
+        )
     check_editable(scope)
     return scope
 

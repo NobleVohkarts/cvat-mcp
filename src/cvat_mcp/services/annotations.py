@@ -59,9 +59,9 @@ class Scope:
     """Where annotations are read and written: the task's annotation jobs, or one of its jobs
     (a ground-truth job is reachable only this way). Frames stay task frame numbers."""
 
-    def __init__(self, task, job=None):
+    def __init__(self, task, job=None, meta=None):
         self.task, self.job = task, job
-        self._meta = self._job_frames = None
+        self._meta, self._job_frames = meta, None  # meta: the task's, when already fetched
 
     @property
     def source(self):
@@ -126,6 +126,29 @@ def scope_of(client: Client, task, job_id: int | None) -> Scope:
     return Scope(task, job)
 
 
+def target_scope(client: Client, task_id: int | None, job_id: int | None) -> Scope:
+    """The scope of exactly one of a task (task_id) or a job (job_id, whose task is looked up)."""
+    if (task_id is None) == (job_id is None):
+        raise InvalidArgument("pass exactly one of task_id or job_id")
+    job = client.jobs.retrieve(job_id) if job_id is not None else None
+    return Scope(client.tasks.retrieve(job.task_id if job is not None else task_id), job)
+
+
+def _names(labels: list) -> tuple[dict[int, str], dict[int, str]]:
+    """Label names and attribute names by id."""
+    names = {label.id: label.name for label in labels}
+    return names, {a.id: a.name for label in labels for a in label.attributes}
+
+
+def _attributes(obj, attribute_names: dict[int, str]) -> dict[str, str]:
+    return {attribute_names[a.spec_id]: a.value for a in obj.attributes}
+
+
+def _frame_meta(meta, frame: int):
+    frames = meta.frames
+    return frames[frame] if len(frames) > 1 else frames[0]  # a video has one entry for all frames
+
+
 def _track_visible(track, frame: int) -> bool:
     keyframes = [s for s in track.shapes if s.frame <= frame]
     return bool(keyframes) and not max(keyframes, key=lambda s: s.frame).outside
@@ -135,13 +158,11 @@ def frame_annotations(scope: Scope, labels: list, frame: int) -> FrameAnnotation
     """Annotations of one frame of an already retrieved task, or of one of its jobs."""
     scope.check_frame(frame)
     task = scope.task
-    names = {label.id: label.name for label in labels}
-    attribute_names = {a.id: a.name for label in labels for a in label.attributes}
+    names, attribute_names = _names(labels)
     # shortcut: CVAT has no per-frame annotations endpoint, so this downloads the whole task;
     # fine for small tasks, fetch per job when tasks get large.
     annotations = scope.source.get_annotations()
-    frames = scope.meta.frames
-    meta = frames[frame] if len(frames) > 1 else frames[0]  # a video has one entry for all frames
+    meta = _frame_meta(scope.meta, frame)
     return FrameAnnotations(
         task_id=task.id,
         frame=frame,
@@ -153,7 +174,7 @@ def frame_annotations(scope: Scope, labels: list, frame: int) -> FrameAnnotation
                 label=names[s.label_id],
                 type=str(s.type),
                 bbox=shape_bbox(s),
-                attributes={attribute_names[a.spec_id]: a.value for a in s.attributes},
+                attributes=_attributes(s, attribute_names),
                 source=str(s.source),
                 occluded=s.occluded,
                 points=list(s.points) if str(s.type) in POINT_TYPES else None,
@@ -165,7 +186,7 @@ def frame_annotations(scope: Scope, labels: list, frame: int) -> FrameAnnotation
             FrameTag(
                 id=t.id,
                 label=names[t.label_id],
-                attributes={attribute_names[a.spec_id]: a.value for a in t.attributes},
+                attributes=_attributes(t, attribute_names),
                 source=str(t.source),
             )
             for t in annotations.tags
@@ -181,3 +202,120 @@ def get_frame_annotations(
 ) -> FrameAnnotations:
     task = client.tasks.retrieve(task_id)
     return frame_annotations(scope_of(client, task, job_id), task.get_labels(), frame)
+
+
+SHAPE_CAP = 2000  # shapes per call: more floods the model's context
+
+
+class JobFrame(BaseModel):
+    frame: int
+    name: str
+    width: int
+    height: int
+
+
+class JobShape(BaseModel):
+    id: int
+    frame: int
+    label: str
+    type: str
+    points: list[float]
+    rotation: float | None = None  # degrees, left out when 0
+    group: int
+    occluded: bool
+    z_order: int
+    source: str
+    attributes: dict[str, str] | None = None
+
+
+class JobTag(BaseModel):
+    id: int
+    frame: int
+    label: str
+    source: str
+    attributes: dict[str, str] | None = None
+
+
+class JobAnnotations(BaseModel):
+    task_id: int
+    job_id: int
+    job_type: str
+    frames: list[JobFrame]
+    shapes: list[JobShape]
+    tags: list[JobTag]
+    skipped_tracks: int  # tracks are not supported yet
+
+
+def job_annotations(scope: Scope, labels: list) -> JobAnnotations:
+    """All annotations of the scope's job, on its frames only (deleted frames dropped)."""
+    names, attribute_names = _names(labels)
+    annotations = scope.job.get_annotations()
+    frames = scope.frames()
+    kept = set(frames)
+
+    def frame_info(frame: int) -> JobFrame:
+        meta = _frame_meta(scope.meta, frame)
+        return JobFrame(frame=frame, name=meta.name, width=meta.width, height=meta.height)
+
+    return JobAnnotations(
+        task_id=scope.task.id,
+        job_id=scope.job.id,
+        job_type=str(scope.job.type),
+        frames=[frame_info(f) for f in frames],
+        shapes=[
+            JobShape(
+                id=s.id,
+                frame=s.frame,
+                label=names[s.label_id],
+                type=str(s.type),
+                points=list(s.points),
+                rotation=s.rotation or None,
+                group=s.group or 0,
+                occluded=s.occluded,
+                z_order=s.z_order or 0,
+                source=str(s.source),
+                attributes=_attributes(s, attribute_names) or None,
+            )
+            for s in annotations.shapes
+            if s.frame in kept
+        ],
+        tags=[
+            JobTag(
+                id=t.id,
+                frame=t.frame,
+                label=names[t.label_id],
+                source=str(t.source),
+                attributes=_attributes(t, attribute_names) or None,
+            )
+            for t in annotations.tags
+            if t.frame in kept
+        ],
+        skipped_tracks=len(annotations.tracks),
+    )
+
+
+def download_annotations(
+    client: Client, task_id: int | None, job_id: int | None
+) -> list[JobAnnotations]:
+    """One job's annotations (job_id, any type), or those of each annotation job of a task."""
+    target = target_scope(client, task_id, job_id)
+    task = target.task
+    if target.job is not None:
+        jobs = [target.job]
+    else:
+        jobs = sorted(
+            (j for j in task.get_jobs() if str(j.type) == "annotation"),
+            key=lambda j: j.start_frame,
+        )
+        if not jobs:
+            raise InvalidArgument(f"task {task_id} has no annotation jobs")
+    labels = task.get_labels()
+    results = [job_annotations(Scope(task, job, target.meta), labels) for job in jobs]
+    total = sum(len(r.shapes) for r in results)
+    if total > SHAPE_CAP:
+        counts = ", ".join(f"job {r.job_id}: {len(r.shapes)}" for r in results)
+        raise InvalidArgument(
+            f"{total} shapes is over the {SHAPE_CAP}-shape limit ({counts}); pass job_id for "
+            "one job, or read frame by frame with get_frame_annotations"
+        )
+    return results
