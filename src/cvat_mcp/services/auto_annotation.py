@@ -156,6 +156,19 @@ def _old_objects(scope: Scope, frames: list[int]) -> list:
     ]
 
 
+def _delete_stale(client: Client, scope: Scope, stale: list, saved: str) -> None:
+    """Deletes the old objects once the new ones are saved; a failure says the new ones are in,
+    since repeating the call would save them twice."""
+    try:
+        patch_annotations(client, "delete", scope, stale)
+    except Exception as exc:
+        raise InvalidArgument(
+            f"the new objects were saved ({saved}), but deleting the {len(stale)} old shapes and "
+            f"tags failed: {explain(exc) or exc}. Do not repeat this call; delete the old ones "
+            "with delete_annotations"
+        ) from exc
+
+
 def _misfit(detail: str) -> InvalidArgument:
     return InvalidArgument(
         f"the model's output does not fit this task's labels: {detail}. The task's label types "
@@ -339,7 +352,7 @@ def auto_annotate_frame(
         stale = _old_objects(scope, [frame]) if opts.mode == "replace" else []
         ids = create_objects(client, scope, sent) if sent else []
         if stale:
-            patch_annotations(client, "delete", scope, stale)
+            _delete_stale(client, scope, stale, f"object ids {', '.join(map(str, ids)) or 'none'}")
     finally:
         _release()
     objects = _objects(sent, ids, {label.id: label.name for label in labels})
@@ -388,11 +401,11 @@ def _run(  # pylint: disable=too-many-arguments,too-many-positional-arguments  #
     mapping,
     frames,
 ):
-    client = None
-    # annotate_task downloads every image into the client's cache and never removes it; our
-    # own upload makes the cache stale anyway, so each run gets a directory that goes with it.
-    cache = tempfile.TemporaryDirectory(prefix="cvat-mcp-aa-")
+    client = cache = None
     try:
+        # annotate_task downloads every image into the client's cache and never removes it; our
+        # own upload makes the cache stale anyway, so each run gets a directory that goes with it.
+        cache = tempfile.TemporaryDirectory(prefix="cvat-mcp-aa-")
         # Its own client: the request's client may close when the MCP session ends.
         client = client_factory()
         client.config.cache_dir = Path(cache.name)
@@ -413,7 +426,7 @@ def _run(  # pylint: disable=too-many-arguments,too-many-positional-arguments  #
         except BadFunctionError as exc:
             raise _misfit(str(exc)) from exc
         if stale:
-            patch_annotations(client, "delete", scope, stale)
+            _delete_stale(client, scope, stale, "every frame of the run")
         run.state = "finished"
     except Exception as exc:  # pylint: disable=broad-exception-caught  # recorded for the model
         logger.exception("auto-annotation run %s failed", run.run_id)
@@ -421,10 +434,11 @@ def _run(  # pylint: disable=too-many-arguments,too-many-positional-arguments  #
         run.error = explain(exc) or f"{type(exc).__name__}: {exc}"
     finally:
         run.finished = datetime.now(timezone.utc)
+        _release()  # first: a failing cleanup below must not keep every later call locked out
         if client is not None:
             client.close()
-        cache.cleanup()
-        _release()
+        if cache is not None:
+            cache.cleanup()
 
 
 def start_run(

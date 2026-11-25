@@ -45,7 +45,8 @@ def auto_annotate(
     run saves everything in one upload when it finishes. mode "append" adds objects (running
     twice duplicates them); "replace" swaps the shapes and tags on that frame (or, for a whole
     task, the task's, deleted after the upload) for the new ones, never tracks, only when the
-    user asks. One run at a time. The first use of a model downloads its weights (~170 MB)."""
+    user asks. One run at a time. Tasks with overlapping jobs are refused. The first use of a
+    model downloads its weights (~170 MB)."""
     opts = auto_annotation.check_options(function, model, conf_threshold, polygons, mode)
     client = get_client(ctx)
     if frame is None:

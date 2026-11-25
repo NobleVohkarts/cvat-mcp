@@ -257,6 +257,29 @@ def test_frame_replace_clears_only_that_frame(use_function):
     ]
 
 
+def _failing_delete(api):
+    create = api.partial_update_annotations.side_effect
+
+    def patch(action, _id, patched_labeled_data_request):
+        if action == "delete":
+            raise RuntimeError("CVAT down")
+        return create(action, _id, patched_labeled_data_request)
+
+    api.partial_update_annotations.side_effect = patch
+
+
+def test_frame_replace_delete_failure_says_new_ones_are_saved(use_function):
+    use_function(FakeFunction())
+    client, _, api = _setup(shapes=[shape(1, 1, 0, [0, 0, 1, 1])])
+    _failing_delete(api)
+    with pytest.raises(InvalidArgument) as error:
+        aa.auto_annotate_frame(client, 1, 0, _opts(mode="replace"))
+    message = str(error.value)
+    assert "saved" in message and "100" in message and "Do not repeat" in message
+    assert "CVAT down" in message
+    assert not aa._LOCK.locked()
+
+
 def test_frame_replace_create_failure_deletes_nothing(use_function):
     use_function(FakeFunction())
     client, _, api = _setup(shapes=[shape(1, 1, 0, [0, 0, 1, 1])])
@@ -448,6 +471,28 @@ def test_background_replace_deletes_old_after_upload(use_function, annotate_task
     assert sorted(s.id for s in deleted.shapes) == [1, 2]
     assert [t.id for t in deleted.tags] == [3]
     assert deleted.tracks == []
+
+
+def test_background_replace_delete_failure_says_new_ones_are_saved(use_function, annotate_task):
+    use_function(FakeFunction())
+    request_client, _, _ = _setup()
+    run_client, _, run_api = _setup(shapes=[shape(1, 1, 0, [0, 0, 1, 1])])
+    _failing_delete(run_api)
+    result = aa.start_run(request_client, lambda: run_client, 1, _opts(mode="replace"))
+    run = _finish(result.run.run_id)
+    assert run.state == "failed"
+    assert "saved" in run.error and "Do not repeat" in run.error and "CVAT down" in run.error
+
+
+def test_background_run_setup_failure_releases_lock(use_function, annotate_task, monkeypatch):
+    def no_space(**_):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(aa.tempfile, "TemporaryDirectory", no_space)
+    result, _, _, _ = _start(FakeFunction(), use_function)
+    run = _finish(result.run.run_id)
+    assert run.state == "failed" and "No space left" in run.error
+    assert not aa._LOCK.locked()
 
 
 def test_background_replace_failure_deletes_nothing(use_function, annotate_task):
