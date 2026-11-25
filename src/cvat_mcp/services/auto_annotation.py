@@ -4,7 +4,7 @@ import logging
 import tempfile
 import threading
 import time
-from collections import Counter, defaultdict
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -25,7 +25,7 @@ from cvat_mcp.services.annotation_edits import (
     create_objects,
     patch_annotations,
 )
-from cvat_mcp.services.annotations import Scope, shape_bbox
+from cvat_mcp.services.annotations import Scope, shape_bbox, target_scope
 
 Function = Literal["detection", "instance_segmentation", "keypoint_detection", "classification"]
 Mode = Literal["append", "replace"]
@@ -144,16 +144,16 @@ def load_function(opts: RunOptions):
     return fn
 
 
-def _old_objects(scope: Scope, frames: list[int]) -> dict[int, list]:
-    """The scope's shapes and tags on those frames, as delete requests by frame; tracks stay."""
+def _old_objects(scope: Scope, frames: list[int]) -> list:
+    """The scope's shapes and tags on those frames, as delete requests; tracks stay."""
     wanted = set(frames)
     annotations = scope.source.get_annotations()
-    by_frame = defaultdict(list)
-    for kind, objs in (("shape", annotations.shapes), ("tag", annotations.tags)):
-        for obj in objs:
-            if obj.frame in wanted:
-                by_frame[obj.frame].append((kind, REQUEST[kind](**obj.to_dict())))
-    return by_frame
+    return [
+        (kind, REQUEST[kind](**obj.to_dict()))
+        for kind, objs in (("shape", annotations.shapes), ("tag", annotations.tags))
+        for obj in objs
+        if obj.frame in wanted
+    ]
 
 
 def _misfit(detail: str) -> InvalidArgument:
@@ -212,26 +212,29 @@ def remap(output, mapping, frame: int) -> list[tuple[str, object]]:
     return sent
 
 
-def _count(output, fn, labels, progress: Progress) -> None:
-    """Counts the output per function label: added if the task has that label, else skipped."""
-    function_names = {spec.id: spec.name for spec in fn.spec.labels}
-    task_names = {label.name for label in labels}
+def _function_names(fn) -> dict[int, str]:
+    return {spec.id: spec.name for spec in fn.spec.labels}
+
+
+def _count(output, mapping, names: dict[int, str], progress: Progress) -> None:
+    """Counts the output per function label: added if label_map matched it, else skipped."""
     for obj in output:
-        name = function_names.get(obj.label_id)  # an unknown id is remap's (or the SDK's) error
-        if name is not None:
-            (progress.added if name in task_names else progress.skipped)[name] += 1
+        if obj.label_id in names:  # an unknown id is remap's (or the SDK's) error
+            counter = progress.added if mapping[obj.label_id] else progress.skipped
+            counter[names[obj.label_id]] += 1
 
 
 class _Counting:
     """The function as annotate_task sees it: same spec, counting what it finds."""
 
-    def __init__(self, fn, labels, progress: Progress):
+    def __init__(self, fn, mapping, progress: Progress):
         self.spec = fn.spec
-        self._fn, self._labels, self._progress = fn, labels, progress
+        self._fn, self._mapping, self._progress = fn, mapping, progress
+        self._names = _function_names(fn)
 
     def detect(self, context, image):
         output = self._fn.detect(context, image)
-        _count(output, self._fn, self._labels, self._progress)
+        _count(output, self._mapping, self._names, self._progress)
         return output
 
 
@@ -283,7 +286,7 @@ def _release() -> None:
 
 
 def resolve_scope(client: Client, task_id: int) -> Scope:
-    scope = Scope(client.tasks.retrieve(task_id))
+    scope = target_scope(client, task_id, None)
     if str(scope.task.dimension) == "3d":
         raise InvalidArgument(
             f"task {scope.task.id} is a 3D task; auto-annotation supports 2D images"
@@ -292,9 +295,9 @@ def resolve_scope(client: Client, task_id: int) -> Scope:
     return scope
 
 
-def _answer(scope: Scope, opts: RunOptions, started: float, **rest) -> AutoAnnotation:
+def _answer(task_id: int, opts: RunOptions, started: float, **rest) -> AutoAnnotation:
     return AutoAnnotation(
-        task_id=scope.task.id,
+        task_id=task_id,
         function=opts.function,
         model=opts.model,
         mode=opts.mode,
@@ -330,10 +333,10 @@ def auto_annotate_frame(
         # shortcut: built-in functions ignore frame_name; upgrade to the file name from the task
         # meta if user-written functions are ever allowed
         output = fn.detect(Context(str(frame), opts.conf_threshold, opts.polygons), image)
-        _count(output, fn, labels, progress)
+        _count(output, mapping, _function_names(fn), progress)
         sent = remap(output, mapping, frame)
         # Fetched before the create and deleted after it, so a failed create deletes nothing.
-        stale = _old_objects(scope, [frame]).get(frame) if opts.mode == "replace" else None
+        stale = _old_objects(scope, [frame]) if opts.mode == "replace" else []
         ids = create_objects(client, scope, sent) if sent else []
         if stale:
             patch_annotations(client, "delete", scope, stale)
@@ -341,7 +344,7 @@ def auto_annotate_frame(
         _release()
     objects = _objects(sent, ids, {label.id: label.name for label in labels})
     return _answer(
-        scope,
+        task_id,
         opts,
         started,
         frame=frame,
@@ -376,7 +379,15 @@ def _snapshot(run_id: str) -> AutoAnnotationRun:
     )
 
 
-def _run(run: AutoAnnotationRun, progress: Progress, client_factory, opts: RunOptions, fn):
+def _run(  # pylint: disable=too-many-arguments,too-many-positional-arguments  # thread args
+    run: AutoAnnotationRun,
+    progress: Progress,
+    client_factory,
+    opts: RunOptions,
+    fn,
+    mapping,
+    frames,
+):
     client = None
     # annotate_task downloads every image into the client's cache and never removes it; our
     # own upload makes the cache stale anyway, so each run gets a directory that goes with it.
@@ -385,15 +396,14 @@ def _run(run: AutoAnnotationRun, progress: Progress, client_factory, opts: RunOp
         # Its own client: the request's client may close when the MCP session ends.
         client = client_factory()
         client.config.cache_dir = Path(cache.name)
-        task = client.tasks.retrieve(run.task_id)
-        scope = Scope(task)
+        scope = Scope(client.tasks.retrieve(run.task_id))
         # Fetched before the upload and deleted only after it, so a failed run deletes nothing.
-        old = _old_objects(scope, scope.frames()) if opts.mode == "replace" else {}
+        stale = _old_objects(scope, frames) if opts.mode == "replace" else []
         try:
             annotate_task(
                 client,
-                task.id,
-                _Counting(fn, task.get_labels(), progress),
+                run.task_id,
+                _Counting(fn, mapping, progress),
                 pbar=_RunProgress(progress),
                 clear_existing=False,  # True would also delete the task's tracks
                 allow_unmatched_labels=True,
@@ -402,7 +412,7 @@ def _run(run: AutoAnnotationRun, progress: Progress, client_factory, opts: RunOp
             )
         except BadFunctionError as exc:
             raise _misfit(str(exc)) from exc
-        if stale := [item for items in old.values() for item in items]:
+        if stale:
             patch_annotations(client, "delete", scope, stale)
         run.state = "finished"
     except Exception as exc:  # pylint: disable=broad-exception-caught  # recorded for the model
@@ -440,7 +450,7 @@ def start_run(
     _acquire(run_id)
     try:
         fn = load_function(opts)  # in this thread, so a bad model or download fails the call
-        label_map(fn, labels, opts.polygons)  # and so does a model that doesn't fit the labels
+        mapping = label_map(fn, labels, opts.polygons)  # and so does a model that doesn't fit
     except BaseException:
         _release()
         raise
@@ -459,12 +469,12 @@ def start_run(
     answer = _snapshot(run_id)  # before the thread can change it
     threading.Thread(
         target=_run,
-        args=(run, progress, client_factory, opts, fn),
+        args=(run, progress, client_factory, opts, fn, mapping, frames),
         name=f"auto-annotation {run_id}",
         daemon=True,
     ).start()
     return _answer(
-        scope,
+        task.id,
         opts,
         started,
         note=f"running in the background; follow it with get_auto_annotation_run(run_id={run_id!r})",
