@@ -72,9 +72,9 @@ WRITE_MODE = settings.mcp_mode == "write"
 # The auto-annotation tools need the optional extra: `uv sync --extra auto-annotation`.
 AUTO_ANNOTATION = all(find_spec(m) is not None for m in ("torch", "torchvision", "skimage"))
 AUTO_ANNOTATION_STEPS = (
-    "; auto-annotate (auto_annotate) only when the user asks: with frames it waits and returns "
-    "the objects (check them with render_frame), without frames it runs over the whole task or "
-    "job in the background (follow it with get_auto_annotation_run)"
+    "; auto-annotate (auto_annotate) only when the user asks: with a frame it waits and returns "
+    "the objects (check them with render_frame), without one it runs over the whole task in "
+    "the background (follow it with get_auto_annotation_run)"
     if AUTO_ANNOTATION
     else ""
 )
