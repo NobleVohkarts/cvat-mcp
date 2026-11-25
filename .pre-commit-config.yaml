@@ -1,22 +1,22 @@
 # Run from the repository root:
-#   uv run --project cvat-mcp pre-commit run --config cvat-mcp/.pre-commit-config.yaml --all-files
-# Local hooks reuse the versions locked in cvat-mcp/uv.lock and the monorepo's root .pylintrc.
+#   uv run pre-commit run --all-files
+# Local hooks reuse the versions locked in uv.lock.
 repos:
   - repo: local
     hooks:
       - id: black
         name: black
-        entry: uv run --project cvat-mcp black --config cvat-mcp/pyproject.toml
+        entry: uv run black
         language: system
-        files: ^cvat-mcp/.*\.py$
+        files: \.py$
       - id: isort
         name: isort
-        entry: uv run --project cvat-mcp isort --settings-path cvat-mcp/pyproject.toml
+        entry: uv run isort
         language: system
-        files: ^cvat-mcp/.*\.py$
+        files: \.py$
       - id: pylint
         name: pylint
-        entry: uv run --project cvat-mcp pylint --rcfile=.pylintrc
+        entry: uv run pylint --rcfile=.pylintrc
         language: system
-        files: ^cvat-mcp/.*\.py$
+        files: \.py$
         require_serial: true  # one process: .pylintrc already parallelises (jobs=0)

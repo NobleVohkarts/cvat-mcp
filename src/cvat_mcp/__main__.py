@@ -23,7 +23,7 @@ def main() -> None:
     except ValidationError as e:
         prefix = Settings.model_config["env_prefix"]
         names = ", ".join(f"{prefix}{str(err['loc'][0]).upper()}" for err in e.errors())
-        sys.exit(f"cvat-mcp: invalid or missing {names}. See cvat-mcp/.env.example.")
+        sys.exit(f"cvat-mcp: invalid or missing {names}. See .env.example.")
 
     try:
         if HTTP_MODE:

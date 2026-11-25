@@ -96,7 +96,6 @@ different protocol.
 Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-cd cvat-mcp
 uv sync
 cp .env.example .env   # then fill in CVAT_ACCESS_TOKEN
 ```
@@ -153,7 +152,6 @@ address. `scripts/serve-public.sh` starts a Cloudflare **quick tunnel** (no acco
 server in HTTP mode, protected by OAuth that the server implements itself:
 
 ```bash
-cd cvat-mcp
 CVAT_MCP_MODE=write scripts/serve-public.sh   # or read-only (the .env default)
 # Add this connector URL in claude.ai: https://<random>.trycloudflare.com/mcp
 # Restart only the server (same URL): kill -USR1 <pid>
@@ -187,7 +185,6 @@ OAuth flow and a tool call against a running server (it reads `CVAT_UI_USERNAME`
 ## Try it in MCP Inspector
 
 ```bash
-cd cvat-mcp
 npx @modelcontextprotocol/inspector uv run cvat-mcp            # browser UI
 npx @modelcontextprotocol/inspector --cli -e CVAT_MCP_MODE=write uv run cvat-mcp --method tools/list
 ```
@@ -198,13 +195,12 @@ exporting them.
 ## Development
 
 ```bash
-cd cvat-mcp
 uv run pytest
-cd .. && uv run --project cvat-mcp pre-commit run --config cvat-mcp/.pre-commit-config.yaml --all-files
-# optional git hook: uv run --project cvat-mcp pre-commit install --config cvat-mcp/.pre-commit-config.yaml
+uv run pre-commit run --all-files
+# optional git hook: uv run pre-commit install
 ```
 
-Style follows the monorepo: black and isort (line length 100), pylint with the root `.pylintrc`.
+Style follows CVAT: black and isort (line length 100), pylint with `.pylintrc` (copied from the CVAT repo).
 
 ## Roadmap
 

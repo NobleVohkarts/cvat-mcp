@@ -1,6 +1,6 @@
 """Smoke test for HTTP mode: the full OAuth flow a client like claude.ai runs, then tool calls.
 
-Usage (from cvat-mcp/): uv run python scripts/check_remote.py <base-url>
+Usage (from the repo root): uv run python scripts/check_remote.py <base-url>
 Reads CVAT_UI_USERNAME / CVAT_UI_PASSWORD from .env (the server never reads them); prints no
 secrets. Exits non-zero at the first failing step.
 """
