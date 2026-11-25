@@ -13,6 +13,7 @@ from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.services import auto_annotation as aa
 from cvat_mcp.services.annotation_edits import create_objects
 from cvat_mcp.services.annotations import Scope
+from cvat_mcp.tools import auto_annotation as tools
 
 LABELS = [
     Obj(id=1, name="car", type="rectangle", attributes=[], sublabels=[]),
@@ -614,3 +615,22 @@ def test_check_options_default_model(function, model):
 def test_unknown_model_lists_choices():
     with pytest.raises(InvalidArgument, match="maskrcnn_resnet50_fpn_v2"):
         aa.load_function(_opts(function="instance_segmentation", model="nope"))
+
+
+# --- the tool layer ---
+
+
+def test_tool_routes_whole_task_and_one_frame(monkeypatch):
+    calls = []
+    monkeypatch.setattr(aa, "start_run", lambda *args: calls.append(("run", args)) or "run")
+    monkeypatch.setattr(
+        aa, "auto_annotate_frame", lambda *args: calls.append(("frame", args)) or "frame"
+    )
+    client = object()
+    ctx = Obj(request_context=Obj(lifespan_context=client))
+    assert tools.auto_annotate(ctx, task_id=7) == "run"
+    assert tools.auto_annotate(ctx, task_id=7, frame=3, mode="replace") == "frame"
+    assert calls == [
+        ("run", (client, tools.open_client, 7, _opts())),
+        ("frame", (client, 7, 3, _opts(mode="replace"))),
+    ]
