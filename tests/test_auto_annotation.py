@@ -101,7 +101,13 @@ def _setup(size=5, **task_kw):
         **{"dimension": "2d", "data_original_chunk_type": "imageset"} | task_kw,
     )
     api = _echo_api()
-    client = fake_client(task, api_client=Obj(tasks_api=api), logger=Mock(), close=Mock())
+    client = fake_client(
+        task,
+        api_client=Obj(tasks_api=api),
+        logger=Mock(),
+        close=Mock(),
+        config=Obj(cache_dir=None),
+    )
     return client, task, api
 
 
@@ -244,10 +250,20 @@ def test_frame_replace_clears_only_that_frame(use_function):
     assert [s.id for s in deleted.shapes] == [2]
     assert [t.id for t in deleted.tags] == [4]
     assert deleted.tracks == []
+    # new first: a failed create must leave the old ones
     assert [c.args[0] for c in api.partial_update_annotations.call_args_list] == [
-        "delete",
         "create",
+        "delete",
     ]
+
+
+def test_frame_replace_create_failure_deletes_nothing(use_function):
+    use_function(FakeFunction())
+    client, _, api = _setup(shapes=[shape(1, 1, 0, [0, 0, 1, 1])])
+    api.partial_update_annotations.side_effect = RuntimeError("CVAT down")
+    with pytest.raises(RuntimeError, match="CVAT down"):
+        aa.auto_annotate_frame(client, 1, 0, _opts(mode="replace"))
+    assert [c.args[0] for c in api.partial_update_annotations.call_args_list] == ["create"]
 
 
 def test_frame_replace_with_nothing_there_deletes_nothing(use_function):
@@ -326,9 +342,12 @@ class FakeAnnotateTask:
     def __init__(self):
         self.calls = []
         self.fail_after: int | None = None
+        self.cache_dirs = []
 
     def __call__(self, client, task_id, function, *, pbar, **kw):
         self.calls.append((client, task_id, kw))
+        self.cache_dirs.append(client.config.cache_dir)
+        (client.config.cache_dir / "chunk.zip").write_bytes(PNG)  # what TaskDataset leaves
         image = PIL.Image.open(io.BytesIO(PNG))
         size = client.tasks.retrieve(task_id).size
         with pbar.task(total=size, unit="samples"):
@@ -395,6 +414,15 @@ def test_background_run_failure_recorded_and_lock_released(use_function, annotat
     assert "model crashed" in run.error
     assert not aa._LOCK.locked()
     run_client.close.assert_called_once()
+
+
+@pytest.mark.parametrize("fail_after", [None, 1])
+def test_background_run_removes_downloaded_images(use_function, annotate_task, fail_after):
+    annotate_task.fail_after = fail_after
+    result, _, _, _ = _start(FakeFunction(), use_function)
+    _finish(result.run.run_id)
+    (cache_dir,) = annotate_task.cache_dirs
+    assert not cache_dir.exists()
 
 
 def test_background_run_uses_own_client(use_function, annotate_task):

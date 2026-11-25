@@ -103,7 +103,7 @@ cp .env.example .env   # then fill in CVAT_ACCESS_TOKEN
 Optional: `uv sync --extra auto-annotation` adds CPU builds of torch and torchvision (about 1 GB)
 and, in write mode, the `auto_annotate` and `get_auto_annotation_run` tools. Without the extra
 those two tools don't exist. `uv run` keeps the extra; a later plain `uv sync` removes it again.
-Each model downloads its weights (about 170 MB) into `~/.cache/torch` on first use.
+Each model downloads its weights (about 170 MB) into `~/.cache/torch` on first use. A whole-task run downloads the task's images (original quality) into a temporary directory that is removed when the run ends, so it needs that much free space meanwhile.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |

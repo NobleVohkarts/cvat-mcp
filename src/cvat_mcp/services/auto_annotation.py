@@ -1,12 +1,14 @@
 import importlib
 import itertools
 import logging
+import tempfile
 import threading
 import time
 from collections import Counter, defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Literal
 
 import PIL.Image
@@ -330,10 +332,11 @@ def auto_annotate_frame(
         output = fn.detect(Context(str(frame), opts.conf_threshold, opts.polygons), image)
         _count(output, fn, labels, progress)
         sent = remap(output, mapping, frame)
+        # Fetched before the create and deleted after it, so a failed create deletes nothing.
         stale = _old_objects(scope, [frame]).get(frame) if opts.mode == "replace" else None
+        ids = create_objects(client, scope, sent) if sent else []
         if stale:
             patch_annotations(client, "delete", scope, stale)
-        ids = create_objects(client, scope, sent) if sent else []
     finally:
         _release()
     objects = _objects(sent, ids, {label.id: label.name for label in labels})
@@ -375,9 +378,13 @@ def _snapshot(run_id: str) -> AutoAnnotationRun:
 
 def _run(run: AutoAnnotationRun, progress: Progress, client_factory, opts: RunOptions, fn):
     client = None
+    # annotate_task downloads every image into the client's cache and never removes it; our
+    # own upload makes the cache stale anyway, so each run gets a directory that goes with it.
+    cache = tempfile.TemporaryDirectory(prefix="cvat-mcp-aa-")
     try:
         # Its own client: the request's client may close when the MCP session ends.
         client = client_factory()
+        client.config.cache_dir = Path(cache.name)
         task = client.tasks.retrieve(run.task_id)
         scope = Scope(task)
         # Fetched before the upload and deleted only after it, so a failed run deletes nothing.
@@ -406,6 +413,7 @@ def _run(run: AutoAnnotationRun, progress: Progress, client_factory, opts: RunOp
         run.finished = datetime.now(timezone.utc)
         if client is not None:
             client.close()
+        cache.cleanup()
         _release()
 
 
