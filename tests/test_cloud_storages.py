@@ -158,6 +158,8 @@ def test_create_not_a_repeat(existing):
         ({"key": "AK", "secret": None}, "both"),
         ({"key": "AK", "secret": ""}, "both"),
         ({"bucket": " "}, "bucket"),
+        ({"bucket": "s3://cvat/street"}, "not a link"),
+        ({"bucket": "cvat/street"}, "not a link"),
         ({"endpoint_url": "https://AK:SK@e.com"}, "credentials"),
         ({"endpoint_url": "ftp://e.com"}, "http"),
         ({"endpoint_url": "https://"}, "http"),
@@ -271,6 +273,9 @@ def test_delete_not_owned_refused():
         ("img_?.png", ([], "img_?.png")),
         ("shots[2024]/a.jpg", (["shots[2024]/a.jpg"], None)),  # [ is part of a key, not a glob
         ("street/000001.jpg", (["street/000001.jpg"], None)),
+        (" /street/ ", (["street/"], None)),  # keys never start with "/"
+        ("/annotations/a.json", (["annotations/a.json"], None)),
+        ("/", ([], "*")),
     ],
 )
 def test_cloud_source(key, expected):

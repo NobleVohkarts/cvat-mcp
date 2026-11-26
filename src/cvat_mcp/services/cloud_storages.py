@@ -163,6 +163,11 @@ def create_cloud_storage(
     bucket = bucket.strip()
     if not bucket:
         raise InvalidArgument("bucket must not be empty")
+    if any(c in bucket for c in "/:"):  # S3 bucket names have neither
+        raise InvalidArgument(
+            "bucket is the bucket name, not a link: pass the host as endpoint_url and choose "
+            "folders per task with cloud_path"
+        )
     endpoint = _endpoint(endpoint_url)
     credentials = _credentials(access_key_id, secret_access_key)
     if existing := _repeat(client, bucket, endpoint):
@@ -239,6 +244,7 @@ class CloudSource(NamedTuple):
 
 def cloud_source(key: str) -> CloudSource:
     """What a cloud_path selects: a glob, one object, or a folder (recursively)."""
+    key = key.strip().lstrip("/")  # object keys never start with "/"
     if any(c in key for c in "*?"):  # not "[": keys like "shots[2024]/" contain it
         return CloudSource([], key)
     if "." in key.rsplit("/", 1)[-1]:  # a file name; "street" (no extension) is a folder
