@@ -1,10 +1,7 @@
-from pathlib import Path
-
 import pytest
 from pydantic import ValidationError
 
-from cvat_mcp.config import Settings, resolve_in_workdir
-from cvat_mcp.errors import InvalidArgument
+from cvat_mcp.config import Settings
 
 
 def test_defaults(monkeypatch):
@@ -12,7 +9,6 @@ def test_defaults(monkeypatch):
     s = Settings()
     assert s.url == "http://localhost:8080"
     assert s.mcp_mode == "read-only"
-    assert s.mcp_workdir == Path("workdir")
 
 
 def test_missing_token_raises():
@@ -42,20 +38,10 @@ def test_env_file_is_read(tmp_path):
     assert s.mcp_mode == "write"
 
 
-def test_path_inside_workdir(tmp_path):
-    assert resolve_in_workdir(tmp_path, "a/b.zip") == tmp_path.resolve() / "a" / "b.zip"
-
-
-@pytest.mark.parametrize("path", ["../x", "/etc/passwd", "a/../../x", "", ".", "out\x00.zip"])
-def test_path_escaping_workdir(tmp_path, path):
-    with pytest.raises(InvalidArgument, match="CVAT_MCP_WORKDIR"):
-        resolve_in_workdir(tmp_path, path)
-
-
-def test_symlink_out_of_workdir(tmp_path):
-    (tmp_path / "link").symlink_to("/tmp")
-    with pytest.raises(InvalidArgument, match="CVAT_MCP_WORKDIR"):
-        resolve_in_workdir(tmp_path, "link/x")
+def test_old_workdir_setting_is_ignored(tmp_path):
+    (tmp_path / ".env").write_text("CVAT_ACCESS_TOKEN=t\nCVAT_MCP_WORKDIR=workdir\n")
+    s = Settings()  # an .env from before the server dropped local files still loads
+    assert not hasattr(s, "mcp_workdir")
 
 
 def test_http_mode_defaults(monkeypatch):

@@ -5,10 +5,10 @@ from pydantic import Field
 
 from cvat_mcp.server import get_client, settings, tool
 from cvat_mcp.services import task_edits, tasks
-from cvat_mcp.services.task_edits import MAX_FILES, CreatedTask, DeletedTask, LabelSpec, UpdatedTask
+from cvat_mcp.services.task_edits import CreatedTask, DeletedTask, LabelSpec, UpdatedTask
 from cvat_mcp.services.tasks import TaskList, TaskOverview
 
-Paths = Annotated[list[str], Field(min_length=1, max_length=MAX_FILES)]
+Urls = Annotated[list[str], Field(min_length=1, max_length=1000)]
 
 
 @tool()
@@ -38,32 +38,27 @@ def create_task(
     name: str,
     labels: list[LabelSpec] | None = None,
     project_id: int | None = None,
-    files: Paths | None = None,
-    urls: Paths | None = None,
+    urls: Urls | None = None,
     cloud_storage_id: int | None = None,
     cloud_path: str | None = None,
     segment_size: int | None = None,
 ) -> CreatedTask:
-    """Use to create a task, only when the user asks: images from files or folders inside the
-    server's work directory (folders expand recursively, hidden files skipped; all images are
-    sorted by name in natural order, file names must be unique), from http(s) URLs, or from a
-    CVAT cloud storage (cloud_storage_id from list_cloud_storages or create_cloud_storage, with
-    cloud_path: an object key, a folder or a glob from the bucket root, also for a storage
-    with a prefix; a folder is taken recursively, a path without a file extension counts as a
-    folder (end a dotted folder name like v1.2 with /), * and ? are globs and * also matches
-    across folders; an empty cloud_path lists the whole bucket, which is slow on big buckets).
-    Frames are named by their full key. Use cloud_storage_id + cloud_path, not urls, for bucket
-    objects. Labels are given inline or taken from a project (project_id). Waits until CVAT has
-    processed the data; if it fails, no task is left behind. Returns the task id, frame count,
+    """Use to create a task, only when the user asks: images (sorted by name in natural order) from
+    http(s) URLs or from a CVAT cloud storage (cloud_storage_id from list_cloud_storages or
+    create_cloud_storage, with cloud_path: an object key, a folder or a glob from the bucket root,
+    also for a storage with a prefix; a folder is taken recursively, a path without a file extension
+    counts as a folder (end a dotted folder name like v1.2 with /), * and ? are globs and * also
+    matches across folders; an empty cloud_path lists the whole bucket, which is slow on big
+    buckets). Frames are named by their full key. Use cloud_storage_id + cloud_path, not urls, for
+    bucket objects. Labels are given inline or taken from a project (project_id). Waits until CVAT
+    has processed the data; if it fails, no task is left behind. Returns the task id, frame count,
     jobs, the cloud storage id and a CVAT UI link."""
     return task_edits.create_task(
         get_client(ctx),
         settings.url,
-        settings.mcp_workdir,
         name,
         labels,
         project_id,
-        files,
         urls,
         cloud_storage_id,
         cloud_path,

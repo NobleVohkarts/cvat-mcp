@@ -1,17 +1,13 @@
-from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+from cvat_sdk.api_client.exceptions import ApiException
+from cvat_sdk.core.exceptions import BackgroundRequestException
 from cvat_sdk.core.proxies.types import Location
-from fakes import Obj, fake_client
+from fakes import Obj, cloud_storage, content_listing, fake_client, fake_cloudstorages_api
 
 from cvat_mcp.errors import InvalidArgument
-from cvat_mcp.services.exports import (
-    check_format,
-    default_filename,
-    export_dataset,
-    reserve_path,
-)
+from cvat_mcp.services.exports import check_format, export_dataset
 
 EXPORTERS = [
     Obj(name="COCO 1.0", enabled=True, dimension="2d"),
@@ -20,17 +16,6 @@ EXPORTERS = [
     Obj(name="Kitti Raw Format 1.0", enabled=True, dimension="3d"),
 ]
 FORMATS = Obj(server_api=Obj(retrieve_annotation_formats=lambda: (Obj(exporters=EXPORTERS), None)))
-
-
-def test_default_filename_marks_images():
-    assert default_filename(7, "YOLO 1.1", True) == "task-7-yolo-1-1-images.zip"
-
-
-def test_reserve_path_skips_existing_files(tmp_path):
-    (tmp_path / "a.zip").touch()
-    (tmp_path / "a-1.zip").touch()
-    with reserve_path(tmp_path / "a.zip") as free:
-        assert free == tmp_path / "a-2.zip"
 
 
 @pytest.mark.parametrize("name", ["coco 1.0", "Old 1.0", "COCO", "Kitti Raw Format 1.0"])
@@ -50,61 +35,152 @@ def test_check_format_import_direction_reads_importers():
         check_format(client, "COCO 1.0", "2d", "import")
 
 
-def test_reserved_names_differ_while_exports_run(tmp_path):
-    with reserve_path(tmp_path / "a.zip") as first, reserve_path(tmp_path / "a.zip") as second:
-        assert first != second
-    with reserve_path(tmp_path / "a.zip") as again:
-        assert again == tmp_path / "a.zip"  # released after the export
+def _client(content=(), storage=None, upload_error=None):
+    """Task 7 (2d) and cloud storage #1 whose listing holds `content` ((name, type) pairs)."""
+    task = Obj(
+        id=7, dimension="2d", export_dataset=Mock(return_value=None, side_effect=upload_error)
+    )
+    api = fake_cloudstorages_api([storage or cloud_storage(1, "cvat")])
+    api.retrieve_content_v2 = listing = content_listing(list(content))
+    client = fake_client(task, api_client=Obj(server_api=FORMATS.server_api, cloudstorages_api=api))
+    return client, task, listing
 
 
-def _task():
-    def write(_format, path, **_kwargs):
-        Path(path).write_bytes(b"12345")
-        return Path(path)  # the SDK returns where it saved the file
-
-    return Obj(export_dataset=Mock(side_effect=write), dimension="2d")
+def _export(client, cloud_path="exports/a.zip", overwrite=False, fmt="COCO 1.0"):
+    return export_dataset(client, 7, fmt, 1, cloud_path, False, overwrite)
 
 
-def _export(tmp_path, task, fmt="COCO 1.0", filename=None):
-    return export_dataset(fake_client(task, api_client=FORMATS), tmp_path, 7, fmt, False, filename)
-
-
-def test_export_downloads_locally_and_polls_often(tmp_path):
-    task = _task()
-    result = _export(tmp_path, task)
-    assert result.path == str(tmp_path / "task-7-coco-1-0.zip") and result.size_bytes == 5
-    kwargs = task.export_dataset.call_args.kwargs
-    assert kwargs["location"] == Location.LOCAL and kwargs["include_images"] is False
-    assert kwargs["status_check_period"] == 1
-
-
-def test_second_export_never_overwrites(tmp_path):
-    task = _task()
-    first = Path(_export(tmp_path, task).path)
-    first.write_bytes(b"keep")
-    assert Path(_export(tmp_path, task).path).name == "task-7-coco-1-0-1.zip"
-    assert first.read_bytes() == b"keep"
+def test_export_sends_the_key_to_the_storage():
+    client, task, _ = _client()
+    result = _export(client)
+    assert (result.cloud_storage_id, result.cloud_path, result.replaced) == (
+        1,
+        "exports/a.zip",
+        False,
+    )
+    task.export_dataset.assert_called_once_with(
+        "COCO 1.0",
+        "exports/a.zip",
+        include_images=False,
+        location=Location.CLOUD_STORAGE,
+        cloud_storage_id=1,
+        status_check_period=1,  # the SDK default (5 s) makes even a tiny export take 5 s
+    )
 
 
 @pytest.mark.parametrize(
-    "filename, expected",
+    "cloud_path, key",
     [
-        ("sub/out", "sub/out.zip"),
-        ("task7-COCO-1.0", "task7-COCO-1.0.zip"),
-        ("out.ZIP", "out.ZIP"),
-        ("archive.tar.gz", "archive.tar.gz.zip"),
+        (" /exports/a.zip ", "exports/a.zip"),
+        ("exports/a", "exports/a.zip"),
+        ("a.ZIP", "a.ZIP"),
+        ("a.tar.gz", "a.tar.gz.zip"),
     ],
 )
-def test_filename_always_ends_in_zip(tmp_path, filename, expected):
-    assert _export(tmp_path, _task(), filename=filename).path == str(tmp_path / expected)
+def test_key_is_normalized_and_gets_zip(cloud_path, key):
+    client, task, listing = _client()
+    assert _export(client, cloud_path).cloud_path == key
+    assert listing.call_args.kwargs["prefix"] == key
+    assert task.export_dataset.call_args.args[1] == key
+
+
+@pytest.mark.parametrize("cloud_path", ["", " / ", "exports/", "a*.zip", "a?.zip"])
+def test_bad_cloud_path_refused_before_any_request(cloud_path):
+    client, task, listing = _client()
+    with pytest.raises(InvalidArgument, match="cloud_path must name the file to write"):
+        _export(client, cloud_path)
+    listing.assert_not_called()
+    task.export_dataset.assert_not_called()
+
+
+def test_existing_object_refused_without_overwrite():
+    client, task, _ = _client([("a.zip", "REG")])
+    with pytest.raises(
+        InvalidArgument,
+        match=r"cloud storage #1 already has exports/a.zip; ask the user whether to replace it.*"
+        r"overwrite=true",
+    ):
+        _export(client)
+    task.export_dataset.assert_not_called()
+
+
+def test_overwrite_replaces_and_says_so():
+    client, task, _ = _client([("a.zip", "REG")])
+    assert _export(client, overwrite=True).replaced is True
+    task.export_dataset.assert_called_once()
+
+
+def test_unknown_format_refused_first():
+    client, task, listing = _client()
+    with pytest.raises(InvalidArgument, match="unknown export format"):
+        _export(client, fmt="YOLO 9")
+    listing.assert_not_called()
+    task.export_dataset.assert_not_called()
+
+
+def _missing(*_args, **_kwargs):
+    raise ApiException(status=404)
 
 
 @pytest.mark.parametrize(
-    "fmt, filename, match",
-    [("COCO 1.0", "../x", "CVAT_MCP_WORKDIR"), ("YOLO 9", None, "unknown export format")],
+    "storage, match",
+    [
+        (cloud_storage(1, "cvat", org=3), "belongs to an organization"),
+        (cloud_storage(1, "cvat", "prefix=street/"), "covers only 'street/'"),
+    ],
 )
-def test_rejected_before_exporting(tmp_path, fmt, filename, match):
-    task = _task()
+def test_storage_checks_apply(storage, match):
+    client, task, listing = _client(storage=storage)
     with pytest.raises(InvalidArgument, match=match):
-        _export(tmp_path, task, fmt, filename)
+        _export(client)
+    listing.assert_not_called()
     task.export_dataset.assert_not_called()
+
+
+def test_unknown_storage_refused():
+    client, task, _ = _client()
+    client.api_client.cloudstorages_api.retrieve = _missing
+    with pytest.raises(InvalidArgument, match="no cloud storage #1"):
+        _export(client)
+    task.export_dataset.assert_not_called()
+
+
+def test_failed_upload_points_at_the_storage_keys():
+    client, _, _ = _client(upload_error=BackgroundRequestException("Access Denied"))
+    with pytest.raises(
+        InvalidArgument, match=r"Access Denied.*cloud storage #1 can write to the bucket.*update_cl"
+    ):
+        _export(client)
+
+
+def test_concurrent_export_to_the_same_key_refused():
+    client, task, _ = _client()
+    nested = []
+
+    def second_export(*_args, **_kwargs):  # runs while the first export holds the key
+        with pytest.raises(InvalidArgument, match="another export to exports/a.zip in cloud stor"):
+            _export(client)
+        nested.append("refused")
+
+    task.export_dataset.side_effect = second_export
+    assert _export(client).replaced is False
+    assert nested == ["refused"]
+    client2, _, _ = _client()  # the key is free again once the export returns
+    assert _export(client2).cloud_path == "exports/a.zip"
+
+
+@pytest.mark.parametrize("status", [403, 404])
+def test_unlistable_bucket_points_at_the_storage_keys(status):
+    client, task, listing = _client()
+    listing.side_effect = ApiException(status=status)
+    with pytest.raises(
+        InvalidArgument, match=r"could not list.*cloud storage #1 can read the bucket.*update_cl"
+    ):
+        _export(client)
+    task.export_dataset.assert_not_called()
+
+
+def test_export_already_running_is_explained():
+    client, _, _ = _client(upload_error=ApiException(status=409, reason="Conflict"))
+    with pytest.raises(InvalidArgument, match="another export of task 7 as COCO 1.0 is still run"):
+        _export(client)

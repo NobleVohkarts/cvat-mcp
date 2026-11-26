@@ -1,13 +1,11 @@
 import json
 import time
-from pathlib import Path
 from typing import Literal
 
 from cvat_sdk import Client
 from cvat_sdk.api_client.exceptions import ApiException
 from pydantic import BaseModel
 
-from cvat_mcp.config import resolve_in_workdir
 from cvat_mcp.errors import InvalidArgument, explain, is_refusal
 from cvat_mcp.services.cloud_storages import check_storage, cloud_source, keys_hint
 from cvat_mcp.services.exports import check_format
@@ -25,20 +23,13 @@ class ImportedAnnotations(BaseModel):
     job_id: int | None
     format: str
     mode: Mode
-    source: str
-    cloud_storage_id: int | None = None
+    cloud_path: str
+    cloud_storage_id: int
     shapes: int
     tracks: int
     tags: int
     seconds: float
     note: str | None = None
-
-
-def _local_file(workdir: Path, file: str) -> Path:
-    path = resolve_in_workdir(workdir, file)
-    if not path.is_file():
-        raise InvalidArgument(f"no such file in the work directory: {file!r}")
-    return path
 
 
 def _object_key(cloud_path: str) -> str:
@@ -54,47 +45,36 @@ def _object_key(cloud_path: str) -> str:
 
 def import_annotations(
     client: Client,
-    workdir: Path,
     job_id: int | None,
     task_id: int | None,
-    cloud_storage_id: int | None,
-    cloud_path: str | None,
-    file: str | None,
+    cloud_storage_id: int,
+    cloud_path: str,
     format_name: str,
     mode: Mode,
 ) -> ImportedAnnotations:
     if (job_id is None) == (task_id is None):
         raise InvalidArgument("pass exactly one of job_id or task_id")
-    if (cloud_storage_id is None) != (cloud_path is None):
-        raise InvalidArgument("pass cloud_storage_id and cloud_path together")
-    if (cloud_path is None) == (file is None):
-        raise InvalidArgument("pass exactly one of cloud_storage_id + cloud_path, or file")
-    key = _object_key(cloud_path) if cloud_path is not None else None
-    if key is not None:
-        check_storage(client, cloud_storage_id, key)
-    path = _local_file(workdir, file) if file is not None else None
+    key = _object_key(cloud_path)
+    check_storage(client, cloud_storage_id, key)
     # a job knows its task and dimension: no task request for a job target
     target = client.jobs.retrieve(job_id) if job_id is not None else client.tasks.retrieve(task_id)
     check_format(client, format_name, str(target.dimension), "import")
 
     started = time.monotonic()
     try:
-        if path is not None:
-            target.import_annotations(format_name, path, import_mode=mode, status_check_period=1)
-        else:
-            api = client.api_client.jobs_api if job_id is not None else client.api_client.tasks_api
-            # CVAT reads the object through the storage: the bucket keys never come here
-            _, response = api.create_annotations(
-                target.id,
-                format=format_name,
-                location="cloud_storage",
-                cloud_storage_id=cloud_storage_id,
-                filename=key,
-                import_mode=mode,
-                _parse_response=False,
-            )
-            rq_id = json.loads(response.data)["rq_id"]  # as the SDK's AnnotationUploader reads it
-            client.wait_for_completion(rq_id, status_check_period=1)
+        api = client.api_client.jobs_api if job_id is not None else client.api_client.tasks_api
+        # CVAT reads the object through the storage: the bucket keys never come here
+        _, response = api.create_annotations(
+            target.id,
+            format=format_name,
+            location="cloud_storage",
+            cloud_storage_id=cloud_storage_id,
+            filename=key,
+            import_mode=mode,
+            _parse_response=False,
+        )
+        rq_id = json.loads(response.data)["rq_id"]  # as the SDK's AnnotationUploader reads it
+        client.wait_for_completion(rq_id, status_check_period=1)
     except Exception as exc:
         if isinstance(exc, ApiException) and exc.status == 409:  # CVAT: one import at a time
             what = f"job {job_id}" if job_id is not None else f"task {task_id}"
@@ -108,9 +88,7 @@ def import_annotations(
         if not is_refusal(exc):
             raise
         hint = "check that the file's image file names match the task's frame names and that "
-        hint += "format fits the file"
-        if cloud_storage_id is not None:
-            hint += keys_hint(cloud_storage_id)
+        hint += "format fits the file" + keys_hint(cloud_storage_id)
         raise InvalidArgument(f"{explain(exc).rstrip()}; {hint}") from exc
     seconds = round(time.monotonic() - started, 1)
 
@@ -125,7 +103,7 @@ def import_annotations(
         job_id=job_id,
         format=format_name,
         mode=mode,
-        source=file or cloud_path,
+        cloud_path=key,
         seconds=seconds,
         note=None if any(counts.values()) else NO_OBJECTS,
         cloud_storage_id=cloud_storage_id,

@@ -25,8 +25,6 @@ def explain(exc: Exception) -> str | None:
     if isinstance(exc, BackgroundRequestException):
         details = exc.args[0] if exc.args and exc.args[0] else "no details from the server"
         return f"CVAT's background job failed: {str(details)[:300]}"
-    if isinstance(exc, (FileExistsError, NotADirectoryError, IsADirectoryError, PermissionError)):
-        return f"could not write the file ({exc.strerror}); pass a different filename"
     if isinstance(exc, ApiException):
         if exc.status in _HINTS:
             return _HINTS[exc.status]

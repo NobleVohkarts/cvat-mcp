@@ -1,6 +1,6 @@
 import pytest
 from cvat_sdk.api_client.exceptions import ApiException
-from fakes import Obj, cloud_storage, fake_cloudstorages_api
+from fakes import Obj, cloud_storage, content_listing, fake_cloudstorages_api
 
 from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.services.cloud_storages import (
@@ -9,6 +9,7 @@ from cvat_mcp.services.cloud_storages import (
     create_cloud_storage,
     delete_cloud_storage,
     list_cloud_storages,
+    object_exists,
     storage_info,
     update_cloud_storage,
 )
@@ -290,3 +291,25 @@ def test_delete_not_owned_refused():
 )
 def test_cloud_source(key, expected):
     assert cloud_source(key) == CloudSource(*expected)
+
+
+def _content_client(listing):
+    return Obj(api_client=Obj(cloudstorages_api=Obj(retrieve_content_v2=listing)))
+
+
+def test_object_exists_matches_the_last_key_segment():
+    listing = content_listing([("a.zip", "REG")])
+    assert object_exists(_content_client(listing), 1, "exports/a.zip")
+    assert listing.call_args.args == (1,)
+    assert listing.call_args.kwargs["prefix"] == "exports/a.zip"
+
+
+def test_object_exists_ignores_longer_names_and_folders():
+    listing = content_listing([("a.zip.bak", "REG"), ("a.zip", "DIR")])
+    assert not object_exists(_content_client(listing), 1, "exports/a.zip")
+
+
+def test_object_exists_follows_pages():
+    listing = content_listing([("a.zip.bak", "REG")], [("a.zip", "REG")])
+    assert object_exists(_content_client(listing), 1, "exports/a.zip")
+    assert listing.call_args.kwargs["next_token"] == "1"

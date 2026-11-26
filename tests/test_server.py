@@ -29,7 +29,6 @@ importlib.util.find_spec = lambda name, package=None: None if name in hidden els
 READ_TOOLS = [
     "create_report",
     "download_annotations",
-    "export_dataset",
     "get_frame_annotations",
     "get_task_overview",
     "list_cloud_storages",
@@ -46,7 +45,8 @@ open_world = [t.name for t in tools if t.annotations.open_world_hint]
 with_job_id = [t.name for t in tools if "job_id" in t.input_schema.get("properties", {})]
 print(json.dumps({
     "tools": sorted(s.REGISTERED_TOOLS), "instructions": s.INSTRUCTIONS, "destructive": destructive,
-    "open_world": open_world, "with_job_id": with_job_id
+    "open_world": open_world, "with_job_id": with_job_id,
+    "descriptions": " ".join(t.description or "" for t in tools),
 }))
 """
 
@@ -102,6 +102,7 @@ def test_write_mode_adds_write_tools(monkeypatch):
         "delete_gt_job",
         "delete_issue",
         "delete_task",
+        "export_dataset",
         "import_annotations",
         "update_annotations",
         "update_cloud_storage",
@@ -120,6 +121,7 @@ def test_write_mode_adds_write_tools(monkeypatch):
         "delete_gt_job",
         "delete_issue",
         "delete_task",
+        "export_dataset",  # overwrite=true replaces an object in the bucket
         "import_annotations",  # mode="replace" deletes the target's annotations first
     ]
     assert "update_job" in result["instructions"]
@@ -143,16 +145,21 @@ def test_write_mode_adds_write_tools(monkeypatch):
     assert sorted(result["open_world"]) == AA_WRITE + [  # first use downloads model weights
         "create_cloud_storage",
         "create_task",
+        "export_dataset",  # CVAT writes into the bucket
         "import_annotations",  # CVAT reads the file from the bucket
         "update_cloud_storage",  # CVAT re-checks the bucket on every update
     ]
     assert "import_annotations" in result["instructions"]
     assert "appends unless" in result["instructions"]
+    assert "export_dataset" in result["instructions"]
+    assert "ask the user before overwrite" in result["instructions"]
     assert "keys go only to create_cloud_storage and update_cloud_storage" in result["instructions"]
     assert "never repeat keys" in result["instructions"]
     assert "list_cloud_storages for the bucket's id" in result["instructions"]
     assert "disabled" not in result["instructions"]
     assert ("get_auto_annotation_run" in result["instructions"]) == AUTO_ANNOTATION
+    for text in (result["instructions"], result["descriptions"]):  # no local files any more
+        assert "work directory" not in text and "WORKDIR" not in text
 
 
 def test_write_mode_without_the_extra_has_no_auto_annotation(monkeypatch):
@@ -291,7 +298,29 @@ from types import SimpleNamespace as Obj
 import cvat_mcp.server as s, cvat_mcp.tools
 from mcp import Client
 from mcp.shared.exceptions import MCPError
-s._connect = lambda _settings: (Obj(close=lambda: None), "admin")
+from cvat_mcp.errors import InvalidArgument
+
+class Reached:
+    def close(self):
+        pass
+
+    def __getattr__(self, name):  # a tool's first use of the SDK client
+        raise InvalidArgument("reached the service")
+
+s._connect = lambda _settings: (Reached(), "admin")
+LABELS = [{"name": "car"}]
+CALLS = {  # write tools whose arguments changed: each must reach its service
+    "create_task": ("create_task", {"name": "t", "labels": LABELS, "urls": ["https://e.com/a"]}),
+    "import_annotations": (
+        "import_annotations", {"task_id": 1, "cloud_storage_id": 1, "cloud_path": "a.json"}
+    ),
+    "export_dataset": (
+        "export_dataset",
+        {"task_id": 1, "format": "COCO 1.0", "cloud_storage_id": 1, "cloud_path": "a.zip"},
+    ),
+    "old_files": ("create_task", {"name": "t", "labels": LABELS, "files": ["a.jpg"]}),
+    "old_file": ("import_annotations", {"task_id": 1, "file": "a.json"}),
+}
 
 async def outcome(client, name, arguments):
     try:
@@ -313,14 +342,14 @@ async def main():
             "unknown": await outcome(client, "render_frame", {"task_id": 1, "frame": 0, "clean": 1}),
             "no_args": await outcome(client, "server_info", {"verbose": True}),
             "known": await outcome(client, "get_frame_annotations", {"task_id": 1, "frame": 0}),
-        }))
+        } | {key: await outcome(client, *call) for key, call in CALLS.items()}))
 
 anyio.run(main)
 """
 
 
 def test_strict_arguments_and_version_in_process(monkeypatch):
-    result = run(IN_PROCESS, monkeypatch)
+    result = run(IN_PROCESS, monkeypatch, "write")
     assert result.returncode == 0, result.stderr
     checks = json.loads(result.stdout.strip().splitlines()[-1])
     assert checks["version"] == cvat_mcp.__version__  # the MCP handshake reports the build
@@ -330,5 +359,10 @@ def test_strict_arguments_and_version_in_process(monkeypatch):
     assert "include_clean" in message and "reconnect" in message
     assert "takes no arguments" in checks["no_args"][2]
     assert checks["not_object"] == "passed on to mcp"  # mcp's own validation answers
-    # known arguments reach the tool body (which fails on the fake client)
-    assert checks["known"] == ["result", True, "Error executing tool get_frame_annotations"]
+    # known arguments reach the service (which fails on the fake client)
+    for name in ("known", "create_task", "import_annotations", "export_dataset"):
+        assert checks[name][:2] == ["result", True], (name, checks[name])
+        assert checks[name][2].endswith(": reached the service"), (name, checks[name])
+    # local files are gone: the old arguments are unknown, not silently dropped
+    assert checks["old_files"][:2] == ["error", -32602] and "files" in checks["old_files"][2]
+    assert checks["old_file"][:2] == ["error", -32602] and "file" in checks["old_file"][2]
