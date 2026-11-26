@@ -4,76 +4,16 @@ from fakes import Obj, cloud_storage, fake_cloudstorages_api
 
 from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.services.cloud_storages import (
-    BucketRef,
     CloudSource,
     cloud_source,
     create_cloud_storage,
     delete_cloud_storage,
-    find_storage,
     list_cloud_storages,
-    parse_bucket_url,
-    resolve_storage,
     storage_info,
     update_cloud_storage,
 )
 
 R2 = "https://abc123.r2.cloudflarestorage.com"
-
-
-@pytest.mark.parametrize(
-    "url, expected",
-    [
-        ("s3://cvat/street/", (None, None, "cvat", "street/")),
-        ("s3://cvat", (None, None, "cvat", "")),
-        (
-            "https://cvat.s3.eu-central-1.amazonaws.com/street/a.jpg",
-            (None, "eu-central-1", "cvat", "street/a.jpg"),
-        ),
-        ("https://cvat.s3.amazonaws.com/x", (None, None, "cvat", "x")),
-        (
-            "https://s3.us-east-1.amazonaws.com/cvat/street/",
-            (None, "us-east-1", "cvat", "street/"),
-        ),
-        (f"{R2}/cvat/street/", (R2, "auto", "cvat", "street/")),
-        (f"{R2}/cvat", (R2, "auto", "cvat", "")),
-        (
-            "https://abc123.eu.r2.cloudflarestorage.com/cvat/",
-            ("https://abc123.eu.r2.cloudflarestorage.com", "auto", "cvat", ""),
-        ),
-        (
-            "http://minio.local:9000/data/img%20one.jpg",
-            ("http://minio.local:9000", None, "data", "img one.jpg"),
-        ),
-        (
-            f"https://photos.abc123.r2.cloudflarestorage.com/train/",
-            (R2, "auto", "photos", "train/"),
-        ),
-        ("https://ABC123.R2.cloudflarestorage.com/cvat/", (R2, "auto", "cvat", "")),
-    ],
-)
-def test_parse_bucket_url(url, expected):
-    assert parse_bucket_url(url) == BucketRef(*expected)
-
-
-@pytest.mark.parametrize(
-    "url, match",
-    [
-        ("gs://b/x", "only S3-compatible"),
-        ("https://acc.blob.core.windows.net/c/x", "only S3-compatible"),
-        ("https://storage.googleapis.com/b/x", "only S3-compatible"),
-        ("https://abc.r2.cloudflarestorage.com/", "no bucket"),
-        ("s3://", "no bucket"),
-        ("ftp://h/b", r"s3:// or http\(s\)"),
-        ("https://h/b/a.jpg?X-Amz-Signature=1", "presigned"),
-        ("https://k:s@minio:9000/b/", "credentials"),
-        ("https://b.s3-accelerate.amazonaws.com/x", r"s3://bucket/"),
-        ("https://b.s3.dualstack.us-east-1.amazonaws.com/x", r"s3://bucket/"),
-        ("https://b.s3-website-us-east-1.amazonaws.com/x", r"s3://bucket/"),
-    ],
-)
-def test_parse_bucket_url_refused(url, match):
-    with pytest.raises(InvalidArgument, match=match):
-        parse_bucket_url(url)
 
 
 def test_storage_info_parses_attributes():
@@ -96,67 +36,7 @@ def _client(storages=(), **repos):
     return Obj(api_client=Obj(cloudstorages_api=fake_cloudstorages_api(storages)), **repos)
 
 
-def _find(storages, ref, owner_id=1, **kw):
-    client = _client(storages)
-    found = find_storage(client, ref, owner_id, **kw)
-    assert client.api_client.cloudstorages_api.list.call_args.kwargs["resource"] == ref.bucket
-    return found and found.id
-
-
-REF = BucketRef(R2, "auto", "cvat", "street/a.jpg")
 AT_R2 = f"endpoint_url={R2}&region=auto"
-
-
-@pytest.mark.parametrize(
-    "storages, ref, kw, expected",
-    [
-        ([cloud_storage(1, "cvat", "endpoint_url=https://other&region=auto")], REF, {}, None),
-        ([cloud_storage(1, "cvat", f"endpoint_url={R2}/&region=auto")], REF, {}, 1),
-        ([cloud_storage(1, "cvat", AT_R2, provider="GOOGLE_CLOUD_STORAGE")], REF, {}, None),
-        ([cloud_storage(1, "cvat", AT_R2, org=5)], REF, {}, None),
-        (
-            [cloud_storage(1, "cvat", AT_R2, owner_id=2), cloud_storage(3, "cvat", AT_R2)],
-            REF,
-            {},
-            3,
-        ),
-        (
-            [
-                cloud_storage(4, "cvat", AT_R2, owner_id=2),
-                cloud_storage(3, "cvat", AT_R2, owner_id=2),
-            ],
-            REF,
-            {},
-            3,
-        ),
-        ([cloud_storage(1, "cvat", f"{AT_R2}&prefix=street/")], REF, {}, 1),
-        (
-            [cloud_storage(1, "cvat", f"{AT_R2}&prefix=street/")],
-            REF._replace(key="roads/"),
-            {},
-            None,
-        ),
-        (
-            [cloud_storage(1, "cvat", f"{AT_R2}&prefix=street/")],
-            REF,
-            {"whole_bucket": True},
-            None,
-        ),
-        ([cloud_storage(1, "cvat")], BucketRef(None, None, "cvat", ""), {}, 1),
-        (
-            [
-                cloud_storage(
-                    1, "cvat", "endpoint_url=https%3A%2F%2Fabc123.r2.cloudflarestorage.com"
-                )
-            ],
-            REF,
-            {},
-            1,
-        ),
-    ],
-)
-def test_find_storage(storages, ref, kw, expected):
-    assert _find(storages, ref, **kw) == expected
 
 
 ME = Obj(id=1, username="admin")
@@ -201,13 +81,17 @@ def test_list_newest_first_with_total():
     assert [s.id for s in result.storages] == [2, 1] and result.total == 2
 
 
+def _new(client, bucket="cvat", endpoint_url=R2, region=None, key="AK", secret="SK", name=None):
+    return create_cloud_storage(client, BASE, bucket, endpoint_url, region, key, secret, name)
+
+
 def test_create_with_keys_sends_s3_request():
     client, api = _crud_client()
-    result = create_cloud_storage(client, BASE, f"{R2}/cvat/street/", "AK", "SK", None, None)
+    result = _new(client, region="auto")
     assert _sent(api.create) == {
         "provider_type": "AWS_S3_BUCKET",
         "resource": "cvat",
-        "display_name": "cvat (Cloudflare R2)",
+        "display_name": "cvat (abc123.r2.cloudflarestorage.com)",
         "credentials_type": "KEY_SECRET_KEY_PAIR",
         "key": "AK",
         "secret_key": "SK",
@@ -221,37 +105,82 @@ def test_create_with_keys_sends_s3_request():
 
 def test_create_anonymous():
     client, api = _crud_client()
-    create_cloud_storage(client, BASE, "s3://open-bucket/", None, None, None, None)
+    _new(client, "open-bucket", None, key=None, secret=None)
     sent = _sent(api.create)
     assert sent["credentials_type"] == "ANONYMOUS_ACCESS"
     assert "key" not in sent and "secret_key" not in sent
     assert (sent["specific_attributes"], sent["display_name"]) == ("", "open-bucket (AWS S3)")
-    create_cloud_storage(client, BASE, "s3://open-bucket/", None, None, None, "us-east-1")
+    _new(client, "open-bucket", None, "us-east-1", key=None, secret=None)
     assert _sent(api.create)["specific_attributes"] == "region=us-east-1"
 
 
-def test_default_display_name_fits():
+@pytest.mark.parametrize("blank", ["", "  "])
+def test_blank_endpoint_means_aws(blank):
     client, api = _crud_client()
-    create_cloud_storage(client, BASE, f"{R2}/{'b' * 63}/", "AK", "SK", None, None)
+    _new(client, "open-bucket", blank, key=None, secret=None)
+    sent = _sent(api.create)
+    assert (sent["specific_attributes"], sent["display_name"]) == ("", "open-bucket (AWS S3)")
+
+
+def test_endpoint_used_as_given():
+    client, api = _crud_client()
+    _new(client, "data", "http://minio.local:9000/")
+    sent = _sent(api.create)
+    assert sent["specific_attributes"] == "endpoint_url=http%3A%2F%2Fminio.local%3A9000"
+    assert sent["display_name"] == "data (minio.local:9000)"
+    _new(client, "b" * 63)
     assert len(_sent(api.create)["display_name"]) <= 63
-    create_cloud_storage(client, BASE, "http://minio.local:9000/data/", "AK", "SK", None, None)
-    assert _sent(api.create)["display_name"] == "data (minio.local:9000)"
+
+
+@pytest.mark.parametrize("endpoint", [R2, R2 + "/"])
+@pytest.mark.parametrize(
+    "stored", [AT_R2, "endpoint_url=https%3A%2F%2Fabc123.r2.cloudflarestorage.com%2F"]
+)
+def test_create_refuses_exact_repeat(endpoint, stored):
+    client, api = _crud_client([cloud_storage(1, "cvat", stored)])
+    with pytest.raises(
+        InvalidArgument, match="already registered as cloud storage #1.*update_cloud_storage"
+    ):
+        _new(client, endpoint_url=endpoint)
+    api.create.assert_not_called()
 
 
 @pytest.mark.parametrize(
-    "url, key, secret, match",
+    "existing",
     [
-        (f"{R2}/cvat/", "AK", None, "both"),
-        (f"{R2}/cvat/", "AK", "", "both"),
-        (f"{R2}/cvat/", "AK", "SK", "already registered as cloud storage #1.*update_cloud_storage"),
-        ("gs://cvat/", None, None, "only S3-compatible"),
+        cloud_storage(1, "cvat"),  # the same name on AWS is another bucket
+        cloud_storage(1, "cvat", f"{AT_R2}&prefix=street/"),
+        cloud_storage(1, "cvat", AT_R2, org=5),
+        cloud_storage(1, "cvat", AT_R2, provider="GOOGLE_CLOUD_STORAGE"),
+        cloud_storage(1, "other", AT_R2),
     ],
 )
-def test_create_refusals_send_nothing(url, key, secret, match):
-    client, api = _crud_client([cloud_storage(1, "cvat", AT_R2)])
-    with pytest.raises(InvalidArgument, match=match):
-        create_cloud_storage(client, BASE, url, key, secret, None, None)
+def test_create_not_a_repeat(existing):
+    client, _ = _crud_client([existing])
+    assert _new(client).id == 7
+
+
+@pytest.mark.parametrize(
+    "args, match",
+    [
+        ({"key": "AK", "secret": None}, "both"),
+        ({"key": "AK", "secret": ""}, "both"),
+        ({"bucket": " "}, "bucket"),
+        ({"bucket": "s3://cvat/street"}, "not a link"),
+        ({"bucket": "cvat/street"}, "not a link"),
+        ({"endpoint_url": "https://AK:SK@e.com"}, "credentials"),
+        ({"endpoint_url": "ftp://e.com"}, "http"),
+        ({"endpoint_url": "https://"}, "http"),
+        ({"endpoint_url": f"{R2}/cvat"}, "host only"),  # the R2 dashboard shows this form
+        ({"endpoint_url": "https://e.com/?x=1"}, "host only"),
+    ],
+)
+def test_create_refusals_send_nothing(args, match):
+    client, api = _crud_client()
+    with pytest.raises(InvalidArgument, match=match) as error:
+        _new(client, **args)
     api.create.assert_not_called()
+    assert "SK" not in str(error.value)
 
 
 def test_error_never_contains_keys():
@@ -260,7 +189,7 @@ def test_error_never_contains_keys():
     refused.body = b'{"secret_key": "SK is invalid", "key": "AK"}'
     api.create.side_effect = refused
     with pytest.raises(InvalidArgument, match="CVAT rejected the request") as error:
-        create_cloud_storage(client, BASE, f"{R2}/cvat/", "AK", "SK", None, None)
+        _new(client)
     message = str(error.value)
     assert "AK" not in message and "SK" not in message and "***" in message
 
@@ -273,7 +202,7 @@ def test_error_never_contains_part_of_a_key():
     refused.body = ("x" * 290 + secret).encode()  # the 300-character cut splits the key
     api.create.side_effect = refused
     with pytest.raises(InvalidArgument) as error:
-        create_cloud_storage(client, BASE, f"{R2}/cvat/", "AKIDVALUE", secret, None, None)
+        _new(client, key="AKIDVALUE", secret=secret)
     assert secret[:8] not in str(error.value)
 
 
@@ -281,7 +210,7 @@ def test_create_survives_status_failure():
     """The storage exists once create answers: a failing status read doesn't hide that."""
     client, api = _crud_client()
     api.retrieve_status.side_effect = ApiException(status=500, reason="Server Error")
-    result = create_cloud_storage(client, BASE, f"{R2}/cvat/", "AK", "SK", None, None)
+    result = _new(client)
     assert (result.id, result.status) == (7, "unknown")
 
 
@@ -354,30 +283,10 @@ def test_delete_not_owned_refused():
         ("img_?.png", ([], "img_?.png")),
         ("shots[2024]/a.jpg", (["shots[2024]/a.jpg"], None)),  # [ is part of a key, not a glob
         ("street/000001.jpg", (["street/000001.jpg"], None)),
+        (" /street/ ", (["street/"], None)),  # keys never start with "/"
+        ("/annotations/a.json", (["annotations/a.json"], None)),
+        ("/", ([], "*")),
     ],
 )
 def test_cloud_source(key, expected):
     assert cloud_source(key) == CloudSource(*expected)
-
-
-def test_resolve_reuses_match():
-    client, api = _crud_client([cloud_storage(1, "cvat", AT_R2)])
-    assert resolve_storage(client, parse_bucket_url(f"{R2}/cvat/street/")) == (1, False)
-    api.create.assert_not_called()
-
-
-def test_resolve_registers_anonymous():
-    client, api = _crud_client()
-    assert resolve_storage(client, parse_bucket_url("s3://open-bucket/x/")) == (7, True)
-    assert _sent(api.create)["credentials_type"] == "ANONYMOUS_ACCESS"
-
-
-def test_resolve_private_bucket_needs_keys():
-    client, api = _crud_client()
-    refused = ApiException(status=400)
-    refused.body = b"The specified cloud storage is not available."
-    api.create.side_effect = refused
-    with pytest.raises(InvalidArgument, match="without keys") as error:
-        resolve_storage(client, parse_bucket_url(f"{R2}/cvat/street/"))
-    assert "create_cloud_storage(url, access_key_id, secret_access_key)" in str(error.value)
-    assert "not available" in str(error.value)

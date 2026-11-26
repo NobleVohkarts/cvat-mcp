@@ -14,13 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from cvat_mcp.config import resolve_in_workdir
 from cvat_mcp.errors import InvalidArgument, explain, is_refusal
 from cvat_mcp.services.annotation_edits import check_value
-from cvat_mcp.services.cloud_storages import (
-    cloud_source,
-    forget_storage,
-    keys_hint,
-    parse_bucket_url,
-    resolve_storage,
-)
+from cvat_mcp.services.cloud_storages import check_storage, cloud_source, keys_hint
 from cvat_mcp.services.issues import job_url
 from cvat_mcp.services.tasks import JobInfo, jobs_of
 from cvat_mcp.services.users import require_own, user_id
@@ -103,8 +97,7 @@ class CreatedTask(BaseModel):
     frame_count: int
     jobs: list[JobInfo]
     url: str
-    cloud_storage_id: int | None = None  # the bucket's CVAT storage, for cloud_url
-    cloud_storage_registered: bool = False  # this call registered it (without keys)
+    cloud_storage_id: int | None = None  # echoes the storage, for cloud_path
 
 
 def _listed(directory: Path, workdir: Path) -> list[Path]:
@@ -159,7 +152,8 @@ def create_task(
     project_id: int | None,
     files: list[str] | None,
     urls: list[str] | None,
-    cloud_url: str | None,
+    cloud_storage_id: int | None,
+    cloud_path: str | None,
     segment_size: int | None,
 ) -> CreatedTask:
     # Argument checks first: they need no requests.
@@ -169,37 +163,31 @@ def create_task(
         raise InvalidArgument(
             "pass exactly one of labels or project_id (a project's tasks use its labels)"
         )
-    if [files, urls, cloud_url].count(None) != 2:
-        raise InvalidArgument("pass exactly one of files, urls or cloud_url")
+    if (cloud_storage_id is None) != (cloud_path is None):
+        raise InvalidArgument("pass cloud_storage_id and cloud_path together")
+    if [files, urls, cloud_path].count(None) != 2:
+        raise InvalidArgument("pass exactly one of files, urls or cloud_storage_id + cloud_path")
     spec = {"name": name, "project_id": project_id, "segment_size": segment_size}
     if labels is not None:
         spec["labels"] = label_requests(labels)
     params = {"sorting_method": "natural"}
-    storage_id, registered = None, False
     if files is not None:
         resources, resource_type = resolve_files(workdir, files), ResourceType.LOCAL
     elif urls is not None:
         _check_urls(urls)
         resources, resource_type = urls, ResourceType.REMOTE
     else:
-        ref = parse_bucket_url(cloud_url)
-        resources, pattern = cloud_source(ref.key)
+        resources, pattern = cloud_source(cloud_path)
+        # before the task: a wrong storage leaves nothing behind
+        check_storage(client, cloud_storage_id, resources[0] if resources else pattern)
         resource_type = ResourceType.SHARE
-        # match storages on what is selected: "street" is the folder "street/"
-        selected = ref._replace(key=resources[0] if resources else pattern)
-        storage_id, registered = resolve_storage(client, selected)  # last check: may register
-        params |= {"cloud_storage_id": storage_id, "use_cache": True}
+        params |= {"cloud_storage_id": cloud_storage_id, "use_cache": True}
         if pattern:
             params["filename_pattern"] = pattern
 
-    try:
-        task = client.tasks.create(
-            models.TaskWriteRequest(**{k: v for k, v in spec.items() if v is not None})
-        )
-    except BaseException:
-        if registered:
-            forget_storage(client, storage_id)
-        raise
+    task = client.tasks.create(
+        models.TaskWriteRequest(**{k: v for k, v in spec.items() if v is not None})
+    )
     # Two steps instead of create_from_data(), which loses the task when the upload fails.
     try:
         task.upload_data(
@@ -214,12 +202,9 @@ def create_task(
             task.remove()  # an empty task is no use to anyone
         except Exception:  # pylint: disable=broad-exception-caught
             logger.exception("could not remove task %s after its upload failed", task.id)
-        if registered:
-            forget_storage(client, storage_id)
-        if storage_id is not None and is_refusal(exc):
-            hint = f"check that cloud_url {cloud_url!r} names a folder or object with images"
-            if not registered:
-                hint += keys_hint(storage_id)
+        if cloud_storage_id is not None and is_refusal(exc):
+            hint = f"check that cloud_path {cloud_path!r} names a folder or object with images"
+            hint += keys_hint(cloud_storage_id)
             raise InvalidArgument(f"{explain(exc).rstrip()}; {hint}") from exc
         raise
     return CreatedTask(
@@ -228,8 +213,7 @@ def create_task(
         frame_count=task.size,
         jobs=jobs_of(task),
         url=job_url(base_url, task.id),
-        cloud_storage_id=storage_id,
-        cloud_storage_registered=registered,
+        cloud_storage_id=cloud_storage_id,
     )
 
 

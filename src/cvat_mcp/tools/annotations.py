@@ -136,23 +136,23 @@ def delete_annotations(
     )
 
 
-# open world: CVAT reads cloud_url from the bucket's host; destructive: mode="replace"
+# open world: CVAT reads a cloud file from the bucket's host; destructive: mode="replace"
 @tool(write=True, destructive_hint=True, open_world_hint=True)
 def import_annotations(
     ctx: Context,
     job_id: int | None = None,
     task_id: int | None = None,
-    cloud_url: str | None = None,
+    cloud_storage_id: int | None = None,
+    cloud_path: str | None = None,
     file: str | None = None,
     format: str = DEFAULT_FORMAT,  # pylint: disable=redefined-builtin  # CVAT's name for it
     mode: Mode = "append",
 ) -> ImportedAnnotations:
     """Use to load an annotation file into CVAT, only when the user asks: into a job (job_id: an
-    annotation or ground-truth job) or a whole task (task_id). The file is either cloud_url, a
-    bucket link to one file (e.g. https://<account>.r2.cloudflarestorage.com/bucket/annotations/
-    labels.json or s3://bucket/labels.json; CVAT reads it through the bucket's cloud storage,
-    which is reused, or registered without keys for a public bucket; register a private bucket
-    first with create_cloud_storage), or file, a path in the server's work directory. format is
+    annotation or ground-truth job) or a whole task (task_id). The file is either in a CVAT
+    cloud storage (cloud_storage_id from list_cloud_storages or create_cloud_storage, with
+    cloud_path: the object key of one file, e.g. annotations/labels.json; CVAT reads it through
+    the storage), or file, a path in the server's work directory. format is
     any CVAT import format (default COCO 1.0). The image file names in the file must match the
     task's frame names (a missing folder prefix is fine); a ground-truth job keeps only its own
     frames, so a file for all images works. mode "append" adds to the annotations already there
@@ -161,5 +161,13 @@ def import_annotations(
     counts after the import. A file CVAT can't import takes about a minute to fail (CVAT retries
     it); wait for the answer instead of calling again."""
     return annotation_imports.import_annotations(
-        get_client(ctx), settings.mcp_workdir, job_id, task_id, cloud_url, file, format, mode
+        get_client(ctx),
+        settings.mcp_workdir,
+        job_id,
+        task_id,
+        cloud_storage_id,
+        cloud_path,
+        file,
+        format,
+        mode,
     )

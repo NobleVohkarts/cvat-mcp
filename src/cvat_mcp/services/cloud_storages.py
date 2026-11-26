@@ -1,8 +1,6 @@
 import json
-import logging
-import re
 from typing import NamedTuple
-from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from cvat_sdk import Client
 from cvat_sdk.api_client import models
@@ -11,68 +9,9 @@ from pydantic import BaseModel
 
 from cvat_mcp.errors import InvalidArgument, explain
 from cvat_mcp.services.tasks import clamp_limit
-from cvat_mcp.services.users import is_own, require_own
+from cvat_mcp.services.users import require_own
 
-logger = logging.getLogger("cvat_mcp")
-
-S3 = "AWS_S3_BUCKET"
-NOT_S3 = (
-    "only S3-compatible buckets (AWS S3, Cloudflare R2, MinIO) for now; add others in the CVAT UI"
-)
-AWS_VIRTUAL = re.compile(r"^(?P<bucket>.+)\.s3(?:[.-](?P<region>[a-z0-9-]+))?\.amazonaws\.com$")
-AWS_PATH = re.compile(r"^s3(?:[.-](?P<region>[a-z0-9-]+))?\.amazonaws\.com$")
-AWS_SPECIAL = re.compile(r"(^|\.)s3[.-](accelerate|dualstack|website)[^/]*\.amazonaws\.com$")
-R2_SUFFIX = ".r2.cloudflarestorage.com"
-R2_JURISDICTIONS = {"eu", "fedramp"}  # <account>.eu.r2.cloudflarestorage.com
-
-
-class BucketRef(NamedTuple):
-    endpoint_url: str | None  # None: AWS itself
-    region: str | None
-    bucket: str
-    key: str
-
-
-def parse_bucket_url(url: str) -> BucketRef:
-    """A bucket link (s3://, AWS, R2 or another S3-compatible host) split into its parts."""
-    parts = urlsplit(url.strip())
-    host = (parts.hostname or "").lower()
-    if parts.scheme == "gs" or host.endswith((".blob.core.windows.net", "storage.googleapis.com")):
-        raise InvalidArgument(NOT_S3)
-    if parts.scheme not in ("s3", "http", "https"):
-        raise InvalidArgument(f"{url!r} is not a bucket link: pass s3:// or http(s)://")
-    if parts.query or parts.fragment:
-        raise InvalidArgument(
-            "a link with a query looks like a presigned URL: pass it in urls, or the bucket link"
-        )
-    if parts.username or parts.password:
-        raise InvalidArgument("don't put credentials in the link: pass the keys as arguments")
-    if AWS_SPECIAL.search(host):
-        raise InvalidArgument(
-            "accelerate, dual-stack and website hosts aren't S3 API endpoints: pass "
-            "s3://bucket/folder/ and the bucket's region"
-        )
-    path = unquote(parts.path).lstrip("/")
-    endpoint, region = None, None
-    if parts.scheme == "s3":
-        bucket, key = host, path
-    elif m := AWS_VIRTUAL.match(host):
-        bucket, key, region = m["bucket"], path, m["region"]
-    else:
-        bucket, _, key = path.partition("/")
-        if m := AWS_PATH.match(host):
-            region = m["region"]
-        else:
-            if host.endswith(R2_SUFFIX):
-                labels = host.removesuffix(R2_SUFFIX).split(".")
-                if len(labels) > 1 and labels[1] not in R2_JURISDICTIONS:  # <bucket>.<account>
-                    bucket, key, host = labels[0], path, host.partition(".")[2]
-                region = "auto"
-            port = f":{parts.port}" if parts.port else ""
-            endpoint = f"{parts.scheme}://{host}{port}"
-    if not bucket:
-        raise InvalidArgument(f"{url!r} names no bucket: pass a link like s3://bucket/folder/")
-    return BucketRef(endpoint, region, bucket, key)
+S3 = "AWS_S3_BUCKET"  # CVAT's provider type for every S3-compatible host
 
 
 def attributes(storage) -> dict[str, str]:
@@ -107,30 +46,6 @@ def storage_info(storage, base_url: str) -> CloudStorageInfo:
         owner=storage.owner.username if storage.owner else None,
         url=f"{base_url.rstrip('/')}/cloudstorages/update/{storage.id}",
     )
-
-
-def _matches(storage, ref: BucketRef, whole_bucket: bool) -> bool:
-    attrs = attributes(storage)
-    endpoint = (attrs.get("endpoint_url") or "").rstrip("/") or None
-    prefix = attrs.get("prefix", "")
-    return (
-        storage.provider_type.value == S3
-        and storage.resource == ref.bucket
-        and storage.organization is None  # tasks are created in the personal workspace
-        and endpoint == ref.endpoint_url
-        and (not prefix if whole_bucket else ref.key.startswith(prefix))
-    )
-
-
-def find_storage(
-    client: Client, ref: BucketRef, owner_id: int | None, *, whole_bucket: bool = False
-):
-    """The CVAT storage serving this bucket and key: our own first, then the oldest."""
-    page, _ = client.api_client.cloudstorages_api.list(
-        resource=ref.bucket, provider_type=S3, page_size=100
-    )
-    found = [s for s in page.results if _matches(s, ref, whole_bucket)]
-    return min(found, key=lambda s: (not is_own(s, owner_id), s.id), default=None)
 
 
 class CloudStorageList(BaseModel):
@@ -201,41 +116,76 @@ def _with_status(client: Client, storage, base_url: str) -> CloudStorageStatus:
     return CloudStorageStatus(**storage_info(storage, base_url).model_dump(), status=status)
 
 
-def _label(ref: BucketRef) -> str:
-    if ref.endpoint_url is None:
-        return "AWS S3"
-    parts = urlsplit(ref.endpoint_url)
-    return "Cloudflare R2" if parts.hostname.endswith(R2_SUFFIX) else parts.netloc
+def _endpoint(endpoint_url: str | None) -> str | None:
+    """The endpoint as given, without a trailing "/"; None or blank means AWS itself."""
+    endpoint_url = (endpoint_url or "").strip()
+    if not endpoint_url:  # models often send "" for an optional argument
+        return None
+    parts = urlsplit(endpoint_url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise InvalidArgument(
+            "endpoint_url must be an http(s) URL of the S3 API, e.g. https://<host>"
+        )
+    if parts.username or parts.password:
+        raise InvalidArgument("don't put credentials in endpoint_url: pass the keys as arguments")
+    if parts.path.strip("/") or parts.query or parts.fragment:  # e.g. R2's ".../<bucket>"
+        raise InvalidArgument(
+            "endpoint_url is the host only (https://<host>[:port]): pass the bucket as bucket "
+            "and folders as cloud_path"
+        )
+    return endpoint_url.rstrip("/")
+
+
+def _repeat(client: Client, bucket: str, endpoint: str | None):
+    """A storage exactly like the one create_cloud_storage would make: whole bucket, personal."""
+    page, _ = client.api_client.cloudstorages_api.list(
+        resource=bucket, provider_type=S3, page_size=100
+    )
+    for storage in page.results:
+        attrs = attributes(storage)
+        if (
+            storage.provider_type.value == S3
+            and storage.resource == bucket
+            and storage.organization is None  # tasks are created in the personal workspace
+            and not attrs.get("prefix")
+            and ((attrs.get("endpoint_url") or "").rstrip("/") or None) == endpoint
+        ):
+            return storage
+    return None
 
 
 def create_cloud_storage(
     client: Client,
     base_url: str,
-    url: str,
+    bucket: str,
+    endpoint_url: str | None,
+    region: str | None,
     access_key_id: str | None,
     secret_access_key: str | None,
     display_name: str | None,
-    region: str | None,
 ) -> CloudStorageStatus:
     """Register a whole S3-compatible bucket; CVAT checks that it can reach it."""
-    ref = parse_bucket_url(url)
-    credentials = _credentials(access_key_id, secret_access_key)
-    if existing := find_storage(client, ref, None, whole_bucket=True):
+    bucket = bucket.strip()
+    if not bucket:
+        raise InvalidArgument("bucket must not be empty")
+    if any(c in bucket for c in "/:"):  # S3 bucket names have neither
         raise InvalidArgument(
-            f"bucket {ref.bucket!r} is already registered as cloud storage #{existing.id}: use "
+            "bucket is the bucket name, not a link: pass the host as endpoint_url and choose "
+            "folders per task with cloud_path"
+        )
+    endpoint = _endpoint(endpoint_url)
+    credentials = _credentials(access_key_id, secret_access_key)
+    if existing := _repeat(client, bucket, endpoint):
+        raise InvalidArgument(
+            f"bucket {bucket!r} is already registered as cloud storage #{existing.id}: use "
             "it, or change its keys with update_cloud_storage"
         )
-    storage = _register(client, ref, credentials, display_name, region)
-    return _with_status(client, storage, base_url)
-
-
-def _register(client: Client, ref: BucketRef, credentials: dict, display_name=None, region=None):
-    """Create the storage for the whole bucket; anonymous without credentials."""
-    attrs = {"endpoint_url": ref.endpoint_url, "region": region or ref.region}
+    host = urlsplit(endpoint).netloc if endpoint else "AWS S3"
+    attrs = {"endpoint_url": endpoint, "region": region}
     request = models.CloudStorageWriteRequest(
         provider_type=models.ProviderTypeEnum(S3),
-        resource=ref.bucket,
-        display_name=display_name or f"{ref.bucket} ({_label(ref)})"[:63],  # CVAT's limit
+        resource=bucket,
+        display_name=display_name or f"{bucket} ({host})"[:63],  # CVAT's limit
         specific_attributes=urlencode({k: v for k, v in attrs.items() if v}),  # as the UI does
         **(credentials or {"credentials_type": models.CredentialsTypeEnum("ANONYMOUS_ACCESS")}),
     )
@@ -243,7 +193,7 @@ def _register(client: Client, ref: BucketRef, credentials: dict, display_name=No
     storage, _ = _sent(
         lambda: api.create(request), credentials.get("key"), credentials.get("secret_key")
     )
-    return storage
+    return _with_status(client, storage, base_url)
 
 
 def update_cloud_storage(
@@ -298,7 +248,8 @@ class CloudSource(NamedTuple):
 
 
 def cloud_source(key: str) -> CloudSource:
-    """What a link's key part selects: a glob, one object, or a folder (recursively)."""
+    """What a cloud_path selects: a glob, one object, or a folder (recursively)."""
+    key = key.strip().lstrip("/")  # object keys never start with "/"
     if any(c in key for c in "*?"):  # not "[": keys like "shots[2024]/" contain it
         return CloudSource([], key)
     if "." in key.rsplit("/", 1)[-1]:  # a file name; "street" (no extension) is a folder
@@ -309,41 +260,29 @@ def cloud_source(key: str) -> CloudSource:
     return CloudSource([f"{folder}/"], None) if folder else CloudSource([], "*")
 
 
-def resolve_storage(client: Client, ref: BucketRef) -> tuple[int, bool]:
-    """The storage serving this bucket and key, and whether this call registered it (no keys).
-
-    No match means no whole-bucket storage either, so no duplicate check before registering."""
-    me = client.users.retrieve_current_user()
-    if storage := find_storage(client, ref, me.id):
-        return storage.id, False
-    if ref.endpoint_url is None:  # an AWS link: the same name elsewhere is a different bucket
-        page, _ = client.api_client.cloudstorages_api.list(
-            resource=ref.bucket, provider_type=S3, page_size=100
-        )
-        if other := next((s for s in page.results if attributes(s).get("endpoint_url")), None):
-            raise InvalidArgument(
-                f"bucket {ref.bucket!r} is registered as cloud storage #{other.id} at "
-                f"{attributes(other)['endpoint_url']}, not on AWS: pass its https link, "
-                f"{attributes(other)['endpoint_url'].rstrip('/')}/{ref.bucket}/{ref.key}"
-            )
+def check_storage(client: Client, storage_id: int, key: str) -> None:
+    """Refuse a storage this account can't use for its personal-workspace tasks, or one whose
+    prefix doesn't cover key (an object key, folder or glob from the bucket root)."""
     try:
-        storage = _register(client, ref, {})
-    except InvalidArgument as exc:
+        storage, _ = client.api_client.cloudstorages_api.retrieve(storage_id)
+    except ApiException as exc:
+        if exc.status not in (403, 404):
+            raise
         raise InvalidArgument(
-            f"bucket {ref.bucket!r} could not be registered without keys; if it is private, "
-            "register it with create_cloud_storage(url, access_key_id, secret_access_key) (with "
-            "region for an AWS bucket outside us-east-1), then call again "
-            f"({exc})"
+            f"no cloud storage #{storage_id} this account can use: find the bucket's id with "
+            "list_cloud_storages"
         ) from None
-    return storage.id, True
-
-
-def forget_storage(client: Client, storage_id: int) -> None:
-    """Remove a storage that a failed call registered: it is no use without what it was for."""
-    try:
-        client.api_client.cloudstorages_api.destroy(storage_id)
-    except Exception:  # pylint: disable=broad-exception-caught
-        logger.exception("could not remove cloud storage %s", storage_id)
+    if storage.organization is not None:
+        raise InvalidArgument(
+            f"cloud storage #{storage_id} belongs to an organization, and this server works in "
+            "the personal workspace: register the bucket there with create_cloud_storage"
+        )
+    prefix = attributes(storage).get("prefix", "")
+    if not key.startswith(prefix):
+        raise InvalidArgument(
+            f"cloud storage #{storage_id} covers only {prefix!r} in its bucket: pass a cloud_path "
+            "under it, or use a storage for the whole bucket (list_cloud_storages)"
+        )
 
 
 def keys_hint(storage_id: int) -> str:

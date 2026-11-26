@@ -139,7 +139,7 @@ def test_write_mode_adds_write_tools(monkeypatch):
     assert annotation_tools <= set(result["with_job_id"])
     assert "create_task" in result["instructions"]
     assert "only tasks owned by" in result["instructions"]
-    # urls and bucket links make CVAT fetch from any host
+    # urls and cloud storages make CVAT fetch from any host
     assert sorted(result["open_world"]) == AA_WRITE + [  # first use downloads model weights
         "create_cloud_storage",
         "create_task",
@@ -150,6 +150,7 @@ def test_write_mode_adds_write_tools(monkeypatch):
     assert "appends unless" in result["instructions"]
     assert "keys go only to create_cloud_storage and update_cloud_storage" in result["instructions"]
     assert "never repeat keys" in result["instructions"]
+    assert "list_cloud_storages for the bucket's id" in result["instructions"]
     assert "disabled" not in result["instructions"]
     assert ("get_auto_annotation_run" in result["instructions"]) == AUTO_ANNOTATION
 

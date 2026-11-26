@@ -73,16 +73,13 @@ JOB = Obj(
 )
 
 
-def _create_client(upload_error=None, remove_error=None, storages=()):
+def _create_client(upload_error=None, remove_error=None, storages=(cloud_storage(1, "cvat"),)):
     task = Obj(id=5, name="Scratch", size=3, get_jobs=lambda: [JOB])
     task.upload_data = Mock(side_effect=upload_error)
     task.remove = Mock(side_effect=remove_error)
-    api = fake_cloudstorages_api(storages)
-    api.create.return_value = (cloud_storage(7, "open-bucket"), None)
     client = Obj(
         tasks=Obj(create=Mock(return_value=task)),
-        api_client=Obj(cloudstorages_api=api),
-        users=Obj(retrieve_current_user=lambda: ADMIN),
+        api_client=Obj(cloudstorages_api=fake_cloudstorages_api(storages)),
     )
     return client, task
 
@@ -94,7 +91,8 @@ def _create(client, workdir, **kw):
         "project_id": None,
         "files": None,
         "urls": None,
-        "cloud_url": None,
+        "cloud_storage_id": None,
+        "cloud_path": None,
         "segment_size": None,
     } | kw
     return create_task(client, "http://cvat/", workdir, **args)
@@ -150,11 +148,12 @@ def test_create_in_project_sends_no_labels(tmp_path):
     [
         ({"project_id": 9, "files": ["b.jpg"]}, "one of labels or project_id"),
         ({"labels": None, "files": ["b.jpg"]}, "one of labels or project_id"),
-        ({"files": ["b.jpg"], "urls": ["https://e.com/a.jpg"]}, "one of files, urls or cloud_url"),
-        ({"files": ["b.jpg"], "cloud_url": "s3://b/"}, "one of files, urls or cloud_url"),
-        ({"urls": ["https://e.com/a.jpg"], "cloud_url": "s3://b/"}, "one of files, urls or"),
-        ({}, "one of files, urls or cloud_url"),
-        ({"cloud_url": "gs://b/x/"}, "only S3-compatible"),
+        ({"files": ["b.jpg"], "urls": ["https://e.com/a.jpg"]}, "one of files, urls or cloud_st"),
+        ({"files": ["b.jpg"], "cloud_storage_id": 1, "cloud_path": "x/"}, "one of files, urls or"),
+        ({"urls": ["https://e.com/a.jpg"], "cloud_storage_id": 1, "cloud_path": "x/"}, "one of"),
+        ({}, "one of files, urls or cloud_storage_id"),
+        ({"cloud_storage_id": 1}, "cloud_storage_id and cloud_path together"),
+        ({"cloud_path": "street/"}, "cloud_storage_id and cloud_path together"),
         ({"files": ["../x.jpg"]}, "CVAT_MCP_WORKDIR"),
         ({"files": ["/etc/passwd"]}, "CVAT_MCP_WORKDIR"),
         ({"files": ["."]}, "CVAT_MCP_WORKDIR"),
@@ -182,13 +181,14 @@ def test_failed_upload_removes_the_task(tmp_path, remove_error):
     task.remove.assert_called_once()
 
 
-R2 = "https://abc.r2.cloudflarestorage.com"
-STORAGE_1 = cloud_storage(1, "cvat", f"endpoint_url={R2}&region=auto")
+def _uploaded(task):
+    _, kwargs = task.upload_data.call_args
+    return kwargs["resources"], kwargs["params"]
 
 
 def test_create_from_bucket_folder(tmp_path):
-    client, task = _create_client(storages=[STORAGE_1])
-    result = _create(client, tmp_path, cloud_url=f"{R2}/cvat/street/")
+    client, task = _create_client()
+    result = _create(client, tmp_path, cloud_storage_id=1, cloud_path="street/")
     task.upload_data.assert_called_once_with(
         resources=["street/"],  # CVAT lists only this prefix
         resource_type=ResourceType.SHARE,
@@ -200,85 +200,81 @@ def test_create_from_bucket_folder(tmp_path):
         wait_for_completion=True,
         status_check_period=1,
     )
-    assert result.cloud_storage_id == 1 and result.cloud_storage_registered is False
-    client.api_client.cloudstorages_api.create.assert_not_called()
-
-
-def test_create_from_public_bucket_says_it_registered(tmp_path):
-    client, _ = _create_client()
-    result = _create(client, tmp_path, cloud_url="s3://open-bucket/x/")
-    assert (result.cloud_storage_id, result.cloud_storage_registered) == (7, True)
-
-
-def test_folder_link_without_slash_matches_prefixed_storage(tmp_path):
-    prefixed = cloud_storage(1, "cvat", f"endpoint_url={R2}&region=auto&prefix=street/")
-    client, _ = _create_client(storages=[prefixed])
-    result = _create(client, tmp_path, cloud_url=f"{R2}/cvat/street")
     assert result.cloud_storage_id == 1
+    client.api_client.cloudstorages_api.list.assert_not_called()
     client.api_client.cloudstorages_api.create.assert_not_called()
 
 
-def test_registered_storage_removed_when_task_create_fails(tmp_path):
-    client, _ = _create_client()
-    client.tasks.create.side_effect = ApiException(status=404)
-    with pytest.raises(ApiException):
-        _create(client, tmp_path, cloud_url="s3://open-bucket/x/", labels=None, project_id=999)
-    client.api_client.cloudstorages_api.destroy.assert_called_once_with(7)
+def test_folder_path_without_slash_is_a_folder(tmp_path):
+    client, task = _create_client()
+    _create(client, tmp_path, cloud_storage_id=1, cloud_path="street")
+    assert _uploaded(task)[0] == ["street/"]
 
 
-def test_s3_link_refused_when_bucket_registered_elsewhere(tmp_path):
-    client, _ = _create_client(storages=[STORAGE_1])  # "cvat" on R2
-    with pytest.raises(InvalidArgument, match="cloud storage #1.*https"):
-        _create(client, tmp_path, cloud_url="s3://cvat/street/")
-    client.api_client.cloudstorages_api.create.assert_not_called()
-    client.tasks.create.assert_not_called()
+def test_create_from_bucket_object(tmp_path):
+    client, task = _create_client()
+    _create(client, tmp_path, cloud_storage_id=1, cloud_path="street/a.jpg")
+    resources, params = _uploaded(task)
+    assert resources == ["street/a.jpg"]
+    assert "filename_pattern" not in params
 
 
-def test_background_failure_names_the_link(tmp_path):
-    client, task = _create_client(
-        BackgroundRequestException("No media data found"), storages=[STORAGE_1]
-    )
-    with pytest.raises(InvalidArgument, match="No media data found.*cloud_url") as error:
-        _create(client, tmp_path, cloud_url=f"{R2}/cvat/nothing/")
+def test_create_from_glob(tmp_path):
+    client, task = _create_client()
+    _create(client, tmp_path, cloud_storage_id=1, cloud_path="street/*.jpg")
+    resources, params = _uploaded(task)
+    assert resources == [] and params["filename_pattern"] == "street/*.jpg"
+
+
+def test_background_failure_names_the_path(tmp_path):
+    client, task = _create_client(BackgroundRequestException("No media data found"))
+    with pytest.raises(
+        InvalidArgument, match="No media data found.*cloud_path 'nothing/'"
+    ) as error:
+        _create(client, tmp_path, cloud_storage_id=1, cloud_path="nothing/")
     assert "update_cloud_storage" in str(error.value)
     task.remove.assert_called_once()
 
 
-def test_create_from_bucket_object(tmp_path):
-    client, task = _create_client(storages=[STORAGE_1])
-    _create(client, tmp_path, cloud_url=f"{R2}/cvat/street/a.jpg")
-    _, kwargs = task.upload_data.call_args
-    assert kwargs["resources"] == ["street/a.jpg"]
-    assert "filename_pattern" not in kwargs["params"]
+@pytest.mark.parametrize("status", [403, 404])
+def test_unknown_storage_refused_before_the_task(tmp_path, status):
+    client, _ = _create_client()
+    client.api_client.cloudstorages_api.retrieve = Mock(side_effect=ApiException(status=status))
+    with pytest.raises(InvalidArgument, match="no cloud storage #99.*list_cloud_storages"):
+        _create(client, tmp_path, cloud_storage_id=99, cloud_path="street/")
+    client.tasks.create.assert_not_called()
 
 
-def test_bucket_upload_failure_removes_registered_storage(tmp_path):
-    client, task = _create_client(ApiException(status=400))
-    with pytest.raises(InvalidArgument, match="cloud_url") as error:
-        _create(client, tmp_path, cloud_url="s3://open-bucket/x/")
-    assert "update_cloud_storage" not in str(error.value)  # it was removed again
-    task.remove.assert_called_once()
-    client.api_client.cloudstorages_api.destroy.assert_called_once_with(7)
+@pytest.mark.parametrize("path", ["highway/", "", "*.jpg"])
+def test_path_outside_the_storage_prefix_refused(tmp_path, path):
+    client, _ = _create_client(storages=[cloud_storage(1, "cvat", "prefix=street%2F")])
+    with pytest.raises(InvalidArgument, match="covers only 'street/'.*list_cloud_storages"):
+        _create(client, tmp_path, cloud_storage_id=1, cloud_path=path)
+    client.tasks.create.assert_not_called()
 
 
-def test_bucket_upload_failure_keeps_reused_storage(tmp_path):
+@pytest.mark.parametrize("path", ["street/", "street", "street/day/*.jpg", "street/a.jpg"])
+def test_path_inside_the_storage_prefix_used(tmp_path, path):
+    client, task = _create_client(storages=[cloud_storage(1, "cvat", "prefix=street/")])
+    _create(client, tmp_path, cloud_storage_id=1, cloud_path=path)
+    task.upload_data.assert_called_once()
+
+
+def test_organization_storage_refused_before_the_task(tmp_path):
+    client, _ = _create_client(storages=[cloud_storage(1, "cvat", org=5)])
+    with pytest.raises(InvalidArgument, match="cloud storage #1 belongs to an organization"):
+        _create(client, tmp_path, cloud_storage_id=1, cloud_path="street/")
+    client.tasks.create.assert_not_called()
+
+
+def test_unavailable_storage_points_at_its_keys(tmp_path):
     unavailable = ApiException(status=400)
     unavailable.body = b"The specified cloud storage 'x' is not available."
-    client, task = _create_client(unavailable, storages=[STORAGE_1])
+    client, task = _create_client(unavailable)
     with pytest.raises(InvalidArgument, match="update_cloud_storage"):
-        _create(client, tmp_path, cloud_url=f"{R2}/cvat/street/")
+        _create(client, tmp_path, cloud_storage_id=1, cloud_path="street/")
     task.remove.assert_called_once()
     client.api_client.cloudstorages_api.destroy.assert_not_called()
-
-
-def test_private_bucket_creates_nothing(tmp_path):
-    client, _ = _create_client()
-    refused = ApiException(status=400)
-    refused.body = b"The resource cvat not found."
-    client.api_client.cloudstorages_api.create.side_effect = refused
-    with pytest.raises(InvalidArgument, match="without keys"):
-        _create(client, tmp_path, cloud_url=f"{R2}/cvat/street/")
-    client.tasks.create.assert_not_called()
 
 
 ADMIN = Obj(id=1, username="admin")
