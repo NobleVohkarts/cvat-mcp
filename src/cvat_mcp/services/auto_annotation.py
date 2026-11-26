@@ -425,23 +425,17 @@ def auto_annotate_frame(
     )
 
 
-class AutoAnnotationRuns(BaseModel):
-    runs: list[AutoAnnotationRun]
-    note: str = (
-        "runs are kept in memory since the server started; a restart forgets them, and a run in "
-        f"progress stops (it saves every {FRAMES_PER_SAVE} frames, and those stay in CVAT)"
-    )
+class AutoAnnotationRunStatus(BaseModel):
+    run: AutoAnnotationRun | None
+    note: str | None = None
 
 
-# REVIEW: definitely it's not a production ready decision to remember all runs
-# shortcut: runs live in memory and are never pruned (a few hundred bytes each); persist them
-# if the server ever needs to resume runs after a restart.
-_RUNS: dict[str, tuple[AutoAnnotationRun, Progress]] = {}
+# Only the latest run: one runs at a time, and an older one's objects are already in CVAT.
+_latest: tuple[AutoAnnotationRun, Progress] | None = None
 _RUN_NUMBERS = itertools.count(1)
 
 
-def _snapshot(run_id: str) -> AutoAnnotationRun:
-    run, progress = _RUNS[run_id]
+def _snapshot(run: AutoAnnotationRun, progress: Progress) -> AutoAnnotationRun:
     return run.model_copy(
         update={
             "frames_done": progress.frames_done,
@@ -484,6 +478,7 @@ def start_run(
     opts: RunOptions,
 ) -> AutoAnnotation:
     """Check everything here, then annotate the whole task in a background thread."""
+    global _latest  # pylint: disable=global-statement
     started = time.monotonic()
     scope = resolve_scope(client, task_id)
     task = scope.task
@@ -507,8 +502,8 @@ def start_run(
             started=datetime.now(timezone.utc),
         )
         progress = Progress(keep_objects=False)
-        _RUNS[run_id] = (run, progress)
-        answer = _snapshot(run_id)  # before the thread can change it
+        _latest = (run, progress)
+        answer = _snapshot(run, progress)  # before the thread can change it
         threading.Thread(
             target=_run,
             args=(run, progress, client_factory, opts, fn, mapping, labels, frames),
@@ -527,11 +522,20 @@ def start_run(
     )
 
 
-def get_runs(run_id: str | None) -> AutoAnnotationRuns:
-    if run_id is None:
-        # a copy: another request's start_run may add a run meanwhile
-        return AutoAnnotationRuns(runs=[_snapshot(r) for r in reversed(list(_RUNS))])
-    if run_id not in _RUNS:
-        known = ", ".join(_RUNS) or "none since the server started"
-        raise InvalidArgument(f"unknown run_id {run_id!r}; known runs: {known}")
-    return AutoAnnotationRuns(runs=[_snapshot(run_id)])
+def get_run(run_id: str | None) -> AutoAnnotationRunStatus:
+    """The latest run; an older run_id gets it too, with a note saying so."""
+    latest = _latest  # one read: start_run may replace it meanwhile
+    if latest is None:
+        return AutoAnnotationRunStatus(
+            run=None, note="no auto-annotation run since the server started"
+        )
+    run = _snapshot(*latest)
+    notes = []
+    if run_id is not None and run_id != run.run_id:
+        notes.append(f"{run_id} is no longer kept: only the latest run ({run.run_id}) is")
+    if run.state == "running":
+        notes.append(
+            "a server restart stops it; the frames it saved by then stay "
+            f"(it saves every {FRAMES_PER_SAVE})"
+        )
+    return AutoAnnotationRunStatus(run=run, note="; ".join(notes) or None)

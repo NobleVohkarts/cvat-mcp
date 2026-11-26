@@ -389,7 +389,8 @@ def _finish(run_id):
     for thread in threading.enumerate():
         if thread.name == f"auto-annotation {run_id}":
             thread.join(timeout=10)
-    (run,) = aa.get_runs(run_id).runs
+    run = aa.get_run(run_id).run
+    assert run.run_id == run_id
     return run
 
 
@@ -513,26 +514,38 @@ def test_background_runs_video_tasks(use_function):
 def test_background_label_mismatch_fails_call(use_function):
     use_function(_skeleton_car(FakeFunction()))
     client, _, _ = _setup()
-    before = len(aa.get_runs(None).runs)
+    before = aa._latest
     with pytest.raises(InvalidArgument, match="'car'"):
         aa.start_run(client, lambda: client, 1, _opts())
-    assert len(aa.get_runs(None).runs) == before
+    assert aa._latest is before
     assert not aa._LOCK.locked()
 
 
-def test_get_runs_unknown_id():
-    with pytest.raises(InvalidArgument, match="unknown run_id"):
-        aa.get_runs("run-0")
+def test_get_run_none_yet(monkeypatch):
+    monkeypatch.setattr(aa, "_latest", None)
+    for run_id in (None, "run-7"):
+        status = aa.get_run(run_id)
+        assert status.run is None and "no auto-annotation run" in status.note
 
 
-def test_get_runs_lists_newest_first(use_function):
+def test_get_run_latest(use_function):
+    result, _, _, _ = _start(FakeFunction(), use_function)
+    run_id = result.run.run_id
+    _finish(run_id)
+    for asked in (None, run_id):
+        status = aa.get_run(asked)
+        assert (status.run.run_id, status.run.state, status.note) == (run_id, "finished", None)
+
+
+def test_get_run_stale_id_answers_latest(use_function):
     first, _, _, _ = _start(FakeFunction(), use_function)
     _finish(first.run.run_id)
     second, _, _, _ = _start(FakeFunction(), use_function)
     _finish(second.run.run_id)
-    ids = [r.run_id for r in aa.get_runs(None).runs]
-    assert ids.index(second.run.run_id) < ids.index(first.run.run_id)
-    assert "restart" in aa.get_runs(None).note
+    status = aa.get_run(first.run.run_id)
+    assert status.run.run_id == second.run.run_id
+    assert f"{first.run.run_id} is no longer kept" in status.note
+    assert second.run.run_id in status.note.split("kept")[1]
 
 
 class Blocking(FakeFunction):
@@ -553,6 +566,8 @@ def test_call_while_background_run_names_run_id(use_function):
         client, _, _ = _setup()
         with pytest.raises(InvalidArgument, match=f"background run {run_id} is in progress"):
             aa.auto_annotate_frame(client, 1, 0, _opts())
+        running = aa.get_run(run_id)
+        assert running.run.state == "running" and "restart" in running.note
     finally:
         fn.go.set()
     assert _finish(run_id).state == "finished"

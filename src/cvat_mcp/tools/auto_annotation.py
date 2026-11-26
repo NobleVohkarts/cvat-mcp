@@ -9,7 +9,7 @@ from cvat_mcp.services.auto_annotation import (
     DETECTION_MODELS,
     OUTPUTS,
     AutoAnnotation,
-    AutoAnnotationRuns,
+    AutoAnnotationRunStatus,
     Mode,
     Output,
 )
@@ -69,10 +69,10 @@ def auto_annotate(
 
 
 @tool(write=True, read_only_hint=True, idempotent_hint=True, enabled=AUTO_ANNOTATION)
-def get_auto_annotation_run(run_id: str | None = None) -> AutoAnnotationRuns:
+def get_auto_annotation_run(run_id: str | None = None) -> AutoAnnotationRunStatus:
     """Use to follow a background auto_annotate run: state (running, finished, failed), frames
     saved out of the total, objects saved per label (added) and skipped, and the error if it
-    failed (with what was saved). Without run_id: every run since the server started, newest
-    first. Runs live in memory: a server restart forgets them and stops a run in progress (the
-    frames it saved stay)."""
-    return auto_annotation.get_runs(run_id)
+    failed (with what was saved). Only the latest run is kept, in memory: an older run_id gets
+    the latest run, and a server restart forgets it and stops it if it is running (the frames
+    it saved stay)."""
+    return auto_annotation.get_run(run_id)
