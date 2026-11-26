@@ -6,6 +6,7 @@ import threading
 import time
 from collections import Counter, defaultdict
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Literal
@@ -156,26 +157,38 @@ def _model_choices(spec: _OutputSpec) -> list[str]:
     return fnmatch.filter(detection, spec.models)
 
 
-# REVIEW: it seems like a cache for me, why don't it instead?
-_loaded: tuple[tuple[str, str], object] | None = None
+class _OneModel:
+    """The last model used, kept loaded: loading and warming one up takes ~15 s. The old one is
+    dropped before the next one loads, so two (~2 GB each) are never in memory together, which
+    functools.lru_cache would allow while switching."""
+
+    def __init__(self):
+        self._key: tuple[str, str] | None = None
+        self.cached = None
+
+    def get(self, key: tuple[str, str], load: Callable[[], object]):
+        if key != self._key:
+            self._key = self.cached = None
+            self.cached = load()
+            self._key = key
+        return self.cached
+
+
+_model = _OneModel()
 
 
 def load_function(opts: RunOptions):
     """The built-in function with that model; the last one used stays loaded."""
-    global _loaded  # pylint: disable=global-statement
-    key = (opts.spec.function, opts.model)
-    if _loaded is not None and _loaded[0] == key:
-        return _loaded[1]
     choices = _model_choices(opts.spec)
-    if opts.model not in choices:
+    if opts.model not in choices:  # checked first, so a wrong name keeps the loaded model
         raise InvalidArgument(
             f"model {opts.model!r} does not give {opts.output}; choose one of: {', '.join(choices)}"
         )
-    _loaded = None  # free the old model before loading the new one
-    module = importlib.import_module(f"cvat_sdk.auto_annotation.functions.torchvision_{key[0]}")
-    fn = module.create(opts.model)
-    _loaded = (key, fn)
-    return fn
+    module = f"cvat_sdk.auto_annotation.functions.torchvision_{opts.spec.function}"
+    return _model.get(
+        (opts.spec.function, opts.model),
+        lambda: importlib.import_module(module).create(opts.model),
+    )
 
 
 def _old_objects(scope: Scope, frames: list[int]) -> dict[int, list]:
@@ -324,8 +337,9 @@ _LOCK = threading.Lock()
 _ACTIVE: str | None = None  # the background run holding the lock; None for a frame run
 
 
-# REVIEW: we should use context manager instead. It's more safe and ensure lock releasing.
-def _acquire(run_id: str | None = None) -> None:
+def _claim(run_id: str | None = None) -> None:
+    """Takes the lock, or says who holds it. A background run's lock is released by its thread
+    (see _released), so a one-frame call uses _busy and a run calls this directly."""
     global _ACTIVE  # pylint: disable=global-statement
     if not _LOCK.acquire(blocking=False):
         if _ACTIVE is None:
@@ -337,10 +351,23 @@ def _acquire(run_id: str | None = None) -> None:
     _ACTIVE = run_id
 
 
-def _release() -> None:
+@contextmanager
+def _released():
+    """Releases the lock when the block ends, however it ends."""
     global _ACTIVE  # pylint: disable=global-statement
-    _ACTIVE = None
-    _LOCK.release()
+    try:
+        yield
+    finally:
+        _ACTIVE = None
+        _LOCK.release()
+
+
+@contextmanager
+def _busy():
+    """Holds the lock for a one-frame call."""
+    _claim()
+    with _released():
+        yield
 
 
 def resolve_scope(client: Client, task_id: int) -> Scope:
@@ -383,13 +410,10 @@ def auto_annotate_frame(
         raise InvalidArgument(f"frame {frame} is deleted in task {scope.task.id}")
     labels = scope.task.get_labels()
     progress = Progress()
-    _acquire()
-    try:
+    with _busy():
         fn = load_function(opts)
         mapping = label_map(fn, labels, opts.spec.polygons)
         annotate(client, scope, fn, mapping, labels, opts, [frame], progress)
-    finally:
-        _release()
     return _answer(
         task_id,
         opts,
@@ -437,24 +461,20 @@ def _run(  # pylint: disable=too-many-arguments,too-many-positional-arguments  #
     labels,
     frames,
 ):
-    client = None
-    try:
-        # REVIEW: let's use context manager instead
-        # Its own client: the request's client may close when the MCP session ends.
-        client = client_factory()
-        scope = Scope(client.tasks.retrieve(run.task_id))
-        annotate(client, scope, fn, mapping, labels, opts, frames, progress)
-        run.state = "finished"
-    except Exception as exc:  # pylint: disable=broad-exception-caught  # recorded for the model
-        logger.exception("auto-annotation run %s failed", run.run_id)
-        run.state = "failed"
-        error = explain(exc) or f"{type(exc).__name__}: {exc}"
-        run.error = f"{error}; {_saved(progress, frames, opts)}"
-    finally:
-        run.finished = datetime.now(timezone.utc)
-        _release()  # first: a failing close below must not keep every later call locked out
-        if client is not None:
-            client.close()
+    with _released():  # start_run took the lock for this thread
+        try:
+            # Its own client: the request's client may close when the MCP session ends.
+            with client_factory() as client:
+                scope = Scope(client.tasks.retrieve(run.task_id))
+                annotate(client, scope, fn, mapping, labels, opts, frames, progress)
+            run.state = "finished"
+        except Exception as exc:  # pylint: disable=broad-exception-caught  # recorded for the model
+            logger.exception("auto-annotation run %s failed", run.run_id)
+            run.state = "failed"
+            error = explain(exc) or f"{type(exc).__name__}: {exc}"
+            run.error = f"{error}; {_saved(progress, frames, opts)}"
+        finally:
+            run.finished = datetime.now(timezone.utc)
 
 
 def start_run(
@@ -472,32 +492,32 @@ def start_run(
         raise InvalidArgument(f"task {task.id} has no frames to annotate")
     labels = task.get_labels()
     run_id = f"run-{next(_RUN_NUMBERS)}"
-    _acquire(run_id)
+    _claim(run_id)
     try:
         fn = load_function(opts)  # in this thread, so a bad model or download fails the call
         mapping = label_map(fn, labels, opts.spec.polygons)  # and a model that doesn't fit
+        run = AutoAnnotationRun(
+            run_id=run_id,
+            state="running",
+            task_id=task.id,
+            output=opts.output,
+            model=opts.model,
+            mode=opts.mode,
+            frames_total=len(frames),
+            started=datetime.now(timezone.utc),
+        )
+        progress = Progress(keep_objects=False)
+        _RUNS[run_id] = (run, progress)
+        answer = _snapshot(run_id)  # before the thread can change it
+        threading.Thread(
+            target=_run,
+            args=(run, progress, client_factory, opts, fn, mapping, labels, frames),
+            name=f"auto-annotation {run_id}",
+            daemon=True,
+        ).start()  # from here on the thread owns the lock
     except BaseException:
-        _release()
-        raise
-    run = AutoAnnotationRun(
-        run_id=run_id,
-        state="running",
-        task_id=task.id,
-        output=opts.output,
-        model=opts.model,
-        mode=opts.mode,
-        frames_total=len(frames),
-        started=datetime.now(timezone.utc),
-    )
-    progress = Progress(keep_objects=False)
-    _RUNS[run_id] = (run, progress)
-    answer = _snapshot(run_id)  # before the thread can change it
-    threading.Thread(
-        target=_run,
-        args=(run, progress, client_factory, opts, fn, mapping, labels, frames),
-        name=f"auto-annotation {run_id}",
-        daemon=True,
-    ).start()
+        with _released():  # no thread started, so nothing else would release it
+            raise
     return _answer(
         task.id,
         opts,

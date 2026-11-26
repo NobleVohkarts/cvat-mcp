@@ -102,14 +102,18 @@ def _setup(size=5, **task_kw):
         **{"dimension": "2d", "data_original_chunk_type": "imageset"} | task_kw,
     )
     api = _echo_api()
-    client = fake_client(
-        task,
-        api_client=Obj(tasks_api=api),
-        logger=Mock(),
-        close=Mock(),
-        config=Obj(cache_dir=None),
-    )
+    client = _Client(**vars(fake_client(task, api_client=Obj(tasks_api=api), close=Mock())))
     return client, task, api
+
+
+class _Client(Obj):
+    """A fake client that also works in `with`, closing on exit like cvat_sdk.Client."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        self.close()
 
 
 def _opts(**kw):
@@ -610,6 +614,32 @@ def test_outputs_table():
 def test_check_options_default_model(output):
     opts = _opts(output=output)
     assert (opts.model, opts.spec) == (aa.OUTPUTS[output].default, aa.OUTPUTS[output])
+
+
+def test_model_cache_frees_old_before_loading_new():
+    cache = aa._OneModel()
+    held_while_loading = []
+
+    def loader(model):
+        def load():
+            held_while_loading.append(cache.cached)
+            return model
+
+        return load
+
+    assert cache.get(("detection", "a"), loader("A")) == "A"
+    assert cache.get(("detection", "a"), loader("again")) == "A"  # same key: not loaded again
+    assert cache.get(("detection", "b"), loader("B")) == "B"
+    assert held_while_loading == [None, None]  # the old model was dropped before each load
+
+
+def test_model_cache_keeps_nothing_after_a_failed_load():
+    cache = aa._OneModel()
+    cache.get(("detection", "a"), lambda: "A")
+    with pytest.raises(RuntimeError):
+        cache.get(("detection", "b"), Mock(side_effect=RuntimeError("download failed")))
+    assert cache.cached is None
+    assert cache.get(("detection", "a"), lambda: "A again") == "A again"
 
 
 needs_torchvision = pytest.mark.skipif(
