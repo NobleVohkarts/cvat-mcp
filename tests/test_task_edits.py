@@ -126,15 +126,15 @@ def test_create_with_segment_size():
 
 def test_create_from_urls_uses_remote():
     client, task = _create_client()
-    _create(client, urls=["https://example.com/a.jpg"])
+    _create(client, urls=[URL])
     _, kwargs = task.upload_data.call_args
     assert kwargs["resource_type"] == ResourceType.REMOTE
-    assert kwargs["resources"] == ["https://example.com/a.jpg"]
+    assert kwargs["resources"] == [URL]
 
 
 def test_create_in_project_sends_no_labels():
     client, _ = _create_client()
-    _create(client, labels=None, project_id=9, urls=["https://example.com/a.jpg"])
+    _create(client, labels=None, project_id=9, urls=[URL])
     (spec,), _ = client.tasks.create.call_args
     assert spec.to_dict()["project_id"] == 9 and "labels" not in spec.to_dict()
 
@@ -167,7 +167,7 @@ def test_create_refusals(kw, match):
 def test_failed_upload_removes_the_task(remove_error):
     client, task = _create_client(BackgroundRequestException("bad image"), remove_error)
     with pytest.raises(BackgroundRequestException, match="bad image"):
-        _create(client, urls=["https://example.com/a.jpg"])
+        _create(client, urls=[URL])
     task.remove.assert_called_once()
 
 

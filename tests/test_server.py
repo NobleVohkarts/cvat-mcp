@@ -298,7 +298,29 @@ from types import SimpleNamespace as Obj
 import cvat_mcp.server as s, cvat_mcp.tools
 from mcp import Client
 from mcp.shared.exceptions import MCPError
-s._connect = lambda _settings: (Obj(close=lambda: None), "admin")
+from cvat_mcp.errors import InvalidArgument
+
+class Reached:
+    def close(self):
+        pass
+
+    def __getattr__(self, name):  # a tool's first use of the SDK client
+        raise InvalidArgument("reached the service")
+
+s._connect = lambda _settings: (Reached(), "admin")
+LABELS = [{"name": "car"}]
+CALLS = {  # write tools whose arguments changed: each must reach its service
+    "create_task": ("create_task", {"name": "t", "labels": LABELS, "urls": ["https://e.com/a"]}),
+    "import_annotations": (
+        "import_annotations", {"task_id": 1, "cloud_storage_id": 1, "cloud_path": "a.json"}
+    ),
+    "export_dataset": (
+        "export_dataset",
+        {"task_id": 1, "format": "COCO 1.0", "cloud_storage_id": 1, "cloud_path": "a.zip"},
+    ),
+    "old_files": ("create_task", {"name": "t", "labels": LABELS, "files": ["a.jpg"]}),
+    "old_file": ("import_annotations", {"task_id": 1, "file": "a.json"}),
+}
 
 async def outcome(client, name, arguments):
     try:
@@ -320,14 +342,14 @@ async def main():
             "unknown": await outcome(client, "render_frame", {"task_id": 1, "frame": 0, "clean": 1}),
             "no_args": await outcome(client, "server_info", {"verbose": True}),
             "known": await outcome(client, "get_frame_annotations", {"task_id": 1, "frame": 0}),
-        }))
+        } | {key: await outcome(client, *call) for key, call in CALLS.items()}))
 
 anyio.run(main)
 """
 
 
 def test_strict_arguments_and_version_in_process(monkeypatch):
-    result = run(IN_PROCESS, monkeypatch)
+    result = run(IN_PROCESS, monkeypatch, "write")
     assert result.returncode == 0, result.stderr
     checks = json.loads(result.stdout.strip().splitlines()[-1])
     assert checks["version"] == cvat_mcp.__version__  # the MCP handshake reports the build
@@ -337,59 +359,10 @@ def test_strict_arguments_and_version_in_process(monkeypatch):
     assert "include_clean" in message and "reconnect" in message
     assert "takes no arguments" in checks["no_args"][2]
     assert checks["not_object"] == "passed on to mcp"  # mcp's own validation answers
-    # known arguments reach the tool body (which fails on the fake client)
-    assert checks["known"] == ["result", True, "Error executing tool get_frame_annotations"]
-
-
-WRITE_IN_PROCESS = """
-import anyio, json
-import cvat_mcp.server as s, cvat_mcp.tools
-from mcp import Client
-from mcp.shared.exceptions import MCPError
-from cvat_mcp.errors import InvalidArgument
-
-class Reached:
-    def close(self):
-        pass
-
-    def __getattr__(self, name):  # the service's first use of the SDK client
-        raise InvalidArgument("reached the service")
-
-s._connect = lambda _settings: (Reached(), "admin")
-CALLS = {
-    "create_task": {"name": "t", "labels": [{"name": "car"}], "urls": ["https://e.com/a.jpg"]},
-    "import_annotations": {"task_id": 1, "cloud_storage_id": 1, "cloud_path": "a.json"},
-    "export_dataset": {"task_id": 1, "format": "COCO 1.0", "cloud_storage_id": 1,
-                       "cloud_path": "a.zip"},
-    "old_files": ["create_task", {"name": "t", "labels": [{"name": "car"}], "files": ["a.jpg"]}],
-    "old_file": ["import_annotations", {"task_id": 1, "file": "a.json"}],
-}
-
-async def outcome(client, name, arguments):
-    try:
-        result = await client.call_tool(name, arguments)
-        return ["result", result.content[0].text]
-    except MCPError as error:
-        return ["error", error.error.message]
-
-async def main():
-    async with Client(s.mcp) as client:
-        out = {}
-        for key, call in CALLS.items():
-            name, arguments = call if isinstance(call, list) else (key, call)
-            out[key] = await outcome(client, name, arguments)
-        print(json.dumps(out))
-
-anyio.run(main)
-"""
-
-
-def test_write_tools_pass_their_arguments_to_the_services(monkeypatch):
-    result = run(WRITE_IN_PROCESS, monkeypatch, "write")
-    assert result.returncode == 0, result.stderr
-    out = json.loads(result.stdout.strip().splitlines()[-1])
-    for name in ("create_task", "import_annotations", "export_dataset"):
-        assert out[name][1].endswith(": reached the service"), (name, out[name])
+    # known arguments reach the service (which fails on the fake client)
+    for name in ("known", "create_task", "import_annotations", "export_dataset"):
+        assert checks[name][:2] == ["result", True], (name, checks[name])
+        assert checks[name][2].endswith(": reached the service"), (name, checks[name])
     # local files are gone: the old arguments are unknown, not silently dropped
-    assert out["old_files"][0] == "error" and "files" in out["old_files"][1]
-    assert out["old_file"][0] == "error" and "file" in out["old_file"][1]
+    assert checks["old_files"][:2] == ["error", -32602] and "files" in checks["old_files"][2]
+    assert checks["old_file"][:2] == ["error", -32602] and "file" in checks["old_file"][2]

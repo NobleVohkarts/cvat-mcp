@@ -148,16 +148,16 @@ def import_annotations(
     mode: Mode = "append",
 ) -> ImportedAnnotations:
     """Use to load an annotation file into CVAT, only when the user asks: into a job (job_id: an
-    annotation or ground-truth job) or a whole task (task_id). The file is in a CVAT cloud
-    storage (cloud_storage_id from list_cloud_storages or create_cloud_storage, with
-    cloud_path: the object key of one file, e.g. annotations/labels.json; CVAT reads it through
-    the storage). format is any CVAT import format (default COCO 1.0). The image file names in the file must match the
-    task's frame names (a missing folder prefix is fine); a ground-truth job keeps only its own
-    frames, so a file for all images works. mode "append" adds to the annotations already there
-    (importing the same file twice duplicates the objects); "replace" first deletes all the
-    target's annotations, so use it only when the user asks to replace them. Returns the object
-    counts after the import. A file CVAT can't import takes about a minute to fail (CVAT retries
-    it); wait for the answer instead of calling again."""
+    annotation or ground-truth job) or a whole task (task_id). The file is in a CVAT cloud storage
+    (cloud_storage_id from list_cloud_storages or create_cloud_storage, with cloud_path: the object
+    key of one file, e.g. annotations/labels.json; CVAT reads it through the storage). format is any
+    CVAT import format (default COCO 1.0). The image file names in the file must match the task's
+    frame names (a missing folder prefix is fine); a ground-truth job keeps only its own frames, so
+    a file for all images works. mode "append" adds to the annotations already there (importing the
+    same file twice duplicates the objects); "replace" first deletes all the target's annotations,
+    so use it only when the user asks to replace them. Returns the object counts after the import. A
+    file CVAT can't import takes about a minute to fail (CVAT retries it); wait for the answer
+    instead of calling again."""
     return annotation_imports.import_annotations(
         get_client(ctx),
         job_id,

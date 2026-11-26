@@ -19,7 +19,6 @@ from cvat_mcp.services.users import require_own, user_id
 logger = logging.getLogger("cvat_mcp")
 
 DEFAULT_VALUES = {"checkbox": ["false"], "text": [""]}
-MAX_FILES = 1000
 
 
 class AttributeSpec(BaseModel):

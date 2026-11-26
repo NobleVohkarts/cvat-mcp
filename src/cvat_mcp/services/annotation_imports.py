@@ -23,7 +23,7 @@ class ImportedAnnotations(BaseModel):
     job_id: int | None
     format: str
     mode: Mode
-    source: str
+    cloud_path: str
     cloud_storage_id: int
     shapes: int
     tracks: int
@@ -103,7 +103,7 @@ def import_annotations(
         job_id=job_id,
         format=format_name,
         mode=mode,
-        source=cloud_path,
+        cloud_path=cloud_path,
         seconds=seconds,
         note=None if any(counts.values()) else NO_OBJECTS,
         cloud_storage_id=cloud_storage_id,
