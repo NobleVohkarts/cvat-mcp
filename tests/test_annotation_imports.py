@@ -197,6 +197,15 @@ def test_organization_storage_refused_before_the_import(tmp_path):
     client.api_client.tasks_api.create_annotations.assert_not_called()
 
 
+def test_file_outside_the_storage_prefix_refused(tmp_path):
+    client = _cloud_client(_task(), storages=[cloud_storage(1, "cvat", "prefix=street/")])
+    with pytest.raises(InvalidArgument, match="covers only 'street/'"):
+        _import(client, tmp_path, task_id=1, cloud_storage_id=1, cloud_path="labels.json")
+    client.api_client.tasks_api.create_annotations.assert_not_called()
+    _import(client, tmp_path, task_id=1, cloud_storage_id=1, cloud_path="street/labels.json")
+    client.api_client.tasks_api.create_annotations.assert_called_once()
+
+
 def test_unknown_storage_refused_before_the_import(tmp_path):
     client = _cloud_client(_task())
     client.api_client.cloudstorages_api.retrieve = Mock(side_effect=ApiException(status=404))

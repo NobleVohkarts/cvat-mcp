@@ -245,6 +245,21 @@ def test_unknown_storage_refused_before_the_task(tmp_path, status):
     client.tasks.create.assert_not_called()
 
 
+@pytest.mark.parametrize("path", ["highway/", "", "*.jpg"])
+def test_path_outside_the_storage_prefix_refused(tmp_path, path):
+    client, _ = _create_client(storages=[cloud_storage(1, "cvat", "prefix=street%2F")])
+    with pytest.raises(InvalidArgument, match="covers only 'street/'.*list_cloud_storages"):
+        _create(client, tmp_path, cloud_storage_id=1, cloud_path=path)
+    client.tasks.create.assert_not_called()
+
+
+@pytest.mark.parametrize("path", ["street/", "street", "street/day/*.jpg", "street/a.jpg"])
+def test_path_inside_the_storage_prefix_used(tmp_path, path):
+    client, task = _create_client(storages=[cloud_storage(1, "cvat", "prefix=street/")])
+    _create(client, tmp_path, cloud_storage_id=1, cloud_path=path)
+    task.upload_data.assert_called_once()
+
+
 def test_organization_storage_refused_before_the_task(tmp_path):
     client, _ = _create_client(storages=[cloud_storage(1, "cvat", org=5)])
     with pytest.raises(InvalidArgument, match="cloud storage #1 belongs to an organization"):

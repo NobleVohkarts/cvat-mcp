@@ -260,8 +260,9 @@ def cloud_source(key: str) -> CloudSource:
     return CloudSource([f"{folder}/"], None) if folder else CloudSource([], "*")
 
 
-def check_storage(client: Client, storage_id: int) -> None:
-    """Refuse a storage this account can't use for its personal-workspace tasks."""
+def check_storage(client: Client, storage_id: int, key: str) -> None:
+    """Refuse a storage this account can't use for its personal-workspace tasks, or one whose
+    prefix doesn't cover key (an object key, folder or glob from the bucket root)."""
     try:
         storage, _ = client.api_client.cloudstorages_api.retrieve(storage_id)
     except ApiException as exc:
@@ -275,6 +276,12 @@ def check_storage(client: Client, storage_id: int) -> None:
         raise InvalidArgument(
             f"cloud storage #{storage_id} belongs to an organization, and this server works in "
             "the personal workspace: register the bucket there with create_cloud_storage"
+        )
+    prefix = attributes(storage).get("prefix", "")
+    if not key.startswith(prefix):
+        raise InvalidArgument(
+            f"cloud storage #{storage_id} covers only {prefix!r} in its bucket: pass a cloud_path "
+            "under it, or use a storage for the whole bucket (list_cloud_storages)"
         )
 
 

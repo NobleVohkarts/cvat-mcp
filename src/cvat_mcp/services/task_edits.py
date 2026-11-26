@@ -177,8 +177,9 @@ def create_task(
         _check_urls(urls)
         resources, resource_type = urls, ResourceType.REMOTE
     else:
-        check_storage(client, cloud_storage_id)  # before the task: a wrong id leaves nothing
         resources, pattern = cloud_source(cloud_path)
+        # before the task: a wrong storage leaves nothing behind
+        check_storage(client, cloud_storage_id, resources[0] if resources else pattern)
         resource_type = ResourceType.SHARE
         params |= {"cloud_storage_id": cloud_storage_id, "use_cache": True}
         if pattern:
