@@ -30,8 +30,8 @@ reports each problem as a CVAT issue on the right frame of the right job.
 | `update_annotations` | **write** | Correct existing objects or tags by id: label, box or points, attributes, occluded; only what changes is given. `job_id` edits one job's objects. |
 | `delete_annotations` | **write** | Remove objects or tags by explicit ids (shape and tag ids are separate lists), all or none. `job_id` deletes from one job. |
 | `import_annotations` | **write** | Load an annotation file in any CVAT import format (default `COCO 1.0`) into a job (e.g. ground truth) or a task, from a bucket link to one file (`cloud_url`; CVAT reads it through the bucket's cloud storage) or a file in `CVAT_MCP_WORKDIR`; appends unless `mode="replace"`; returns the object counts. |
-| `auto_annotate` | **write** (with the extra) | Run a built-in torchvision model from the CVAT SDK (detection boxes, instance-segmentation polygons or masks, keypoint skeletons, classification tags) on one frame (waits, returns the new objects) or on a whole image task (background run through the SDK's `annotate_task`, saved in one upload when it finishes). Matches labels by name and counts the skipped ones; appends unless `mode="replace"` (shapes and tags, never tracks; on a whole task the old ones are deleted after the upload); one run at a time; tasks with overlapping jobs are refused. |
-| `get_auto_annotation_run` | **write** (with the extra) | Progress of background `auto_annotate` runs: state, frames done, objects found per label, error. In memory only; a restart forgets them and stops a run in progress, which then saves nothing. |
+| `auto_annotate` | **write** (with the extra) | Run a built-in torchvision model from the CVAT SDK (detection boxes, instance-segmentation polygons or masks, keypoint skeletons, classification tags) on one frame (waits, returns the new objects) or on a whole task (background run, saved every 10 frames, so a failed run keeps what it saved). Matches labels by name and counts the skipped ones; appends unless `mode="replace"` (shapes and tags, never tracks; each batch's old ones are deleted after its new ones are saved); one run at a time; tasks with overlapping jobs are refused. |
+| `get_auto_annotation_run` | **write** (with the extra) | Progress of background `auto_annotate` runs: state, frames saved, objects saved per label, error. In memory only; a restart forgets them and stops a run in progress (the frames it saved stay). |
 | `create_task` | **write** | Create a task from images in `CVAT_MCP_WORKDIR`, from URLs or from an S3-compatible bucket link (`cloud_url`: a folder, glob or object; reuses the bucket's cloud storage), with labels or a project; waits for CVAT to process the data and leaves nothing behind if the upload fails. |
 | `update_task` | **write** | Rename a task, assign it, move it into a project or add labels (never remove them). |
 | `delete_task` | **write** | Delete a task owned by the token's CVAT account, with all its jobs, annotations and issues. |
@@ -103,7 +103,7 @@ cp .env.example .env   # then fill in CVAT_ACCESS_TOKEN
 Optional: `uv sync --extra auto-annotation` adds CPU builds of torch and torchvision (about 1 GB)
 and, in write mode, the `auto_annotate` and `get_auto_annotation_run` tools. Without the extra
 those two tools don't exist. `uv run` keeps the extra; a later plain `uv sync` removes it again.
-Each model downloads its weights (about 170 MB) into `~/.cache/torch` on first use. A whole-task run downloads the task's images (original quality) into a temporary directory that is removed when the run ends, so it needs that much free space meanwhile.
+Each model downloads its weights (about 170 MB) into `~/.cache/torch` on first use.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |

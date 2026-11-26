@@ -276,7 +276,7 @@ def test_frame_replace_delete_failure_says_new_ones_are_saved(use_function):
     with pytest.raises(InvalidArgument) as error:
         aa.auto_annotate_frame(client, 1, 0, _opts(mode="replace"))
     message = str(error.value)
-    assert "saved" in message and "100" in message and "Do not repeat" in message
+    assert "saved" in message and "100" in message and "replaces them again" in message
     assert "CVAT down" in message
     assert not aa._LOCK.locked()
 
@@ -360,40 +360,15 @@ def test_frame_nothing_matched_has_note(use_function):
 # --- whole task in the background ---
 
 
-class FakeAnnotateTask:
-    """Stands in for cvat_sdk.auto_annotation.annotate_task: runs the function on every frame."""
-
-    def __init__(self):
-        self.calls = []
-        self.fail_after: int | None = None
-        self.cache_dirs = []
-
-    def __call__(self, client, task_id, function, *, pbar, **kw):
-        self.calls.append((client, task_id, kw))
-        self.cache_dirs.append(client.config.cache_dir)
-        (client.config.cache_dir / "chunk.zip").write_bytes(PNG)  # what TaskDataset leaves
-        image = PIL.Image.open(io.BytesIO(PNG))
-        size = client.tasks.retrieve(task_id).size
-        with pbar.task(total=size, unit="samples"):
-            for i in pbar.iter(range(size)):
-                if i == self.fail_after:
-                    raise RuntimeError("model crashed")
-                function.detect(
-                    aa.Context(str(i), kw["conf_threshold"], kw["conv_mask_to_poly"]), image
-                )
-
-
 @pytest.fixture
-def annotate_task(monkeypatch):
-    fake = FakeAnnotateTask()
-    monkeypatch.setattr(aa, "annotate_task", fake)
-    return fake
+def batches_of_2(monkeypatch):
+    monkeypatch.setattr(aa, "FRAMES_PER_SAVE", 2)
 
 
 def _start(fn, use_function, opts=None, **setup_kw):
     """Start a background run whose thread uses its own fake client."""
     use_function(fn)
-    request_client, _, request_api = _setup()
+    request_client, _, request_api = _setup(**setup_kw)
     run_client, _, run_api = _setup(**setup_kw)
     result = aa.start_run(request_client, lambda: run_client, 1, opts or _opts())
     return result, request_api, run_client, run_api
@@ -407,8 +382,12 @@ def _finish(run_id):
     return run
 
 
-def test_background_run_finishes(use_function, annotate_task):
-    result, _, _, _ = _start(FakeFunction(), use_function)
+def _actions(api):
+    return [c.args[0] for c in api.partial_update_annotations.call_args_list]
+
+
+def test_background_run_saves_in_batches(use_function, batches_of_2):
+    result, _, _, run_api = _start(FakeFunction(), use_function)
     assert result.run.state == "running"
     assert (result.run.frames_total, result.objects, result.frame) == (5, [], None)
     run = _finish(result.run.run_id)
@@ -419,46 +398,46 @@ def test_background_run_finishes(use_function, annotate_task):
         {"bench": 5},
     )
     assert run.finished is not None and run.error is None
-    ((_, task_id, kw),) = annotate_task.calls
-    assert task_id == 1
-    assert kw == {
-        "clear_existing": False,
-        "allow_unmatched_labels": True,
-        "conf_threshold": 0.5,
-        "conv_mask_to_poly": True,
-    }
+    assert [sorted({s.frame for s in r.shapes}) for r in _sent(run_api)] == [[0, 1], [2, 3], [4]]
+    assert all(s.source == "auto" for r in _sent(run_api) for s in r.shapes)
     assert not aa._LOCK.locked()
 
 
-def test_background_run_failure_recorded_and_lock_released(use_function, annotate_task):
-    annotate_task.fail_after = 2
-    result, _, run_client, _ = _start(FakeFunction(), use_function)
+def test_background_run_passes_threshold_and_polygons(use_function):
+    fn = FakeFunction()
+    result, _, _, _ = _start(fn, use_function, _opts(conf_threshold=0.7))
+    _finish(result.run.run_id)
+    assert {(c.conf_threshold, c.conv_mask_to_poly) for c in fn.contexts} == {(0.7, True)}
+
+
+def test_background_run_failure_recorded_and_lock_released(use_function):
+    result, _, run_client, run_api = _start(FakeFunction(fail_on=3), use_function)
     run = _finish(result.run.run_id)
-    assert (run.state, run.frames_done) == ("failed", 2)
-    assert "model crashed" in run.error
+    assert (run.state, run.frames_done) == ("failed", 0)
+    assert "model crashed" in run.error and "nothing was saved" in run.error
+    run_api.partial_update_annotations.assert_not_called()
     assert not aa._LOCK.locked()
     run_client.close.assert_called_once()
 
 
-@pytest.mark.parametrize("fail_after", [None, 1])
-def test_background_run_removes_downloaded_images(use_function, annotate_task, fail_after):
-    annotate_task.fail_after = fail_after
-    result, _, _, _ = _start(FakeFunction(), use_function)
-    _finish(result.run.run_id)
-    (cache_dir,) = annotate_task.cache_dirs
-    assert not cache_dir.exists()
+def test_background_failure_keeps_saved_batches(use_function, batches_of_2):
+    result, _, _, run_api = _start(FakeFunction(fail_on=5), use_function)
+    run = _finish(result.run.run_id)
+    assert (run.state, run.frames_done, run.added) == ("failed", 4, {"car": 4})
+    assert len(_sent(run_api)) == 2
+    assert "model crashed" in run.error
+    assert "4 of 5 frames (through frame 3)" in run.error and "duplicates" in run.error
 
 
-def test_background_run_uses_own_client(use_function, annotate_task):
-    result, request_api, run_client, _ = _start(FakeFunction(), use_function)
+def test_background_run_uses_own_client(use_function):
+    result, request_api, run_client, run_api = _start(FakeFunction(), use_function)
     _finish(result.run.run_id)
-    ((client, _, _),) = annotate_task.calls
-    assert client is run_client
     request_api.partial_update_annotations.assert_not_called()
+    assert _sent(run_api)
     run_client.close.assert_called_once()
 
 
-def test_background_replace_deletes_old_after_upload(use_function, annotate_task):
+def test_background_replace_batch_by_batch(use_function, batches_of_2):
     result, _, _, run_api = _start(
         FakeFunction(),
         use_function,
@@ -468,13 +447,28 @@ def test_background_replace_deletes_old_after_upload(use_function, annotate_task
         tracks=[Obj(id=9, frame=1, label_id=1, shapes=[])],
     )
     assert _finish(result.run.run_id).state == "finished"
-    (deleted,) = _sent(run_api, "delete")
-    assert sorted(s.id for s in deleted.shapes) == [1, 2]
-    assert [t.id for t in deleted.tags] == [3]
-    assert deleted.tracks == []
+    # each batch: new ones first, then that batch's old ones; tracks never
+    assert _actions(run_api) == ["create", "delete", "create", "delete", "create", "delete"]
+    deletes = _sent(run_api, "delete")
+    assert [[s.id for s in d.shapes] + [t.id for t in d.tags] for d in deletes] == [[1], [3], [2]]
+    assert all(d.tracks == [] for d in deletes)
 
 
-def test_background_replace_delete_failure_says_new_ones_are_saved(use_function, annotate_task):
+def test_background_replace_failure_says_rerun_replaces(use_function, batches_of_2):
+    result, _, _, run_api = _start(
+        FakeFunction(fail_on=3),
+        use_function,
+        _opts(mode="replace"),
+        shapes=[shape(1, 1, 0, [0, 0, 1, 1]), shape(2, 1, 4, [0, 0, 1, 1])],
+    )
+    run = _finish(result.run.run_id)
+    assert run.state == "failed"
+    assert "2 of 5 frames (through frame 1)" in run.error and "replaces them again" in run.error
+    ((deleted,),) = [[s.id for s in d.shapes] for d in _sent(run_api, "delete")]
+    assert deleted == 1  # frame 4's old box stays
+
+
+def test_background_replace_delete_failure_says_new_ones_are_saved(use_function):
     use_function(FakeFunction())
     request_client, _, _ = _setup()
     run_client, _, run_api = _setup(shapes=[shape(1, 1, 0, [0, 0, 1, 1])])
@@ -482,41 +476,30 @@ def test_background_replace_delete_failure_says_new_ones_are_saved(use_function,
     result = aa.start_run(request_client, lambda: run_client, 1, _opts(mode="replace"))
     run = _finish(result.run.run_id)
     assert run.state == "failed"
-    assert "saved" in run.error and "Do not repeat" in run.error and "CVAT down" in run.error
+    assert "saved" in run.error and "CVAT down" in run.error
+    assert "replaces them again" in run.error
 
 
-def test_background_run_setup_failure_releases_lock(use_function, annotate_task, monkeypatch):
-    def no_space(**_):
-        raise OSError("No space left on device")
-
-    monkeypatch.setattr(aa.tempfile, "TemporaryDirectory", no_space)
-    result, _, _, _ = _start(FakeFunction(), use_function)
-    run = _finish(result.run.run_id)
-    assert run.state == "failed" and "No space left" in run.error
-    assert not aa._LOCK.locked()
-
-
-def test_background_replace_failure_deletes_nothing(use_function, annotate_task):
-    annotate_task.fail_after = 3
-    result, _, _, run_api = _start(
-        FakeFunction(), use_function, _opts(mode="replace"), shapes=[shape(1, 1, 0, [0, 0, 1, 1])]
-    )
-    assert _finish(result.run.run_id).state == "failed"
-    run_api.partial_update_annotations.assert_not_called()
-
-
-def test_background_refuses_video(use_function, annotate_task):
+def test_background_run_setup_failure_releases_lock(use_function):
     use_function(FakeFunction())
-    client, _, _ = _setup(data_original_chunk_type="video")
-    before = len(aa.get_runs(None).runs)
-    with pytest.raises(InvalidArgument, match="pass frame"):
-        aa.start_run(client, lambda: client, 1, _opts())
-    assert len(aa.get_runs(None).runs) == before
+    request_client, _, _ = _setup()
+
+    def no_client():
+        raise OSError("connection refused")
+
+    result = aa.start_run(request_client, no_client, 1, _opts())
+    run = _finish(result.run.run_id)
+    assert run.state == "failed" and "connection refused" in run.error
     assert not aa._LOCK.locked()
-    assert annotate_task.calls == []
 
 
-def test_background_label_mismatch_fails_call(use_function, annotate_task):
+def test_background_runs_video_tasks(use_function):
+    result, _, _, run_api = _start(FakeFunction(), use_function, data_original_chunk_type="video")
+    assert _finish(result.run.run_id).state == "finished"
+    assert _sent(run_api)
+
+
+def test_background_label_mismatch_fails_call(use_function):
     use_function(_skeleton_car(FakeFunction()))
     client, _, _ = _setup()
     before = len(aa.get_runs(None).runs)
@@ -531,7 +514,7 @@ def test_get_runs_unknown_id():
         aa.get_runs("run-0")
 
 
-def test_get_runs_lists_newest_first(use_function, annotate_task):
+def test_get_runs_lists_newest_first(use_function):
     first, _, _, _ = _start(FakeFunction(), use_function)
     _finish(first.run.run_id)
     second, _, _, _ = _start(FakeFunction(), use_function)
@@ -551,7 +534,7 @@ class Blocking(FakeFunction):
         return super().detect(context, image)
 
 
-def test_call_while_background_run_names_run_id(use_function, annotate_task):
+def test_call_while_background_run_names_run_id(use_function):
     fn = Blocking()
     result, _, _, _ = _start(fn, use_function)
     run_id = result.run.run_id

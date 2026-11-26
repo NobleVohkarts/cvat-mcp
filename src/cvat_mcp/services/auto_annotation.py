@@ -1,21 +1,18 @@
 import importlib
 import itertools
 import logging
-import tempfile
 import threading
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Literal
 
 import PIL.Image
 from cvat_sdk import Client
 from cvat_sdk.api_client import models
-from cvat_sdk.auto_annotation import BadFunctionError, DetectionFunctionContext, annotate_task
-from cvat_sdk.core.progress import BaseProgressReporter
+from cvat_sdk.auto_annotation import DetectionFunctionContext
 from pydantic import BaseModel
 
 from cvat_mcp.errors import InvalidArgument, explain
@@ -30,6 +27,7 @@ from cvat_mcp.services.annotations import Scope, shape_bbox, target_scope
 Function = Literal["detection", "instance_segmentation", "keypoint_detection", "classification"]
 Mode = Literal["append", "replace"]
 
+# REVIEW: why do we need these predefine models? have we documented it? how would mcp server caller know about this feature?
 DEFAULT_MODELS: dict[str, str] = {
     "detection": "fasterrcnn_resnet50_fpn_v2",
     "instance_segmentation": "maskrcnn_resnet50_fpn_v2",
@@ -37,9 +35,13 @@ DEFAULT_MODELS: dict[str, str] = {
     "classification": "resnet50",
 }
 # Detection models that also fit the segmentation / keypoint functions.
+# REVIEW: why do we split a model map in two dict? Even if it's a part of model name it's better to use one structure with some flag or wildcard in the name
 _MODEL_PART = {"instance_segmentation": "maskrcnn", "keypoint_detection": "keypointrcnn"}
 
 logger = logging.getLogger(__name__)
+
+# Frames per save: one request each, far below CVAT's 100 MB body and 60 s answer limits.
+FRAMES_PER_SAVE = 10
 
 
 @dataclass(frozen=True)
@@ -99,9 +101,11 @@ class AutoAnnotation(BaseModel):
 
 @dataclass
 class Progress:
-    added: Counter = field(default_factory=Counter)
-    skipped: Counter = field(default_factory=Counter)
-    frames_done: int = 0
+    keep_objects: bool = True  # False for background runs: nobody reads them, and they'd pile up
+    added: Counter = field(default_factory=Counter)  # task label -> saved objects
+    skipped: Counter = field(default_factory=Counter)  # function label -> dropped (no task label)
+    objects: list[AutoObject] = field(default_factory=list)
+    frames_done: int = 0  # frames saved, in order
 
 
 def check_options(
@@ -123,6 +127,7 @@ def _model_choices(function: str) -> list[str]:
     ]
 
 
+# REVIEW: it seems like a cache for me, why don't it instead?
 _loaded: tuple[tuple[str, str], object] | None = None
 
 
@@ -144,28 +149,28 @@ def load_function(opts: RunOptions):
     return fn
 
 
-def _old_objects(scope: Scope, frames: list[int]) -> list:
-    """The scope's shapes and tags on those frames, as delete requests; tracks stay."""
+def _old_objects(scope: Scope, frames: list[int]) -> dict[int, list]:
+    """The scope's shapes and tags on those frames, as delete requests by frame; tracks stay."""
     wanted = set(frames)
     annotations = scope.source.get_annotations()
-    return [
-        (kind, REQUEST[kind](**obj.to_dict()))
-        for kind, objs in (("shape", annotations.shapes), ("tag", annotations.tags))
-        for obj in objs
-        if obj.frame in wanted
-    ]
+    by_frame = defaultdict(list)
+    for kind, objs in (("shape", annotations.shapes), ("tag", annotations.tags)):
+        for obj in objs:
+            if obj.frame in wanted:
+                by_frame[obj.frame].append((kind, REQUEST[kind](**obj.to_dict())))
+    return by_frame
 
 
 def _delete_stale(client: Client, scope: Scope, stale: list, saved: str) -> None:
-    """Deletes the old objects once the new ones are saved; a failure says the new ones are in,
-    since repeating the call would save them twice."""
+    """Deletes the old objects once the new ones are saved; a failure says both are there now."""
     try:
         patch_annotations(client, "delete", scope, stale)
     except Exception as exc:
+        # Only replace deletes, and a repeated replace removes the old and the new ones alike.
         raise InvalidArgument(
             f"the new objects were saved ({saved}), but deleting the {len(stale)} old shapes and "
-            f"tags failed: {explain(exc) or exc}. Do not repeat this call; delete the old ones "
-            "with delete_annotations"
+            f"tags failed: {explain(exc) or exc}; both are there now, and repeating the call "
+            "replaces them again"
         ) from exc
 
 
@@ -225,42 +230,6 @@ def remap(output, mapping, frame: int) -> list[tuple[str, object]]:
     return sent
 
 
-def _function_names(fn) -> dict[int, str]:
-    return {spec.id: spec.name for spec in fn.spec.labels}
-
-
-def _count(output, mapping, names: dict[int, str], progress: Progress) -> None:
-    """Counts the output per function label: added if label_map matched it, else skipped."""
-    for obj in output:
-        if obj.label_id in names:  # an unknown id is remap's (or the SDK's) error
-            counter = progress.added if mapping[obj.label_id] else progress.skipped
-            counter[names[obj.label_id]] += 1
-
-
-class _Counting:
-    """The function as annotate_task sees it: same spec, counting what it finds."""
-
-    def __init__(self, fn, mapping, progress: Progress):
-        self.spec = fn.spec
-        self._fn, self._mapping, self._progress = fn, mapping, progress
-        self._names = _function_names(fn)
-
-    def detect(self, context, image):
-        output = self._fn.detect(context, image)
-        _count(output, self._mapping, self._names, self._progress)
-        return output
-
-
-class _RunProgress(BaseProgressReporter):
-    def __init__(self, progress: Progress):
-        super().__init__()
-        self._progress = progress
-
-    def advance(self, delta: int):
-        super().advance(delta)
-        self._progress.frames_done += delta
-
-
 def _objects(sent, ids, names: dict[int, str]) -> list[AutoObject]:
     return [
         AutoObject(
@@ -275,11 +244,58 @@ def _objects(sent, ids, names: dict[int, str]) -> list[AutoObject]:
     ]
 
 
+def annotate(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    client: Client, scope: Scope, fn, mapping, labels, opts: RunOptions, frames, progress
+) -> None:
+    """Runs fn on frames, saving every FRAMES_PER_SAVE frames in one request. With replace, a
+    batch's old shapes and tags are deleted right after its new ones are saved."""
+    function_names = {spec.id: spec.name for spec in fn.spec.labels}
+    label_names = {label.id: label.name for label in labels}
+    # Fetched once, before any write, so no batch deletes what an earlier batch saved.
+    old = _old_objects(scope, frames) if opts.mode == "replace" else {}
+    for start in range(0, len(frames), FRAMES_PER_SAVE):
+        batch = frames[start : start + FRAMES_PER_SAVE]
+        sent = []
+        for frame in batch:
+            image = PIL.Image.open(scope.task.get_frame(frame, quality="original"))
+            # shortcut: built-in functions ignore frame_name; upgrade to the file name from the
+            # task meta if user-written functions are ever allowed
+            output = fn.detect(Context(str(frame), opts.conf_threshold, opts.polygons), image)
+            for obj in output:  # before remap rewrites label_id; an unknown id is remap's error
+                if obj.label_id in mapping and mapping[obj.label_id] is None:
+                    progress.skipped[function_names[obj.label_id]] += 1
+            sent += remap(output, mapping, frame)
+        ids = create_objects(client, scope, sent) if sent else []
+        progress.frames_done += len(batch)
+        progress.added.update(label_names[r.label_id] for _, r in sent)
+        if progress.keep_objects:
+            progress.objects += _objects(sent, ids, label_names)
+        if stale := [item for frame in batch for item in old.get(frame, [])]:
+            saved = (
+                f"object ids {', '.join(map(str, ids)) or 'none'}"
+                if progress.keep_objects
+                else f"frames {batch[0]} to {batch[-1]}"
+            )
+            _delete_stale(client, scope, stale, saved)
+
+
+def _saved(progress: Progress, frames: list[int], opts: RunOptions) -> str:
+    """What a failed run left in CVAT, and what running it again does."""
+    if not progress.frames_done:
+        return "nothing was saved"
+    again = "replaces them again" if opts.mode == "replace" else "duplicates them"
+    return (
+        f"the first {progress.frames_done} of {len(frames)} frames (through frame "
+        f"{frames[progress.frames_done - 1]}) are saved; running it again {again}"
+    )
+
+
 # One model run at a time: the CPU is the bottleneck, and two runs would also double the memory.
 _LOCK = threading.Lock()
 _ACTIVE: str | None = None  # the background run holding the lock; None for a frame run
 
 
+# REVIEW: we should use context manager instead. It's more safe and ensure lock releasing.
 def _acquire(run_id: str | None = None) -> None:
     global _ACTIVE  # pylint: disable=global-statement
     if not _LOCK.acquire(blocking=False):
@@ -342,28 +358,17 @@ def auto_annotate_frame(
     try:
         fn = load_function(opts)
         mapping = label_map(fn, labels, opts.polygons)
-        image = PIL.Image.open(scope.task.get_frame(frame, quality="original"))
-        # shortcut: built-in functions ignore frame_name; upgrade to the file name from the task
-        # meta if user-written functions are ever allowed
-        output = fn.detect(Context(str(frame), opts.conf_threshold, opts.polygons), image)
-        _count(output, mapping, _function_names(fn), progress)
-        sent = remap(output, mapping, frame)
-        # Fetched before the create and deleted after it, so a failed create deletes nothing.
-        stale = _old_objects(scope, [frame]) if opts.mode == "replace" else []
-        ids = create_objects(client, scope, sent) if sent else []
-        if stale:
-            _delete_stale(client, scope, stale, f"object ids {', '.join(map(str, ids)) or 'none'}")
+        annotate(client, scope, fn, mapping, labels, opts, [frame], progress)
     finally:
         _release()
-    objects = _objects(sent, ids, {label.id: label.name for label in labels})
     return _answer(
         task_id,
         opts,
         started,
         frame=frame,
-        objects=objects,
+        objects=progress.objects,
         skipped=dict(progress.skipped),
-        note=_note(objects, progress, labels),
+        note=_note(progress.objects, progress, labels),
     )
 
 
@@ -371,10 +376,11 @@ class AutoAnnotationRuns(BaseModel):
     runs: list[AutoAnnotationRun]
     note: str = (
         "runs are kept in memory since the server started; a restart forgets them, and a run in "
-        "progress stops without saving anything (a run saves all its objects when it finishes)"
+        f"progress stops (it saves every {FRAMES_PER_SAVE} frames, and those stay in CVAT)"
     )
 
 
+# REVIEW: definitely it's not a production ready decision to remember all runs
 # shortcut: runs live in memory and are never pruned (a few hundred bytes each); persist them
 # if the server ever needs to resume runs after a restart.
 _RUNS: dict[str, tuple[AutoAnnotationRun, Progress]] = {}
@@ -399,46 +405,27 @@ def _run(  # pylint: disable=too-many-arguments,too-many-positional-arguments  #
     opts: RunOptions,
     fn,
     mapping,
+    labels,
     frames,
 ):
-    client = cache = None
+    client = None
     try:
-        # annotate_task downloads every image into the client's cache and never removes it; our
-        # own upload makes the cache stale anyway, so each run gets a directory that goes with it.
-        cache = tempfile.TemporaryDirectory(prefix="cvat-mcp-aa-")
+        # REVIEW: let's use context manager instead
         # Its own client: the request's client may close when the MCP session ends.
         client = client_factory()
-        client.config.cache_dir = Path(cache.name)
         scope = Scope(client.tasks.retrieve(run.task_id))
-        # Fetched before the upload and deleted only after it, so a failed run deletes nothing.
-        stale = _old_objects(scope, frames) if opts.mode == "replace" else []
-        try:
-            annotate_task(
-                client,
-                run.task_id,
-                _Counting(fn, mapping, progress),
-                pbar=_RunProgress(progress),
-                clear_existing=False,  # True would also delete the task's tracks
-                allow_unmatched_labels=True,
-                conf_threshold=opts.conf_threshold,
-                conv_mask_to_poly=opts.polygons,
-            )
-        except BadFunctionError as exc:
-            raise _misfit(str(exc)) from exc
-        if stale:
-            _delete_stale(client, scope, stale, "every frame of the run")
+        annotate(client, scope, fn, mapping, labels, opts, frames, progress)
         run.state = "finished"
     except Exception as exc:  # pylint: disable=broad-exception-caught  # recorded for the model
         logger.exception("auto-annotation run %s failed", run.run_id)
         run.state = "failed"
-        run.error = explain(exc) or f"{type(exc).__name__}: {exc}"
+        error = explain(exc) or f"{type(exc).__name__}: {exc}"
+        run.error = f"{error}; {_saved(progress, frames, opts)}"
     finally:
         run.finished = datetime.now(timezone.utc)
-        _release()  # first: a failing cleanup below must not keep every later call locked out
+        _release()  # first: a failing close below must not keep every later call locked out
         if client is not None:
             client.close()
-        if cache is not None:
-            cache.cleanup()
 
 
 def start_run(
@@ -451,11 +438,6 @@ def start_run(
     started = time.monotonic()
     scope = resolve_scope(client, task_id)
     task = scope.task
-    if str(task.data_original_chunk_type) != "imageset":
-        raise InvalidArgument(
-            f"task {task.id} stores a video; a whole-task run needs images (the SDK's "
-            "annotate_task), pass frame to annotate one frame at a time"
-        )
     frames = scope.frames()
     if not frames:
         raise InvalidArgument(f"task {task.id} has no frames to annotate")
@@ -478,12 +460,12 @@ def start_run(
         frames_total=len(frames),
         started=datetime.now(timezone.utc),
     )
-    progress = Progress()
+    progress = Progress(keep_objects=False)
     _RUNS[run_id] = (run, progress)
     answer = _snapshot(run_id)  # before the thread can change it
     threading.Thread(
         target=_run,
-        args=(run, progress, client_factory, opts, fn, mapping, frames),
+        args=(run, progress, client_factory, opts, fn, mapping, labels, frames),
         name=f"auto-annotation {run_id}",
         daemon=True,
     ).start()
