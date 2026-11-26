@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from cvat_mcp.config import resolve_in_workdir
 from cvat_mcp.errors import InvalidArgument, explain, is_refusal
 from cvat_mcp.services.annotation_edits import check_value
-from cvat_mcp.services.cloud_storages import cloud_source, keys_hint
+from cvat_mcp.services.cloud_storages import check_storage, cloud_source, keys_hint
 from cvat_mcp.services.issues import job_url
 from cvat_mcp.services.tasks import JobInfo, jobs_of
 from cvat_mcp.services.users import require_own, user_id
@@ -177,6 +177,7 @@ def create_task(
         _check_urls(urls)
         resources, resource_type = urls, ResourceType.REMOTE
     else:
+        check_storage(client, cloud_storage_id)  # before the task: a wrong id leaves nothing
         resources, pattern = cloud_source(cloud_path)
         resource_type = ResourceType.SHARE
         params |= {"cloud_storage_id": cloud_storage_id, "use_cache": True}

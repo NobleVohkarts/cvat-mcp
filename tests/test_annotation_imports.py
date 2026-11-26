@@ -3,7 +3,7 @@ from unittest.mock import Mock
 import pytest
 from cvat_sdk.api_client.exceptions import ApiException
 from cvat_sdk.core.exceptions import BackgroundRequestException
-from fakes import Obj, fake_task, gt_job, shape, tag
+from fakes import Obj, cloud_storage, fake_cloudstorages_api, fake_task, gt_job, shape, tag
 
 from cvat_mcp.errors import InvalidArgument, explain
 from cvat_mcp.services.annotation_imports import import_annotations
@@ -127,10 +127,11 @@ def test_zero_objects_adds_note(tmp_path):
 STARTED = (None, Obj(data=b'{"rq_id": "rq-1"}'))
 
 
-def _cloud_client(task, job=None, wait_error=None):
+def _cloud_client(task, job=None, wait_error=None, storages=(cloud_storage(1, "cvat"),)):
     client = _client(
         task,
         job,
+        cloudstorages_api=fake_cloudstorages_api(storages),
         jobs_api=Obj(create_annotations=Mock(return_value=STARTED)),
         tasks_api=Obj(create_annotations=Mock(return_value=STARTED)),
     )
@@ -187,6 +188,21 @@ def test_cloud_args_come_together(tmp_path, half):
     with pytest.raises(InvalidArgument, match="cloud_storage_id and cloud_path together"):
         _import(client, tmp_path, task_id=1, **half)
     client.tasks.retrieve.assert_not_called()
+
+
+def test_organization_storage_refused_before_the_import(tmp_path):
+    client = _cloud_client(_task(), storages=[cloud_storage(1, "cvat", org=5)])
+    with pytest.raises(InvalidArgument, match="cloud storage #1 belongs to an organization"):
+        _import(client, tmp_path, task_id=1, cloud_storage_id=1, cloud_path="a.json")
+    client.api_client.tasks_api.create_annotations.assert_not_called()
+
+
+def test_unknown_storage_refused_before_the_import(tmp_path):
+    client = _cloud_client(_task())
+    client.api_client.cloudstorages_api.retrieve = Mock(side_effect=ApiException(status=404))
+    with pytest.raises(InvalidArgument, match="no cloud storage #9.*list_cloud_storages"):
+        _import(client, tmp_path, task_id=1, cloud_storage_id=9, cloud_path="a.json")
+    client.api_client.tasks_api.create_annotations.assert_not_called()
 
 
 NO_MATCH = BackgroundRequestException("Could not match item id: 'x' with any task frame")

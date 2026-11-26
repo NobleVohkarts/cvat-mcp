@@ -4,7 +4,7 @@ import pytest
 from cvat_sdk.api_client.exceptions import ApiException
 from cvat_sdk.core.exceptions import BackgroundRequestException
 from cvat_sdk.core.proxies.tasks import ResourceType
-from fakes import Obj, fake_client, fake_cloudstorages_api
+from fakes import Obj, cloud_storage, fake_client, fake_cloudstorages_api
 
 from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.services.task_edits import (
@@ -73,13 +73,13 @@ JOB = Obj(
 )
 
 
-def _create_client(upload_error=None, remove_error=None):
+def _create_client(upload_error=None, remove_error=None, storages=(cloud_storage(1, "cvat"),)):
     task = Obj(id=5, name="Scratch", size=3, get_jobs=lambda: [JOB])
     task.upload_data = Mock(side_effect=upload_error)
     task.remove = Mock(side_effect=remove_error)
     client = Obj(
         tasks=Obj(create=Mock(return_value=task)),
-        api_client=Obj(cloudstorages_api=fake_cloudstorages_api()),  # no storage requests expected
+        api_client=Obj(cloudstorages_api=fake_cloudstorages_api(storages)),
     )
     return client, task
 
@@ -236,12 +236,20 @@ def test_background_failure_names_the_path(tmp_path):
     task.remove.assert_called_once()
 
 
-def test_unknown_storage_removes_the_task(tmp_path):
-    client, task = _create_client(ApiException(status=404))
-    with pytest.raises(ApiException):
+@pytest.mark.parametrize("status", [403, 404])
+def test_unknown_storage_refused_before_the_task(tmp_path, status):
+    client, _ = _create_client()
+    client.api_client.cloudstorages_api.retrieve = Mock(side_effect=ApiException(status=status))
+    with pytest.raises(InvalidArgument, match="no cloud storage #99.*list_cloud_storages"):
         _create(client, tmp_path, cloud_storage_id=99, cloud_path="street/")
-    task.remove.assert_called_once()
-    client.api_client.cloudstorages_api.destroy.assert_not_called()
+    client.tasks.create.assert_not_called()
+
+
+def test_organization_storage_refused_before_the_task(tmp_path):
+    client, _ = _create_client(storages=[cloud_storage(1, "cvat", org=5)])
+    with pytest.raises(InvalidArgument, match="cloud storage #1 belongs to an organization"):
+        _create(client, tmp_path, cloud_storage_id=1, cloud_path="street/")
+    client.tasks.create.assert_not_called()
 
 
 def test_unavailable_storage_points_at_its_keys(tmp_path):

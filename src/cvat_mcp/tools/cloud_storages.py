@@ -36,7 +36,7 @@ def create_cloud_storage(
     display_name: DisplayName | None = None,
 ) -> CloudStorageStatus:
     """Use to register an S3-compatible bucket in CVAT, only when the user asks: bucket is the
-    bucket name; endpoint_url is the S3 API endpoint of a host other than AWS (e.g.
+    bucket name; endpoint_url is the S3 API endpoint of a host other than AWS, host only (e.g.
     https://<account_id>.r2.cloudflarestorage.com for Cloudflare R2, or a MinIO or other
     S3-compatible server's URL), left out for AWS S3; region when the host needs one (an AWS
     bucket outside us-east-1, "auto" for R2). The whole bucket is registered; folders are chosen

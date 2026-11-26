@@ -114,6 +114,14 @@ def test_create_anonymous():
     assert _sent(api.create)["specific_attributes"] == "region=us-east-1"
 
 
+@pytest.mark.parametrize("blank", ["", "  "])
+def test_blank_endpoint_means_aws(blank):
+    client, api = _crud_client()
+    _new(client, "open-bucket", blank, key=None, secret=None)
+    sent = _sent(api.create)
+    assert (sent["specific_attributes"], sent["display_name"]) == ("", "open-bucket (AWS S3)")
+
+
 def test_endpoint_used_as_given():
     client, api = _crud_client()
     _new(client, "data", "http://minio.local:9000/")
@@ -163,6 +171,8 @@ def test_create_not_a_repeat(existing):
         ({"endpoint_url": "https://AK:SK@e.com"}, "credentials"),
         ({"endpoint_url": "ftp://e.com"}, "http"),
         ({"endpoint_url": "https://"}, "http"),
+        ({"endpoint_url": f"{R2}/cvat"}, "host only"),  # the R2 dashboard shows this form
+        ({"endpoint_url": "https://e.com/?x=1"}, "host only"),
     ],
 )
 def test_create_refusals_send_nothing(args, match):

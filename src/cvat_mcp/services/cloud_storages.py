@@ -117,10 +117,10 @@ def _with_status(client: Client, storage, base_url: str) -> CloudStorageStatus:
 
 
 def _endpoint(endpoint_url: str | None) -> str | None:
-    """The endpoint as given, without a trailing "/"; None means AWS itself."""
-    if endpoint_url is None:
+    """The endpoint as given, without a trailing "/"; None or blank means AWS itself."""
+    endpoint_url = (endpoint_url or "").strip()
+    if not endpoint_url:  # models often send "" for an optional argument
         return None
-    endpoint_url = endpoint_url.strip()
     parts = urlsplit(endpoint_url)
     if parts.scheme not in ("http", "https") or not parts.hostname:
         raise InvalidArgument(
@@ -128,6 +128,11 @@ def _endpoint(endpoint_url: str | None) -> str | None:
         )
     if parts.username or parts.password:
         raise InvalidArgument("don't put credentials in endpoint_url: pass the keys as arguments")
+    if parts.path.strip("/") or parts.query or parts.fragment:  # e.g. R2's ".../<bucket>"
+        raise InvalidArgument(
+            "endpoint_url is the host only (https://<host>[:port]): pass the bucket as bucket "
+            "and folders as cloud_path"
+        )
     return endpoint_url.rstrip("/")
 
 
@@ -253,6 +258,24 @@ def cloud_source(key: str) -> CloudSource:
     # CVAT expands "folder/" by listing only that prefix (recursively); a filename_pattern
     # makes it list the whole bucket first, which is slow on big buckets.
     return CloudSource([f"{folder}/"], None) if folder else CloudSource([], "*")
+
+
+def check_storage(client: Client, storage_id: int) -> None:
+    """Refuse a storage this account can't use for its personal-workspace tasks."""
+    try:
+        storage, _ = client.api_client.cloudstorages_api.retrieve(storage_id)
+    except ApiException as exc:
+        if exc.status not in (403, 404):
+            raise
+        raise InvalidArgument(
+            f"no cloud storage #{storage_id} this account can use: find the bucket's id with "
+            "list_cloud_storages"
+        ) from None
+    if storage.organization is not None:
+        raise InvalidArgument(
+            f"cloud storage #{storage_id} belongs to an organization, and this server works in "
+            "the personal workspace: register the bucket there with create_cloud_storage"
+        )
 
 
 def keys_hint(storage_id: int) -> str:

@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from cvat_mcp.config import resolve_in_workdir
 from cvat_mcp.errors import InvalidArgument, explain, is_refusal
-from cvat_mcp.services.cloud_storages import cloud_source, keys_hint
+from cvat_mcp.services.cloud_storages import check_storage, cloud_source, keys_hint
 from cvat_mcp.services.exports import check_format
 
 Mode = Literal["append", "replace"]
@@ -70,6 +70,8 @@ def import_annotations(
     if (cloud_path is None) == (file is None):
         raise InvalidArgument("pass exactly one of cloud_storage_id + cloud_path, or file")
     key = _object_key(cloud_path) if cloud_path is not None else None
+    if cloud_storage_id is not None:
+        check_storage(client, cloud_storage_id)
     path = _local_file(workdir, file) if file is not None else None
     # a job knows its task and dimension: no task request for a job target
     target = client.jobs.retrieve(job_id) if job_id is not None else client.tasks.retrieve(task_id)
