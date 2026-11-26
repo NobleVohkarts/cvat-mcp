@@ -120,14 +120,15 @@ def _endpoint(endpoint_url: str | None) -> str | None:
     """The endpoint as given, without a trailing "/"; None means AWS itself."""
     if endpoint_url is None:
         return None
-    parts = urlsplit(endpoint_url.strip())
+    endpoint_url = endpoint_url.strip()
+    parts = urlsplit(endpoint_url)
     if parts.scheme not in ("http", "https") or not parts.hostname:
         raise InvalidArgument(
             "endpoint_url must be an http(s) URL of the S3 API, e.g. https://<host>"
         )
     if parts.username or parts.password:
         raise InvalidArgument("don't put credentials in endpoint_url: pass the keys as arguments")
-    return endpoint_url.strip().rstrip("/")
+    return endpoint_url.rstrip("/")
 
 
 def _repeat(client: Client, bucket: str, endpoint: str | None):
@@ -237,7 +238,7 @@ class CloudSource(NamedTuple):
 
 
 def cloud_source(key: str) -> CloudSource:
-    """What a link's key part selects: a glob, one object, or a folder (recursively)."""
+    """What a cloud_path selects: a glob, one object, or a folder (recursively)."""
     if any(c in key for c in "*?"):  # not "[": keys like "shots[2024]/" contain it
         return CloudSource([], key)
     if "." in key.rsplit("/", 1)[-1]:  # a file name; "street" (no extension) is a folder

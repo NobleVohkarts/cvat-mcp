@@ -51,9 +51,7 @@ def create_task(
     cloud_path: an object key, a folder or a glob in that bucket; a folder is taken
     recursively, a path without a file extension counts as a folder (end a dotted folder name
     like v1.2 with /), * and ? are globs and * also matches across folders; an empty cloud_path
-    lists the whole bucket, which is slow on big buckets). A bucket that has no cloud storage
-    yet is registered first with create_cloud_storage, only when the user asks. Frames are
-    named by their full key. Use cloud_storage_id + cloud_path, not urls, for bucket objects.
+    lists the whole bucket, which is slow on big buckets). Frames are named by their full key. Use cloud_storage_id + cloud_path, not urls, for bucket objects.
     Labels are given inline or taken from a project (project_id). Waits until CVAT has
     processed the data; if it fails, no task is left behind. Returns the task id, frame count,
     jobs, the cloud storage id and a CVAT UI link."""
