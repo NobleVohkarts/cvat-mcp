@@ -29,7 +29,6 @@ importlib.util.find_spec = lambda name, package=None: None if name in hidden els
 READ_TOOLS = [
     "create_report",
     "download_annotations",
-    "export_dataset",
     "get_frame_annotations",
     "get_task_overview",
     "list_cloud_storages",
@@ -102,6 +101,7 @@ def test_write_mode_adds_write_tools(monkeypatch):
         "delete_gt_job",
         "delete_issue",
         "delete_task",
+        "export_dataset",
         "import_annotations",
         "update_annotations",
         "update_cloud_storage",
@@ -120,6 +120,7 @@ def test_write_mode_adds_write_tools(monkeypatch):
         "delete_gt_job",
         "delete_issue",
         "delete_task",
+        "export_dataset",  # overwrite=true replaces an object in the bucket
         "import_annotations",  # mode="replace" deletes the target's annotations first
     ]
     assert "update_job" in result["instructions"]
@@ -143,11 +144,14 @@ def test_write_mode_adds_write_tools(monkeypatch):
     assert sorted(result["open_world"]) == AA_WRITE + [  # first use downloads model weights
         "create_cloud_storage",
         "create_task",
+        "export_dataset",  # CVAT writes into the bucket
         "import_annotations",  # CVAT reads the file from the bucket
         "update_cloud_storage",  # CVAT re-checks the bucket on every update
     ]
     assert "import_annotations" in result["instructions"]
     assert "appends unless" in result["instructions"]
+    assert "export_dataset" in result["instructions"]
+    assert "ask the user before overwrite" in result["instructions"]
     assert "keys go only to create_cloud_storage and update_cloud_storage" in result["instructions"]
     assert "never repeat keys" in result["instructions"]
     assert "list_cloud_storages for the bucket's id" in result["instructions"]

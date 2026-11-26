@@ -37,7 +37,9 @@ def test_check_format_import_direction_reads_importers():
 
 def _client(content=(), storage=None, upload_error=None):
     """Task 7 (2d) and cloud storage #1 whose listing holds `content` ((name, type) pairs)."""
-    task = Obj(id=7, dimension="2d", export_dataset=Mock(return_value=None, side_effect=upload_error))
+    task = Obj(
+        id=7, dimension="2d", export_dataset=Mock(return_value=None, side_effect=upload_error)
+    )
     listing = Mock(
         return_value=(Obj(content=[Obj(name=n, type=t) for n, t in content], next=None), None)
     )

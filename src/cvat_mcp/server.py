@@ -98,11 +98,14 @@ if WRITE_MODE:
         "; register, change or delete cloud storages (create_cloud_storage, "
         "update_cloud_storage, delete_cloud_storage) only when the user asks; keys go only to "
         "create_cloud_storage and update_cloud_storage, never repeat keys back"
-        "; to use a bucket (create_task, import_annotations), list_cloud_storages for the "
+        "; to use a bucket (create_task, import_annotations, export_dataset), "
+        "list_cloud_storages for the "
         "bucket's id and pass it with cloud_path; register a missing bucket only when the user "
         "asks"
         "; import annotation files (import_annotations) only when the user asks; it appends "
-        "unless the user asks to replace" + AUTO_ANNOTATION_STEPS
+        "unless the user asks to replace"
+        "; export datasets (export_dataset) into a bucket only when the user asks; it refuses "
+        "an existing cloud_path: ask the user before overwrite=true" + AUTO_ANNOTATION_STEPS
     )
     READ_ONLY_NOTE = ""
 else:

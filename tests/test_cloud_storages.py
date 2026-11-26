@@ -298,7 +298,13 @@ def test_cloud_source(key, expected):
 def _listing(*pages):
     """retrieve_content_v2 returning `pages` in turn; each page is a list of (name, type)."""
     replies = [
-        (Obj(content=[Obj(name=n, type=t) for n, t in page], next=str(i + 1) if i + 1 < len(pages) else None), None)
+        (
+            Obj(
+                content=[Obj(name=n, type=t) for n, t in page],
+                next=str(i + 1) if i + 1 < len(pages) else None,
+            ),
+            None,
+        )
         for i, page in enumerate(pages)
     ]
     return Mock(side_effect=replies)
