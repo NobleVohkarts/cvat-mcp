@@ -45,7 +45,8 @@ open_world = [t.name for t in tools if t.annotations.open_world_hint]
 with_job_id = [t.name for t in tools if "job_id" in t.input_schema.get("properties", {})]
 print(json.dumps({
     "tools": sorted(s.REGISTERED_TOOLS), "instructions": s.INSTRUCTIONS, "destructive": destructive,
-    "open_world": open_world, "with_job_id": with_job_id
+    "open_world": open_world, "with_job_id": with_job_id,
+    "descriptions": " ".join(t.description or "" for t in tools),
 }))
 """
 
@@ -157,6 +158,8 @@ def test_write_mode_adds_write_tools(monkeypatch):
     assert "list_cloud_storages for the bucket's id" in result["instructions"]
     assert "disabled" not in result["instructions"]
     assert ("get_auto_annotation_run" in result["instructions"]) == AUTO_ANNOTATION
+    for text in (result["instructions"], result["descriptions"]):  # no local files any more
+        assert "work directory" not in text and "WORKDIR" not in text
 
 
 def test_write_mode_without_the_extra_has_no_auto_annotation(monkeypatch):
