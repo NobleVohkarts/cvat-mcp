@@ -140,20 +140,18 @@ def delete_annotations(
 @tool(write=True, destructive_hint=True, open_world_hint=True)
 def import_annotations(
     ctx: Context,
+    cloud_storage_id: int,
+    cloud_path: str,
     job_id: int | None = None,
     task_id: int | None = None,
-    cloud_storage_id: int | None = None,
-    cloud_path: str | None = None,
-    file: str | None = None,
     format: str = DEFAULT_FORMAT,  # pylint: disable=redefined-builtin  # CVAT's name for it
     mode: Mode = "append",
 ) -> ImportedAnnotations:
     """Use to load an annotation file into CVAT, only when the user asks: into a job (job_id: an
-    annotation or ground-truth job) or a whole task (task_id). The file is either in a CVAT
-    cloud storage (cloud_storage_id from list_cloud_storages or create_cloud_storage, with
+    annotation or ground-truth job) or a whole task (task_id). The file is in a CVAT cloud
+    storage (cloud_storage_id from list_cloud_storages or create_cloud_storage, with
     cloud_path: the object key of one file, e.g. annotations/labels.json; CVAT reads it through
-    the storage), or file, a path in the server's work directory. format is
-    any CVAT import format (default COCO 1.0). The image file names in the file must match the
+    the storage). format is any CVAT import format (default COCO 1.0). The image file names in the file must match the
     task's frame names (a missing folder prefix is fine); a ground-truth job keeps only its own
     frames, so a file for all images works. mode "append" adds to the annotations already there
     (importing the same file twice duplicates the objects); "replace" first deletes all the
@@ -162,12 +160,10 @@ def import_annotations(
     it); wait for the answer instead of calling again."""
     return annotation_imports.import_annotations(
         get_client(ctx),
-        settings.mcp_workdir,
         job_id,
         task_id,
         cloud_storage_id,
         cloud_path,
-        file,
         format,
         mode,
     )
