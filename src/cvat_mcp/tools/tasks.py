@@ -48,10 +48,10 @@ def create_task(
     server's work directory (folders expand recursively, hidden files skipped; all images are
     sorted by name in natural order, file names must be unique), from http(s) URLs, or from a
     CVAT cloud storage (cloud_storage_id from list_cloud_storages or create_cloud_storage, with
-    cloud_path: an object key, a folder or a glob from the bucket root; a folder is taken
-    recursively, a path without a file extension counts as a folder (end a dotted folder name
-    like v1.2 with /), * and ? are globs and * also matches across folders; an empty cloud_path
-    lists the whole bucket, which is slow on big buckets).
+    cloud_path: an object key, a folder or a glob from the bucket root, also for a storage
+    with a prefix; a folder is taken recursively, a path without a file extension counts as a
+    folder (end a dotted folder name like v1.2 with /), * and ? are globs and * also matches
+    across folders; an empty cloud_path lists the whole bucket, which is slow on big buckets).
     Frames are named by their full key. Use cloud_storage_id + cloud_path, not urls, for bucket
     objects. Labels are given inline or taken from a project (project_id). Waits until CVAT has
     processed the data; if it fails, no task is left behind. Returns the task id, frame count,
