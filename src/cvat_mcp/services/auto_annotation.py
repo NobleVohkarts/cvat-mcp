@@ -1,3 +1,4 @@
+import fnmatch
 import importlib
 import itertools
 import logging
@@ -24,19 +25,46 @@ from cvat_mcp.services.annotation_edits import (
 )
 from cvat_mcp.services.annotations import Scope, shape_bbox, target_scope
 
-Function = Literal["detection", "instance_segmentation", "keypoint_detection", "classification"]
+Output = Literal["boxes", "polygons", "masks", "skeletons", "tags"]
 Mode = Literal["append", "replace"]
 
-# REVIEW: why do we need these predefine models? have we documented it? how would mcp server caller know about this feature?
-DEFAULT_MODELS: dict[str, str] = {
-    "detection": "fasterrcnn_resnet50_fpn_v2",
-    "instance_segmentation": "maskrcnn_resnet50_fpn_v2",
-    "keypoint_detection": "keypointrcnn_resnet50_fpn",
-    "classification": "resnet50",
+
+@dataclass(frozen=True)
+class _OutputSpec:
+    function: str  # the SDK's built-in function: cvat_sdk.auto_annotation.functions.torchvision_*
+    default: str  # its model when the caller names none
+    models: str | None  # fnmatch pattern over torchvision's detection models; None: classification
+    polygons: bool  # masks converted to polygons
+
+
+OUTPUTS: dict[str, _OutputSpec] = {
+    "boxes": _OutputSpec("detection", "fasterrcnn_resnet50_fpn_v2", "*", False),
+    "polygons": _OutputSpec(
+        "instance_segmentation", "maskrcnn_resnet50_fpn_v2", "maskrcnn_*", True
+    ),
+    "masks": _OutputSpec("instance_segmentation", "maskrcnn_resnet50_fpn_v2", "maskrcnn_*", False),
+    "skeletons": _OutputSpec(
+        "keypoint_detection", "keypointrcnn_resnet50_fpn", "keypointrcnn_*", False
+    ),
+    "tags": _OutputSpec("classification", "resnet50", None, False),
 }
-# Detection models that also fit the segmentation / keypoint functions.
-# REVIEW: why do we split a model map in two dict? Even if it's a part of model name it's better to use one structure with some flag or wildcard in the name
-_MODEL_PART = {"instance_segmentation": "maskrcnn", "keypoint_detection": "keypointrcnn"}
+
+# torchvision.models.list_models(module=torchvision.models.detection), for the tool's description
+# (torchvision is an optional extra); a test keeps it in step with the installed torchvision.
+DETECTION_MODELS = (
+    "fasterrcnn_mobilenet_v3_large_320_fpn",
+    "fasterrcnn_mobilenet_v3_large_fpn",
+    "fasterrcnn_resnet50_fpn",
+    "fasterrcnn_resnet50_fpn_v2",
+    "fcos_resnet50_fpn",
+    "keypointrcnn_resnet50_fpn",
+    "maskrcnn_resnet50_fpn",
+    "maskrcnn_resnet50_fpn_v2",
+    "retinanet_resnet50_fpn",
+    "retinanet_resnet50_fpn_v2",
+    "ssd300_vgg16",
+    "ssdlite320_mobilenet_v3_large",
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,11 +74,14 @@ FRAMES_PER_SAVE = 10
 
 @dataclass(frozen=True)
 class RunOptions:
-    function: Function
+    output: Output
     model: str
     conf_threshold: float
-    polygons: bool
     mode: Mode
+
+    @property
+    def spec(self) -> _OutputSpec:
+        return OUTPUTS[self.output]
 
 
 # slots: the generated slot descriptors implement the interface's abstract properties
@@ -74,7 +105,7 @@ class AutoAnnotationRun(BaseModel):
     run_id: str
     state: Literal["running", "finished", "failed"]
     task_id: int
-    function: str
+    output: str
     model: str
     mode: str
     frames_total: int
@@ -88,7 +119,7 @@ class AutoAnnotationRun(BaseModel):
 
 class AutoAnnotation(BaseModel):
     task_id: int
-    function: str
+    output: str
     model: str
     mode: str
     frame: int | None = None
@@ -109,22 +140,20 @@ class Progress:
 
 
 def check_options(
-    function: Function, model: str | None, conf_threshold: float, polygons: bool, mode: Mode
+    output: Output, model: str | None, conf_threshold: float, mode: Mode
 ) -> RunOptions:
     if not 0 <= conf_threshold <= 1:
         raise InvalidArgument("conf_threshold must be between 0 and 1")
-    return RunOptions(function, model or DEFAULT_MODELS[function], conf_threshold, polygons, mode)
+    return RunOptions(output, model or OUTPUTS[output].default, conf_threshold, mode)
 
 
-def _model_choices(function: str) -> list[str]:
+def _model_choices(spec: _OutputSpec) -> list[str]:
     import torchvision.models  # pylint: disable=import-outside-toplevel  # optional extra
 
-    if function == "classification":
+    if spec.models is None:
         return torchvision.models.list_models(module=torchvision.models)
-    part = _MODEL_PART.get(function, "")
-    return [
-        m for m in torchvision.models.list_models(module=torchvision.models.detection) if part in m
-    ]
+    detection = torchvision.models.list_models(module=torchvision.models.detection)
+    return fnmatch.filter(detection, spec.models)
 
 
 # REVIEW: it seems like a cache for me, why don't it instead?
@@ -134,13 +163,13 @@ _loaded: tuple[tuple[str, str], object] | None = None
 def load_function(opts: RunOptions):
     """The built-in function with that model; the last one used stays loaded."""
     global _loaded  # pylint: disable=global-statement
-    key = (opts.function, opts.model)
+    key = (opts.spec.function, opts.model)
     if _loaded is not None and _loaded[0] == key:
         return _loaded[1]
-    choices = _model_choices(opts.function)
+    choices = _model_choices(opts.spec)
     if opts.model not in choices:
         raise InvalidArgument(
-            f"unknown {opts.function} model {opts.model!r}; choose one of: {', '.join(choices)}"
+            f"model {opts.model!r} does not give {opts.output}; choose one of: {', '.join(choices)}"
         )
     _loaded = None  # free the old model before loading the new one
     module = importlib.import_module(f"cvat_sdk.auto_annotation.functions.torchvision_{key[0]}")
@@ -177,7 +206,7 @@ def _delete_stale(client: Client, scope: Scope, stale: list, saved: str) -> None
 def _misfit(detail: str) -> InvalidArgument:
     return InvalidArgument(
         f"the model's output does not fit this task's labels: {detail}. The task's label types "
-        "must fit what the function outputs (e.g. a skeleton label for keypoint_detection, or "
+        "must fit what the function outputs (e.g. a skeleton label for output skeletons, or "
         "type any)"
     )
 
@@ -260,7 +289,7 @@ def annotate(  # pylint: disable=too-many-arguments,too-many-positional-argument
             image = PIL.Image.open(scope.task.get_frame(frame, quality="original"))
             # shortcut: built-in functions ignore frame_name; upgrade to the file name from the
             # task meta if user-written functions are ever allowed
-            output = fn.detect(Context(str(frame), opts.conf_threshold, opts.polygons), image)
+            output = fn.detect(Context(str(frame), opts.conf_threshold, opts.spec.polygons), image)
             for obj in output:  # before remap rewrites label_id; an unknown id is remap's error
                 if obj.label_id in mapping and mapping[obj.label_id] is None:
                     progress.skipped[function_names[obj.label_id]] += 1
@@ -327,7 +356,7 @@ def resolve_scope(client: Client, task_id: int) -> Scope:
 def _answer(task_id: int, opts: RunOptions, started: float, **rest) -> AutoAnnotation:
     return AutoAnnotation(
         task_id=task_id,
-        function=opts.function,
+        output=opts.output,
         model=opts.model,
         mode=opts.mode,
         seconds=round(time.monotonic() - started, 1),
@@ -357,7 +386,7 @@ def auto_annotate_frame(
     _acquire()
     try:
         fn = load_function(opts)
-        mapping = label_map(fn, labels, opts.polygons)
+        mapping = label_map(fn, labels, opts.spec.polygons)
         annotate(client, scope, fn, mapping, labels, opts, [frame], progress)
     finally:
         _release()
@@ -446,7 +475,7 @@ def start_run(
     _acquire(run_id)
     try:
         fn = load_function(opts)  # in this thread, so a bad model or download fails the call
-        mapping = label_map(fn, labels, opts.polygons)  # and so does a model that doesn't fit
+        mapping = label_map(fn, labels, opts.spec.polygons)  # and a model that doesn't fit
     except BaseException:
         _release()
         raise
@@ -454,7 +483,7 @@ def start_run(
         run_id=run_id,
         state="running",
         task_id=task.id,
-        function=opts.function,
+        output=opts.output,
         model=opts.model,
         mode=opts.mode,
         frames_total=len(frames),

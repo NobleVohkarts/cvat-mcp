@@ -116,10 +116,9 @@ def _opts(**kw):
     return aa.check_options(
         **(
             {
-                "function": "detection",
+                "output": "boxes",
                 "model": None,
                 "conf_threshold": 0.5,
-                "polygons": True,
                 "mode": "append",
             }
             | kw
@@ -225,7 +224,7 @@ def test_frame_returns_objects(use_function):
     assert result.objects[0].bbox == [10, 10, 50, 40]
     assert result.skipped == {"bench": 1}
     assert (result.task_id, result.mode, result.run) == (1, "append", None)
-    assert result.model == "fasterrcnn_resnet50_fpn_v2"
+    assert (result.output, result.model) == ("boxes", "fasterrcnn_resnet50_fpn_v2")
     assert result.note is None
     assert all(s.source == "auto" for r in _sent(api) for s in r.shapes)
 
@@ -233,10 +232,18 @@ def test_frame_returns_objects(use_function):
 def test_frame_passes_threshold_and_polygons(use_function):
     fn = use_function(FakeFunction())
     client, _, _ = _setup()
-    aa.auto_annotate_frame(client, 1, 0, _opts(conf_threshold=0.7))
+    aa.auto_annotate_frame(client, 1, 0, _opts(output="polygons", conf_threshold=0.7))
     (context,) = fn.contexts
     assert isinstance(context, cvataa.DetectionFunctionContext)
     assert (context.conf_threshold, context.conv_mask_to_poly) == (0.7, True)
+
+
+def test_masks_output_keeps_masks(use_function):
+    fn = use_function(FakeFunction())
+    client, _, _ = _setup()
+    aa.auto_annotate_frame(client, 1, 0, _opts(output="masks"))
+    (context,) = fn.contexts
+    assert context.conv_mask_to_poly is False
 
 
 def test_frame_replace_clears_only_that_frame(use_function):
@@ -405,7 +412,7 @@ def test_background_run_saves_in_batches(use_function, batches_of_2):
 
 def test_background_run_passes_threshold_and_polygons(use_function):
     fn = FakeFunction()
-    result, _, _, _ = _start(fn, use_function, _opts(conf_threshold=0.7))
+    result, _, _, _ = _start(fn, use_function, _opts(output="polygons", conf_threshold=0.7))
     _finish(result.run.run_id)
     assert {(c.conf_threshold, c.conv_mask_to_poly) for c in fn.contexts} == {(0.7, True)}
 
@@ -589,15 +596,46 @@ def test_check_options_threshold_out_of_range():
         _opts(conf_threshold=1.5)
 
 
-@pytest.mark.parametrize("function, model", list(aa.DEFAULT_MODELS.items()))
-def test_check_options_default_model(function, model):
-    assert _opts(function=function).model == model
+def test_outputs_table():
+    assert {o: (s.function, s.default, s.models, s.polygons) for o, s in aa.OUTPUTS.items()} == {
+        "boxes": ("detection", "fasterrcnn_resnet50_fpn_v2", "*", False),
+        "polygons": ("instance_segmentation", "maskrcnn_resnet50_fpn_v2", "maskrcnn_*", True),
+        "masks": ("instance_segmentation", "maskrcnn_resnet50_fpn_v2", "maskrcnn_*", False),
+        "skeletons": ("keypoint_detection", "keypointrcnn_resnet50_fpn", "keypointrcnn_*", False),
+        "tags": ("classification", "resnet50", None, False),
+    }
 
 
-@pytest.mark.skipif(find_spec("torchvision") is None, reason="needs the auto-annotation extra")
+@pytest.mark.parametrize("output", list(aa.OUTPUTS))
+def test_check_options_default_model(output):
+    opts = _opts(output=output)
+    assert (opts.model, opts.spec) == (aa.OUTPUTS[output].default, aa.OUTPUTS[output])
+
+
+needs_torchvision = pytest.mark.skipif(
+    find_spec("torchvision") is None, reason="needs the auto-annotation extra"
+)
+
+
+@needs_torchvision
 def test_unknown_model_lists_choices():
     with pytest.raises(InvalidArgument, match="maskrcnn_resnet50_fpn_v2"):
-        aa.load_function(_opts(function="instance_segmentation", model="nope"))
+        aa.load_function(_opts(output="masks", model="nope"))
+
+
+@needs_torchvision
+def test_model_must_fit_output():
+    with pytest.raises(InvalidArgument, match="maskrcnn_resnet50_fpn_v2") as error:
+        aa.load_function(_opts(output="polygons", model="fasterrcnn_resnet50_fpn_v2"))
+    assert "fasterrcnn_resnet50_fpn_v2 " not in str(error.value).split("choose")[1]
+
+
+@needs_torchvision
+def test_model_description_matches_torchvision():
+    import torchvision.models  # pylint: disable=import-outside-toplevel  # optional extra
+
+    detection = torchvision.models.list_models(module=torchvision.models.detection)
+    assert set(aa.DETECTION_MODELS) == set(detection)
 
 
 # --- the tool layer ---
