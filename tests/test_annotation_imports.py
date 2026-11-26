@@ -3,7 +3,7 @@ from unittest.mock import Mock
 import pytest
 from cvat_sdk.api_client.exceptions import ApiException
 from cvat_sdk.core.exceptions import BackgroundRequestException
-from fakes import Obj, cloud_storage, fake_cloudstorages_api, fake_task, gt_job, shape, tag
+from fakes import Obj, fake_task, gt_job, shape, tag
 
 from cvat_mcp.errors import InvalidArgument, explain
 from cvat_mcp.services.annotation_imports import import_annotations
@@ -35,7 +35,8 @@ def _import(client, workdir, **kw):
     args = {
         "job_id": None,
         "task_id": None,
-        "cloud_url": None,
+        "cloud_storage_id": None,
+        "cloud_path": None,
         "file": None,
         "format_name": "COCO 1.0",
         "mode": "append",
@@ -51,10 +52,12 @@ def test_needs_exactly_one_target(tmp_path, target):
     client.tasks.retrieve.assert_not_called()
 
 
-@pytest.mark.parametrize("source", [{}, {"file": "a.json", "cloud_url": "s3://b/a.json"}])
+@pytest.mark.parametrize(
+    "source", [{}, {"file": "a.json", "cloud_storage_id": 1, "cloud_path": "a.json"}]
+)
 def test_needs_exactly_one_source(tmp_path, source):
     client = _client(_task())
-    with pytest.raises(InvalidArgument, match="exactly one of cloud_url or file"):
+    with pytest.raises(InvalidArgument, match="exactly one of cloud_storage_id"):
         _import(client, tmp_path, task_id=1, **source)
     client.tasks.retrieve.assert_not_called()
 
@@ -78,7 +81,7 @@ def test_local_file_imports_into_task(tmp_path):
     assert (result.task_id, result.job_id, result.source) == (1, None, "labels.json")
     assert (result.format, result.mode) == ("COCO 1.0", "append")
     assert (result.shapes, result.tracks, result.tags) == (2, 0, 1)
-    assert result.cloud_storage_id is None and result.cloud_storage_registered is False
+    assert result.cloud_storage_id is None
     assert result.note is None
 
 
@@ -121,22 +124,16 @@ def test_zero_objects_adds_note(tmp_path):
     assert "file names" in result.note and "frame names" in result.note
 
 
-R2 = "https://abc.r2.cloudflarestorage.com"
-STORAGE_1 = cloud_storage(1, "cvat", f"endpoint_url={R2}&region=auto")
 STARTED = (None, Obj(data=b'{"rq_id": "rq-1"}'))
 
 
-def _cloud_client(task, job=None, storages=(STORAGE_1,), wait_error=None):
-    storages_api = fake_cloudstorages_api(storages)
-    storages_api.create.return_value = (cloud_storage(7, "open-bucket"), None)
+def _cloud_client(task, job=None, wait_error=None):
     client = _client(
         task,
         job,
-        cloudstorages_api=storages_api,
         jobs_api=Obj(create_annotations=Mock(return_value=STARTED)),
         tasks_api=Obj(create_annotations=Mock(return_value=STARTED)),
     )
-    client.users = Obj(retrieve_current_user=lambda: Obj(id=1))
     client.wait_for_completion = Mock(side_effect=wait_error)
     return client
 
@@ -144,7 +141,9 @@ def _cloud_client(task, job=None, storages=(STORAGE_1,), wait_error=None):
 def test_cloud_import_into_gt_job_uses_storage(tmp_path):
     job = gt_job(shapes=[SHAPES[0]], dimension="2d")
     client = _cloud_client(_task(), job)
-    result = _import(client, tmp_path, job_id=30, cloud_url=f"{R2}/cvat/annotations/street.json")
+    result = _import(
+        client, tmp_path, job_id=30, cloud_storage_id=1, cloud_path="annotations/street.json"
+    )
     client.api_client.jobs_api.create_annotations.assert_called_once_with(
         30,
         format="COCO 1.0",
@@ -156,55 +155,49 @@ def test_cloud_import_into_gt_job_uses_storage(tmp_path):
     )
     client.wait_for_completion.assert_called_once_with("rq-1", status_check_period=1)
     client.api_client.tasks_api.create_annotations.assert_not_called()
-    client.api_client.cloudstorages_api.create.assert_not_called()
-    assert (result.cloud_storage_id, result.cloud_storage_registered) == (1, False)
+    assert result.cloud_storage_id == 1
     assert (result.job_id, result.shapes) == (30, 1)
-    assert result.source == f"{R2}/cvat/annotations/street.json"
+    assert result.source == "annotations/street.json"
 
 
 def test_cloud_import_into_task_uses_tasks_api(tmp_path):
     client = _cloud_client(_task())
-    result = _import(client, tmp_path, task_id=1, cloud_url=f"{R2}/cvat/a.json", mode="replace")
+    result = _import(
+        client, tmp_path, task_id=1, cloud_storage_id=1, cloud_path="a.json", mode="replace"
+    )
     (task_id,), kwargs = client.api_client.tasks_api.create_annotations.call_args
     assert (task_id, kwargs["filename"], kwargs["import_mode"]) == (1, "a.json", "replace")
     client.api_client.jobs_api.create_annotations.assert_not_called()
     assert result.shapes == 2
 
 
-@pytest.mark.parametrize(
-    "url", [f"{R2}/cvat/street/", f"{R2}/cvat/street", f"{R2}/cvat/*.json", f"{R2}/cvat"]
-)
-def test_cloud_url_must_name_one_object(tmp_path, url):
+@pytest.mark.parametrize("path", ["street/", "street", "*.json", ""])
+def test_cloud_path_must_name_one_object(tmp_path, path):
     client = _cloud_client(_task())
-    with pytest.raises(InvalidArgument, match="one annotation file"):
-        _import(client, tmp_path, task_id=1, cloud_url=url)
+    with pytest.raises(InvalidArgument, match="cloud_path must name one annotation file"):
+        _import(client, tmp_path, task_id=1, cloud_storage_id=1, cloud_path=path)
     client.api_client.tasks_api.create_annotations.assert_not_called()
-    client.api_client.cloudstorages_api.list.assert_not_called()
+    client.tasks.retrieve.assert_not_called()  # checked before any request
+    client.jobs.retrieve.assert_not_called()
 
 
-def test_public_bucket_is_registered_without_keys(tmp_path):
-    client = _cloud_client(_task(), storages=())
-    result = _import(client, tmp_path, task_id=1, cloud_url="s3://open-bucket/labels.json")
-    assert (result.cloud_storage_id, result.cloud_storage_registered) == (7, True)
-    client.api_client.cloudstorages_api.destroy.assert_not_called()
+@pytest.mark.parametrize("half", [{"cloud_storage_id": 1}, {"cloud_path": "a.json"}])
+def test_cloud_args_come_together(tmp_path, half):
+    client = _cloud_client(_task())
+    with pytest.raises(InvalidArgument, match="cloud_storage_id and cloud_path together"):
+        _import(client, tmp_path, task_id=1, **half)
+    client.tasks.retrieve.assert_not_called()
 
 
 NO_MATCH = BackgroundRequestException("Could not match item id: 'x' with any task frame")
 
 
-def test_failed_import_explains_and_forgets_new_storage(tmp_path):
-    client = _cloud_client(_task(), storages=(), wait_error=NO_MATCH)
-    with pytest.raises(InvalidArgument, match="Could not match item id.*file names") as error:
-        _import(client, tmp_path, task_id=1, cloud_url="s3://open-bucket/labels.json")
-    client.api_client.cloudstorages_api.destroy.assert_called_once_with(7)
-    assert "update_cloud_storage" not in str(error.value)
-
-
-def test_failed_import_keeps_found_storage(tmp_path):
+def test_failed_import_points_at_storage_keys(tmp_path):
     client = _cloud_client(_task(), wait_error=NO_MATCH)
-    with pytest.raises(InvalidArgument, match="cloud storage #1.*update_cloud_storage"):
-        _import(client, tmp_path, task_id=1, cloud_url=f"{R2}/cvat/labels.json")
-    client.api_client.cloudstorages_api.destroy.assert_not_called()
+    with pytest.raises(
+        InvalidArgument, match="Could not match item id.*file names.*cloud storage #1.*update_cloud"
+    ):
+        _import(client, tmp_path, task_id=1, cloud_storage_id=1, cloud_path="labels.json")
 
 
 def test_local_failure_is_explained_too(tmp_path):
@@ -216,27 +209,11 @@ def test_local_failure_is_explained_too(tmp_path):
     assert "cloud storage" not in str(error.value)
 
 
-def test_lost_wait_keeps_new_storage_while_cvat_imports(tmp_path):
-    # the import was queued: CVAT still reads the file through the storage after we stop waiting
-    client = _cloud_client(_task(), storages=(), wait_error=ConnectionError("reset"))
-    with pytest.raises(ConnectionError):
-        _import(client, tmp_path, task_id=1, cloud_url="s3://open-bucket/labels.json")
-    client.api_client.cloudstorages_api.destroy.assert_not_called()
-
-
-def test_failed_start_forgets_new_storage(tmp_path):
-    client = _cloud_client(_task(), storages=())
-    client.api_client.tasks_api.create_annotations.side_effect = RuntimeError("boom")
-    with pytest.raises(RuntimeError, match="boom"):
-        _import(client, tmp_path, task_id=1, cloud_url="s3://open-bucket/labels.json")
-    client.api_client.cloudstorages_api.destroy.assert_called_once_with(7)
-
-
 def test_import_already_running_is_explained(tmp_path):
     client = _cloud_client(_task(), gt_job(dimension="2d"))
     client.api_client.jobs_api.create_annotations.side_effect = ApiException(409, "Conflict")
     with pytest.raises(InvalidArgument, match="into job 30 is still running") as error:
-        _import(client, tmp_path, job_id=30, cloud_url=f"{R2}/cvat/labels.json")
+        _import(client, tmp_path, job_id=30, cloud_storage_id=1, cloud_path="labels.json")
     assert "duplicate" in str(error.value) and "check" in str(error.value)
 
 
