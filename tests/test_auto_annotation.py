@@ -3,6 +3,7 @@ import itertools
 import threading
 from collections import Counter
 from importlib.util import find_spec
+from pathlib import Path
 from unittest.mock import Mock
 
 import cvat_sdk.auto_annotation as cvataa
@@ -460,7 +461,8 @@ def test_background_failure_keeps_saved_batches(use_function, batches_of_2):
     assert len(_sent(run_api)) == 2
     assert "model crashed" in run.error
     assert "4 of 5 frames (through frame 3)" in run.error and "duplicates" in run.error
-    assert "mode='replace'" in run.error  # the way to redo them without duplicates
+    # replace would also delete the task's own annotations: ask the user instead
+    assert "ask the user" in run.error and "replace" not in run.error
 
 
 def test_background_no_matching_label_fails_call(use_function):
@@ -560,6 +562,57 @@ def test_get_run_latest(use_function):
     for asked in (None, run_id):
         status = aa.get_run(asked)
         assert (status.run.run_id, status.run.state, status.note) == (run_id, "finished", None)
+
+
+def test_get_run_never_issued_id_is_unknown(use_function):
+    result, _, _, _ = _start(FakeFunction(), use_function)
+    _finish(result.run.run_id)
+    status = aa.get_run("run-999")
+    assert status.run.run_id == result.run.run_id
+    assert "unknown run_id run-999" in status.note and "no longer kept" not in status.note
+
+
+def test_refused_start_takes_no_run_number(use_function):
+    fn = Blocking()
+    first, _, _, _ = _start(fn, use_function)
+    try:
+        client, _, _ = _setup()
+        with pytest.raises(InvalidArgument, match="in progress"):
+            aa.start_run(client, lambda: client, 1, _opts())
+    finally:
+        fn.go.set()
+    _finish(first.run.run_id)
+    second, _, _, _ = _start(FakeFunction(), use_function)
+    _finish(second.run.run_id)
+    number = int(first.run.run_id.split("-")[1])
+    assert second.run.run_id == f"run-{number + 1}"
+
+
+def test_failed_thread_start_leaves_no_running_run(use_function, monkeypatch):
+    use_function(FakeFunction())
+    client, _, _ = _setup()
+    before = aa._latest
+
+    class NoThread:
+        def __init__(self, **_):
+            pass
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(aa.threading, "Thread", NoThread)
+    with pytest.raises(RuntimeError):
+        aa.start_run(client, lambda: client, 1, _opts())
+    assert aa._latest is not before and not aa._LOCK.locked()
+    run = aa.get_run(None).run
+    assert (run.state, run.finished is not None) == ("failed", True)
+    assert "can't start new thread" in run.error
+
+
+def test_batch_size_matches_the_docs():
+    readme = (Path(__file__).parent.parent / "README.md").read_text()
+    for text in (" ".join(tools.auto_annotate.__doc__.split()), readme):
+        assert f"every {aa.FRAMES_PER_SAVE} frames" in text
 
 
 def test_get_run_stale_id_answers_latest(use_function):

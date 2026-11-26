@@ -61,10 +61,11 @@ def auto_annotate(
 ) -> AutoAnnotation:
     """Use to auto-annotate a task with a built-in torchvision model, only when the user asks:
     one frame, or the whole task. The model's labels are matched to the task's by name; the
-    others are skipped and counted. With frame the call waits (a few seconds) and returns the new objects: check them
-    with render_frame. Without frame it starts a background run over the whole task and
-    returns its run_id: follow it with get_auto_annotation_run; the run saves every 10 frames,
-    so a failed run keeps the frames saved so far. mode "append" adds objects (running twice
+    others are skipped and counted. With frame the call waits (a few seconds; ~15 s more when
+    it loads a model) and returns the new objects: check them with render_frame. Without frame
+    it starts a background run over the whole task and returns its run_id: follow it with
+    get_auto_annotation_run; the run saves every 10 frames, so a failed run keeps the frames
+    saved so far. mode "append" adds objects (running twice
     duplicates them); "replace" swaps the shapes and tags on the run's frames for the new ones
     (each batch's old ones deleted after its new ones are saved), never tracks, only when the
     user asks. One run at a time. Tasks with overlapping jobs are refused. The first use of a

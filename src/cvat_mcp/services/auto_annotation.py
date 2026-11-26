@@ -1,6 +1,5 @@
 import fnmatch
 import importlib
-import itertools
 import logging
 import threading
 import time
@@ -337,10 +336,11 @@ def _saved(progress: Progress, frames: list[int], opts: RunOptions) -> str:
     """What a failed run left in CVAT, and what running it again does."""
     if not progress.frames_done:
         return "nothing was saved"
+    # Not "use replace": that would also delete the annotations the frames had before.
     again = (
         "replaces them again"
         if opts.mode == "replace"
-        else "duplicates them, so do not retry in append mode: mode='replace' redoes the task"
+        else "duplicates them, so ask the user how to go on before running it again"
     )
     return (
         f"the first {progress.frames_done} of {len(frames)} frames (through frame "
@@ -463,7 +463,12 @@ class AutoAnnotationRunStatus(BaseModel):
 
 # Only the latest run: one runs at a time, and an older one's objects are already in CVAT.
 _latest: tuple[AutoAnnotationRun, Progress] | None = None
-_RUN_NUMBERS = itertools.count(1)
+_issued = 0  # run numbers handed out since the server started (run-1 .. run-_issued)
+
+
+def _was_issued(run_id: str) -> bool:
+    prefix, _, number = run_id.partition("-")
+    return prefix == "run" and number.isdigit() and 1 <= int(number) <= _issued
 
 
 def _snapshot(run: AutoAnnotationRun, progress: Progress) -> AutoAnnotationRun:
@@ -492,14 +497,18 @@ def _run(  # pylint: disable=too-many-arguments,too-many-positional-arguments  #
             with client_factory() as client:
                 scope = Scope(client.tasks.retrieve(run.task_id))
                 annotate(client, scope, fn, mapping, labels, opts, frames, progress)
-            run.state = "finished"
         except Exception as exc:  # pylint: disable=broad-exception-caught  # recorded for the model
             logger.exception("auto-annotation run %s failed", run.run_id)
-            run.state = "failed"
             error = explain(exc) or f"{type(exc).__name__}: {exc}"
-            run.error = f"{error}; {_saved(progress, frames, opts)}"
-        finally:
-            run.finished = datetime.now(timezone.utc)
+            _end(run, "failed", f"{error}; {_saved(progress, frames, opts)}")
+        else:
+            _end(run, "finished")
+
+
+def _end(run: AutoAnnotationRun, state: str, error: str | None = None) -> None:
+    """state last: get_run reads without the lock, so it never sees an end without its details."""
+    run.error, run.finished = error, datetime.now(timezone.utc)
+    run.state = state
 
 
 def start_run(
@@ -509,7 +518,7 @@ def start_run(
     opts: RunOptions,
 ) -> AutoAnnotation:
     """Check everything here, then annotate the whole task in a background thread."""
-    global _latest  # pylint: disable=global-statement
+    global _latest, _issued  # pylint: disable=global-statement
     started = time.monotonic()
     scope = resolve_scope(client, task_id)
     task = scope.task
@@ -517,9 +526,10 @@ def start_run(
     if not frames:
         raise InvalidArgument(f"task {task.id} has no frames to annotate")
     labels = task.get_labels()
-    run_id = f"run-{next(_RUN_NUMBERS)}"
+    run_id = f"run-{_issued + 1}"
     check_model(opts)
     _claim(run_id)
+    _issued += 1  # only once the lock is held, so a refused call takes no number
     try:
         fn, mapping = _prepare(opts, labels)  # in this thread: a bad download fails the call
         run = AutoAnnotationRun(
@@ -541,14 +551,17 @@ def start_run(
             name=f"auto-annotation {run_id}",
             daemon=True,
         ).start()  # from here on the thread owns the lock
-    except BaseException:
+    except BaseException as exc:
+        if _latest is not None and _latest[0].run_id == run_id:  # registered, but never ran
+            _end(_latest[0], "failed", f"the run could not start: {exc}")
         with _released():  # no thread started, so nothing else would release it
             raise
     return _answer(
         task.id,
         opts,
         started,
-        note=f"running in the background; follow it with get_auto_annotation_run(run_id={run_id!r})",
+        note="running in the background; follow it with "
+        f"get_auto_annotation_run(run_id={run_id!r})",
         run=answer,
     )
 
@@ -563,7 +576,12 @@ def get_run(run_id: str | None) -> AutoAnnotationRunStatus:
     run = _snapshot(*latest)
     notes = []
     if run_id is not None and run_id != run.run_id:
-        notes.append(f"{run_id} is no longer kept: only the latest run ({run.run_id}) is")
+        notes.append(
+            f"{run_id} is no longer kept: only the latest run ({run.run_id}) is"
+            if _was_issued(run_id)
+            else f"unknown run_id {run_id}: this server has issued run-1 to run-{_issued} since "
+            f"it started; the latest is {run.run_id}"
+        )
     if run.state == "running":
         notes.append(
             "a server restart stops it; the frames it saved by then stay "
