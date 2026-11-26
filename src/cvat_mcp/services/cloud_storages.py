@@ -122,7 +122,9 @@ def _endpoint(endpoint_url: str | None) -> str | None:
         return None
     parts = urlsplit(endpoint_url.strip())
     if parts.scheme not in ("http", "https") or not parts.hostname:
-        raise InvalidArgument("endpoint_url must be an http(s) URL of the S3 API, e.g. https://<host>")
+        raise InvalidArgument(
+            "endpoint_url must be an http(s) URL of the S3 API, e.g. https://<host>"
+        )
     if parts.username or parts.password:
         raise InvalidArgument("don't put credentials in endpoint_url: pass the keys as arguments")
     return endpoint_url.strip().rstrip("/")

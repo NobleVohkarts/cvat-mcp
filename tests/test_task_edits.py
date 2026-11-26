@@ -228,7 +228,9 @@ def test_create_from_glob(tmp_path):
 
 def test_background_failure_names_the_path(tmp_path):
     client, task = _create_client(BackgroundRequestException("No media data found"))
-    with pytest.raises(InvalidArgument, match="No media data found.*cloud_path 'nothing/'") as error:
+    with pytest.raises(
+        InvalidArgument, match="No media data found.*cloud_path 'nothing/'"
+    ) as error:
         _create(client, tmp_path, cloud_storage_id=1, cloud_path="nothing/")
     assert "update_cloud_storage" in str(error.value)
     task.remove.assert_called_once()
