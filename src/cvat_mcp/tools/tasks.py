@@ -38,16 +38,13 @@ def create_task(
     name: str,
     labels: list[LabelSpec] | None = None,
     project_id: int | None = None,
-    files: Paths | None = None,
     urls: Paths | None = None,
     cloud_storage_id: int | None = None,
     cloud_path: str | None = None,
     segment_size: int | None = None,
 ) -> CreatedTask:
-    """Use to create a task, only when the user asks: images from files or folders inside the
-    server's work directory (folders expand recursively, hidden files skipped; all images are
-    sorted by name in natural order, file names must be unique), from http(s) URLs, or from a
-    CVAT cloud storage (cloud_storage_id from list_cloud_storages or create_cloud_storage, with
+    """Use to create a task, only when the user asks: images (sorted by name in natural order)
+    from http(s) URLs or from a CVAT cloud storage (cloud_storage_id from list_cloud_storages or create_cloud_storage, with
     cloud_path: an object key, a folder or a glob from the bucket root, also for a storage
     with a prefix; a folder is taken recursively, a path without a file extension counts as a
     folder (end a dotted folder name like v1.2 with /), * and ? are globs and * also matches
@@ -59,7 +56,6 @@ def create_task(
     return task_edits.create_task(
         get_client(ctx),
         settings.url,
-        settings.mcp_workdir,
         name,
         labels,
         project_id,

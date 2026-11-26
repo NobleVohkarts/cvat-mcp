@@ -1,7 +1,5 @@
 import logging
-from collections import Counter
 from collections.abc import Iterable
-from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -11,7 +9,6 @@ from cvat_sdk.attributes import attribute_value_validator
 from cvat_sdk.core.proxies.tasks import ResourceType
 from pydantic import BaseModel, ConfigDict, Field
 
-from cvat_mcp.config import resolve_in_workdir
 from cvat_mcp.errors import InvalidArgument, explain, is_refusal
 from cvat_mcp.services.annotation_edits import check_value
 from cvat_mcp.services.cloud_storages import check_storage, cloud_source, keys_hint
@@ -100,42 +97,6 @@ class CreatedTask(BaseModel):
     cloud_storage_id: int | None = None  # echoes the storage, for cloud_path
 
 
-def _listed(directory: Path, workdir: Path) -> list[Path]:
-    """A directory's files, recursively and sorted, without hidden ones (.DS_Store, .git/...)."""
-    found = []
-    for p in sorted(directory.rglob("*")):
-        if any(part.startswith(".") for part in p.relative_to(directory).parts) or not p.is_file():
-            continue
-        found.append(resolve_in_workdir(workdir, p))  # a symlink may point out of the workdir
-    return found
-
-
-def resolve_files(workdir: Path, files: list[str]) -> list[Path]:
-    """Files inside the workdir; a directory stands for its files, recursively and sorted."""
-    resolved = []
-    for name in files:
-        path = resolve_in_workdir(workdir, name)
-        if path.is_dir():
-            found = _listed(path, workdir)
-            if not found:
-                raise InvalidArgument(f"directory {name!r} has no files")
-            resolved += found
-        elif path.is_file():
-            resolved.append(path)
-        else:
-            raise InvalidArgument(f"no such file in the work directory: {name!r}")
-    if len(resolved) > MAX_FILES:
-        raise InvalidArgument(f"that is {len(resolved)} files; a task takes at most {MAX_FILES}")
-    # CVAT stores uploads by bare file name: same-named files would be merged into one.
-    twins = sorted(n for n, count in Counter(p.name for p in resolved).items() if count > 1)
-    if twins:
-        raise InvalidArgument(
-            f"several files are named {', '.join(twins)}; CVAT keeps only file names, "
-            "so rename them or create one task per folder"
-        )
-    return resolved
-
-
 def _check_urls(urls: list[str]) -> None:
     for url in urls:
         parts = urlsplit(url)
@@ -146,11 +107,9 @@ def _check_urls(urls: list[str]) -> None:
 def create_task(
     client: Client,
     base_url: str,
-    workdir: Path,
     name: str,
     labels: list[LabelSpec] | None,
     project_id: int | None,
-    files: list[str] | None,
     urls: list[str] | None,
     cloud_storage_id: int | None,
     cloud_path: str | None,
@@ -165,15 +124,13 @@ def create_task(
         )
     if (cloud_storage_id is None) != (cloud_path is None):
         raise InvalidArgument("pass cloud_storage_id and cloud_path together")
-    if [files, urls, cloud_path].count(None) != 2:
-        raise InvalidArgument("pass exactly one of files, urls or cloud_storage_id + cloud_path")
+    if (urls is None) == (cloud_path is None):
+        raise InvalidArgument("pass exactly one of urls or cloud_storage_id + cloud_path")
     spec = {"name": name, "project_id": project_id, "segment_size": segment_size}
     if labels is not None:
         spec["labels"] = label_requests(labels)
     params = {"sorting_method": "natural"}
-    if files is not None:
-        resources, resource_type = resolve_files(workdir, files), ResourceType.LOCAL
-    elif urls is not None:
+    if urls is not None:
         _check_urls(urls)
         resources, resource_type = urls, ResourceType.REMOTE
     else:

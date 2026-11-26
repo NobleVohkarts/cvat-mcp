@@ -13,10 +13,10 @@ from cvat_mcp.services.task_edits import (
     create_task,
     delete_task,
     label_requests,
-    resolve_files,
     update_task,
 )
 
+URL = "https://example.com/a.jpg"
 COLOR = AttributeSpec(name="color", input_type="select", values=["red", "blue"])
 
 
@@ -84,33 +84,30 @@ def _create_client(upload_error=None, remove_error=None, storages=(cloud_storage
     return client, task
 
 
-def _create(client, workdir, **kw):
+def _create(client, **kw):
     args = {
         "name": "Scratch",
         "labels": [LabelSpec(name="car")],
         "project_id": None,
-        "files": None,
         "urls": None,
         "cloud_storage_id": None,
         "cloud_path": None,
         "segment_size": None,
     } | kw
-    return create_task(client, "http://cvat/", workdir, **args)
+    return create_task(client, "http://cvat/", **args)
 
 
-def test_create_from_files_uploads_sorted_and_returns_jobs(tmp_path):
-    (tmp_path / "a").mkdir()
-    for name in ("a/2.jpg", "a/1.jpg", "b.jpg"):
-        (tmp_path / name).write_bytes(b"x")
+def test_create_from_urls_returns_jobs():
+    urls = ["https://example.com/1.jpg", "https://example.com/2.jpg"]
     client, task = _create_client()
-    result = _create(client, tmp_path, files=["a", "b.jpg"])
+    result = _create(client, urls=urls)
     (spec,), _ = client.tasks.create.call_args
     sent = spec.to_dict()
     assert sent["name"] == "Scratch" and [l["name"] for l in sent["labels"]] == ["car"]
     assert "project_id" not in sent and "segment_size" not in sent
     task.upload_data.assert_called_once_with(
-        resources=[tmp_path / "a/1.jpg", tmp_path / "a/2.jpg", tmp_path / "b.jpg"],
-        resource_type=ResourceType.LOCAL,
+        resources=urls,
+        resource_type=ResourceType.REMOTE,
         params={"sorting_method": "natural"},
         wait_for_completion=True,
         status_check_period=1,
@@ -120,25 +117,24 @@ def test_create_from_files_uploads_sorted_and_returns_jobs(tmp_path):
     assert result.url == "http://cvat/tasks/5"
 
 
-def test_create_with_segment_size(tmp_path):
-    (tmp_path / "b.jpg").write_bytes(b"x")
+def test_create_with_segment_size():
     client, _ = _create_client()
-    _create(client, tmp_path, files=["b.jpg"], segment_size=20)
+    _create(client, urls=["https://example.com/b.jpg"], segment_size=20)
     (spec,), _ = client.tasks.create.call_args
     assert spec.to_dict()["segment_size"] == 20
 
 
-def test_create_from_urls_uses_remote(tmp_path):
+def test_create_from_urls_uses_remote():
     client, task = _create_client()
-    _create(client, tmp_path, urls=["https://example.com/a.jpg"])
+    _create(client, urls=["https://example.com/a.jpg"])
     _, kwargs = task.upload_data.call_args
     assert kwargs["resource_type"] == ResourceType.REMOTE
     assert kwargs["resources"] == ["https://example.com/a.jpg"]
 
 
-def test_create_in_project_sends_no_labels(tmp_path):
+def test_create_in_project_sends_no_labels():
     client, _ = _create_client()
-    _create(client, tmp_path, labels=None, project_id=9, urls=["https://example.com/a.jpg"])
+    _create(client, labels=None, project_id=9, urls=["https://example.com/a.jpg"])
     (spec,), _ = client.tasks.create.call_args
     assert spec.to_dict()["project_id"] == 9 and "labels" not in spec.to_dict()
 
@@ -146,38 +142,32 @@ def test_create_in_project_sends_no_labels(tmp_path):
 @pytest.mark.parametrize(
     "kw, match",
     [
-        ({"project_id": 9, "files": ["b.jpg"]}, "one of labels or project_id"),
-        ({"labels": None, "files": ["b.jpg"]}, "one of labels or project_id"),
-        ({"files": ["b.jpg"], "urls": ["https://e.com/a.jpg"]}, "one of files, urls or cloud_st"),
-        ({"files": ["b.jpg"], "cloud_storage_id": 1, "cloud_path": "x/"}, "one of files, urls or"),
-        ({"urls": ["https://e.com/a.jpg"], "cloud_storage_id": 1, "cloud_path": "x/"}, "one of"),
-        ({}, "one of files, urls or cloud_storage_id"),
+        ({"project_id": 9, "urls": [URL]}, "one of labels or project_id"),
+        ({"labels": None, "urls": [URL]}, "one of labels or project_id"),
+        (
+            {"urls": [URL], "cloud_storage_id": 1, "cloud_path": "x/"},
+            "one of urls or cloud_storage_id",
+        ),
+        ({}, "one of urls or cloud_storage_id \\+ cloud_path"),
         ({"cloud_storage_id": 1}, "cloud_storage_id and cloud_path together"),
         ({"cloud_path": "street/"}, "cloud_storage_id and cloud_path together"),
-        ({"files": ["../x.jpg"]}, "CVAT_MCP_WORKDIR"),
-        ({"files": ["/etc/passwd"]}, "CVAT_MCP_WORKDIR"),
-        ({"files": ["."]}, "CVAT_MCP_WORKDIR"),
-        ({"files": ["empty"]}, "no files"),
-        ({"files": ["missing.jpg"]}, "no such file"),
         ({"urls": ["ftp://h/x.jpg"]}, "http"),
         ({"urls": ["file:///x"]}, "http"),
-        ({"name": " ", "files": ["b.jpg"]}, "name"),
+        ({"name": " ", "urls": [URL]}, "name"),
     ],
 )
-def test_create_refusals(tmp_path, kw, match):
-    (tmp_path / "b.jpg").write_bytes(b"x")
-    (tmp_path / "empty").mkdir()
+def test_create_refusals(kw, match):
     client, _ = _create_client()
     with pytest.raises(InvalidArgument, match=match):
-        _create(client, tmp_path, **kw)
+        _create(client, **kw)
     client.tasks.create.assert_not_called()
 
 
 @pytest.mark.parametrize("remove_error", [None, RuntimeError("remove failed")])
-def test_failed_upload_removes_the_task(tmp_path, remove_error):
+def test_failed_upload_removes_the_task(remove_error):
     client, task = _create_client(BackgroundRequestException("bad image"), remove_error)
     with pytest.raises(BackgroundRequestException, match="bad image"):
-        _create(client, tmp_path, urls=["https://example.com/a.jpg"])
+        _create(client, urls=["https://example.com/a.jpg"])
     task.remove.assert_called_once()
 
 
@@ -186,9 +176,9 @@ def _uploaded(task):
     return kwargs["resources"], kwargs["params"]
 
 
-def test_create_from_bucket_folder(tmp_path):
+def test_create_from_bucket_folder():
     client, task = _create_client()
-    result = _create(client, tmp_path, cloud_storage_id=1, cloud_path="street/")
+    result = _create(client, cloud_storage_id=1, cloud_path="street/")
     task.upload_data.assert_called_once_with(
         resources=["street/"],  # CVAT lists only this prefix
         resource_type=ResourceType.SHARE,
@@ -205,74 +195,74 @@ def test_create_from_bucket_folder(tmp_path):
     client.api_client.cloudstorages_api.create.assert_not_called()
 
 
-def test_folder_path_without_slash_is_a_folder(tmp_path):
+def test_folder_path_without_slash_is_a_folder():
     client, task = _create_client()
-    _create(client, tmp_path, cloud_storage_id=1, cloud_path="street")
+    _create(client, cloud_storage_id=1, cloud_path="street")
     assert _uploaded(task)[0] == ["street/"]
 
 
-def test_create_from_bucket_object(tmp_path):
+def test_create_from_bucket_object():
     client, task = _create_client()
-    _create(client, tmp_path, cloud_storage_id=1, cloud_path="street/a.jpg")
+    _create(client, cloud_storage_id=1, cloud_path="street/a.jpg")
     resources, params = _uploaded(task)
     assert resources == ["street/a.jpg"]
     assert "filename_pattern" not in params
 
 
-def test_create_from_glob(tmp_path):
+def test_create_from_glob():
     client, task = _create_client()
-    _create(client, tmp_path, cloud_storage_id=1, cloud_path="street/*.jpg")
+    _create(client, cloud_storage_id=1, cloud_path="street/*.jpg")
     resources, params = _uploaded(task)
     assert resources == [] and params["filename_pattern"] == "street/*.jpg"
 
 
-def test_background_failure_names_the_path(tmp_path):
+def test_background_failure_names_the_path():
     client, task = _create_client(BackgroundRequestException("No media data found"))
     with pytest.raises(
         InvalidArgument, match="No media data found.*cloud_path 'nothing/'"
     ) as error:
-        _create(client, tmp_path, cloud_storage_id=1, cloud_path="nothing/")
+        _create(client, cloud_storage_id=1, cloud_path="nothing/")
     assert "update_cloud_storage" in str(error.value)
     task.remove.assert_called_once()
 
 
 @pytest.mark.parametrize("status", [403, 404])
-def test_unknown_storage_refused_before_the_task(tmp_path, status):
+def test_unknown_storage_refused_before_the_task(status):
     client, _ = _create_client()
     client.api_client.cloudstorages_api.retrieve = Mock(side_effect=ApiException(status=status))
     with pytest.raises(InvalidArgument, match="no cloud storage #99.*list_cloud_storages"):
-        _create(client, tmp_path, cloud_storage_id=99, cloud_path="street/")
+        _create(client, cloud_storage_id=99, cloud_path="street/")
     client.tasks.create.assert_not_called()
 
 
 @pytest.mark.parametrize("path", ["highway/", "", "*.jpg"])
-def test_path_outside_the_storage_prefix_refused(tmp_path, path):
+def test_path_outside_the_storage_prefix_refused(path):
     client, _ = _create_client(storages=[cloud_storage(1, "cvat", "prefix=street%2F")])
     with pytest.raises(InvalidArgument, match="covers only 'street/'.*list_cloud_storages"):
-        _create(client, tmp_path, cloud_storage_id=1, cloud_path=path)
+        _create(client, cloud_storage_id=1, cloud_path=path)
     client.tasks.create.assert_not_called()
 
 
 @pytest.mark.parametrize("path", ["street/", "street", "street/day/*.jpg", "street/a.jpg"])
-def test_path_inside_the_storage_prefix_used(tmp_path, path):
+def test_path_inside_the_storage_prefix_used(path):
     client, task = _create_client(storages=[cloud_storage(1, "cvat", "prefix=street/")])
-    _create(client, tmp_path, cloud_storage_id=1, cloud_path=path)
+    _create(client, cloud_storage_id=1, cloud_path=path)
     task.upload_data.assert_called_once()
 
 
-def test_organization_storage_refused_before_the_task(tmp_path):
+def test_organization_storage_refused_before_the_task():
     client, _ = _create_client(storages=[cloud_storage(1, "cvat", org=5)])
     with pytest.raises(InvalidArgument, match="cloud storage #1 belongs to an organization"):
-        _create(client, tmp_path, cloud_storage_id=1, cloud_path="street/")
+        _create(client, cloud_storage_id=1, cloud_path="street/")
     client.tasks.create.assert_not_called()
 
 
-def test_unavailable_storage_points_at_its_keys(tmp_path):
+def test_unavailable_storage_points_at_its_keys():
     unavailable = ApiException(status=400)
     unavailable.body = b"The specified cloud storage 'x' is not available."
     client, task = _create_client(unavailable)
     with pytest.raises(InvalidArgument, match="update_cloud_storage"):
-        _create(client, tmp_path, cloud_storage_id=1, cloud_path="street/")
+        _create(client, cloud_storage_id=1, cloud_path="street/")
     task.remove.assert_called_once()
     client.api_client.cloudstorages_api.destroy.assert_not_called()
 
@@ -369,41 +359,6 @@ def test_label_names_are_stripped():
     assert label.name == "bus"
     with pytest.raises(InvalidArgument, match="already has"):
         label_requests([LabelSpec(name="car ")], ["car"])
-
-
-def test_resolve_files_refuses_a_symlink_out_of_the_workdir(tmp_path):
-    outside = tmp_path / "secret.txt"
-    outside.write_text("key")
-    workdir = tmp_path / "work"
-    (workdir / "d").mkdir(parents=True)
-    (workdir / "d" / "ok.jpg").write_bytes(b"x")
-    (workdir / "d" / "link.jpg").symlink_to(outside)
-    with pytest.raises(InvalidArgument, match="CVAT_MCP_WORKDIR"):
-        resolve_files(workdir, ["d"])
-
-
-def test_resolve_files_skips_hidden_files(tmp_path):
-    (tmp_path / "d" / ".cache").mkdir(parents=True)
-    for name in ("d/1.jpg", "d/.DS_Store", "d/.cache/x.jpg"):
-        (tmp_path / name).write_bytes(b"x")
-    assert resolve_files(tmp_path, ["d"]) == [tmp_path / "d/1.jpg"]
-
-
-def test_resolve_files_refuses_duplicate_names(tmp_path):
-    for name in ("d/cam1/0001.jpg", "d/cam2/0001.jpg"):
-        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
-        (tmp_path / name).write_bytes(b"x")
-    with pytest.raises(InvalidArgument, match="0001.jpg"):
-        resolve_files(tmp_path, ["d"])
-
-
-def test_resolve_files_limits_the_expanded_count(tmp_path, monkeypatch):
-    monkeypatch.setattr("cvat_mcp.services.task_edits.MAX_FILES", 2)
-    for i in range(3):
-        (tmp_path / "d").mkdir(exist_ok=True)
-        (tmp_path / "d" / f"{i}.jpg").write_bytes(b"x")
-    with pytest.raises(InvalidArgument, match="3 files"):
-        resolve_files(tmp_path, ["d"])
 
 
 @pytest.mark.parametrize(
