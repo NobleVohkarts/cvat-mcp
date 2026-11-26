@@ -141,6 +141,7 @@ def _sent(api, action="create"):
 @pytest.fixture
 def use_function(monkeypatch):
     def use(fn):
+        monkeypatch.setattr(aa, "check_model", lambda _opts: None)  # fakes need no torchvision
         monkeypatch.setattr(aa, "load_function", lambda _opts: fn)
         return fn
 
@@ -359,13 +360,32 @@ def test_frame_lock_released_after_error(use_function):
     assert not aa._LOCK.locked()
 
 
-def test_frame_nothing_matched_has_note(use_function):
-    use_function(BenchOnly())
+class BenchSpec(FakeFunction):
+    """A model with no label the task has (car, person)."""
+
+    def __init__(self):
+        super().__init__()
+        self.spec = cvataa.DetectionFunctionSpec(
+            labels=[cvataa.label_spec("bench", 1, type="rectangle")]
+        )
+
+
+@pytest.mark.parametrize("mode", ["append", "replace"])
+def test_frame_no_matching_label_refused_before_writing(use_function, mode):
+    use_function(BenchSpec())
+    client, _, api = _setup(shapes=[shape(1, 1, 0, [0, 0, 1, 1])])
+    with pytest.raises(InvalidArgument, match="none of the model's labels") as error:
+        aa.auto_annotate_frame(client, 1, 0, _opts(mode=mode))
+    assert "car, person" in str(error.value) and "bench" in str(error.value)
+    api.partial_update_annotations.assert_not_called()
+
+
+def test_frame_nothing_found_has_note(use_function):
+    use_function(BenchOnly())  # the model knows car but finds only benches here
     client, _, _ = _setup()
     result = aa.auto_annotate_frame(client, 1, 0, _opts())
-    assert result.objects == []
-    assert result.skipped == {"bench": 1}
-    assert "car, person" in result.note
+    assert (result.objects, result.skipped) == ([], {"bench": 1})
+    assert "nothing matched" in result.note
 
 
 # --- whole task in the background ---
@@ -439,6 +459,16 @@ def test_background_failure_keeps_saved_batches(use_function, batches_of_2):
     assert len(_sent(run_api)) == 2
     assert "model crashed" in run.error
     assert "4 of 5 frames (through frame 3)" in run.error and "duplicates" in run.error
+    assert "mode='replace'" in run.error  # the way to redo them without duplicates
+
+
+def test_background_no_matching_label_fails_call(use_function):
+    use_function(BenchSpec())
+    client, _, _ = _setup(shapes=[shape(1, 1, 0, [0, 0, 1, 1])])
+    before = aa._latest
+    with pytest.raises(InvalidArgument, match="none of the model's labels"):
+        aa.start_run(client, lambda: client, 1, _opts(mode="replace"))
+    assert aa._latest is before and not aa._LOCK.locked()
 
 
 def test_background_run_uses_own_client(use_function):
@@ -665,14 +695,30 @@ needs_torchvision = pytest.mark.skipif(
 @needs_torchvision
 def test_unknown_model_lists_choices():
     with pytest.raises(InvalidArgument, match="maskrcnn_resnet50_fpn_v2"):
-        aa.load_function(_opts(output="masks", model="nope"))
+        aa.check_model(_opts(output="masks", model="nope"))
 
 
 @needs_torchvision
 def test_model_must_fit_output():
     with pytest.raises(InvalidArgument, match="maskrcnn_resnet50_fpn_v2") as error:
-        aa.load_function(_opts(output="polygons", model="fasterrcnn_resnet50_fpn_v2"))
-    assert "fasterrcnn_resnet50_fpn_v2 " not in str(error.value).split("choose")[1]
+        aa.check_model(_opts(output="polygons", model="fasterrcnn_resnet50_fpn_v2"))
+    assert "fasterrcnn" not in str(error.value).split("choose")[1]
+
+
+@needs_torchvision
+def test_wrong_model_refused_before_waiting_for_the_lock():
+    client, _, _ = _setup()
+    wrong = _opts(output="polygons", model="fasterrcnn_resnet50_fpn_v2")
+    assert aa._LOCK.acquire(blocking=False)  # another call is running
+    try:
+        for call in (
+            lambda: aa.auto_annotate_frame(client, 1, 0, wrong),
+            lambda: aa.start_run(client, lambda: client, 1, wrong),
+        ):
+            with pytest.raises(InvalidArgument, match="does not give polygons"):
+                call()
+    finally:
+        aa._LOCK.release()
 
 
 @needs_torchvision

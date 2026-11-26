@@ -177,13 +177,18 @@ class _OneModel:
 _model = _OneModel()
 
 
-def load_function(opts: RunOptions):
-    """The built-in function with that model; the last one used stays loaded."""
+def check_model(opts: RunOptions) -> None:
+    """Refuses a model that does not give that output; called before the lock is taken, so the
+    caller learns it at once (and a wrong name keeps the loaded model)."""
     choices = _model_choices(opts.spec)
-    if opts.model not in choices:  # checked first, so a wrong name keeps the loaded model
+    if opts.model not in choices:
         raise InvalidArgument(
             f"model {opts.model!r} does not give {opts.output}; choose one of: {', '.join(choices)}"
         )
+
+
+def load_function(opts: RunOptions):
+    """The built-in function with that model (check_model passed); the last one stays loaded."""
     module = f"cvat_sdk.auto_annotation.functions.torchvision_{opts.spec.function}"
     return _model.get(
         (opts.spec.function, opts.model),
@@ -248,6 +253,15 @@ def label_map(fn, labels, polygons: bool) -> dict[int, tuple[int, dict[int, int]
                 f"skeleton {spec.name!r} has points the model does not output: {', '.join(missing)}"
             )
         mapping[spec.id] = (label.id, {points[name]: i for name, i in task_points.items()})
+    if not any(mapping.values()):
+        # Nothing could be added, and replace would only delete: refuse before any write.
+        model_names = [spec.name for spec in fn.spec.labels]
+        shown = ", ".join(model_names[:12]) + (", ..." if len(model_names) > 12 else "")
+        raise InvalidArgument(
+            f"none of the model's labels are among the task's "
+            f"({', '.join(sorted(by_name))}); labels match by exact name, and the model's are: "
+            f"{shown}"
+        )
     return mapping
 
 
@@ -325,7 +339,11 @@ def _saved(progress: Progress, frames: list[int], opts: RunOptions) -> str:
     """What a failed run left in CVAT, and what running it again does."""
     if not progress.frames_done:
         return "nothing was saved"
-    again = "replaces them again" if opts.mode == "replace" else "duplicates them"
+    again = (
+        "replaces them again"
+        if opts.mode == "replace"
+        else "duplicates them, so do not retry in append mode: mode='replace' redoes the task"
+    )
     return (
         f"the first {progress.frames_done} of {len(frames)} frames (through frame "
         f"{frames[progress.frames_done - 1]}) are saved; running it again {again}"
@@ -396,7 +414,8 @@ def _note(objects: list, progress: Progress, labels) -> str | None:
         return None
     names = ", ".join(sorted(label.name for label in labels))
     if progress.skipped:
-        return f"nothing matched: the function's labels are not among the task's ({names})"
+        found = ", ".join(sorted(progress.skipped))
+        return f"nothing matched: the model found only {found}, which the task lacks ({names})"
     return "the model found nothing above conf_threshold on this frame"
 
 
@@ -410,6 +429,7 @@ def auto_annotate_frame(
         raise InvalidArgument(f"frame {frame} is deleted in task {scope.task.id}")
     labels = scope.task.get_labels()
     progress = Progress()
+    check_model(opts)
     with _busy():
         fn = load_function(opts)
         mapping = label_map(fn, labels, opts.spec.polygons)
@@ -487,6 +507,7 @@ def start_run(
         raise InvalidArgument(f"task {task.id} has no frames to annotate")
     labels = task.get_labels()
     run_id = f"run-{next(_RUN_NUMBERS)}"
+    check_model(opts)
     _claim(run_id)
     try:
         fn = load_function(opts)  # in this thread, so a bad model or download fails the call
