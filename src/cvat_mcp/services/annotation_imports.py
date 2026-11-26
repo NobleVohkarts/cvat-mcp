@@ -103,7 +103,7 @@ def import_annotations(
         job_id=job_id,
         format=format_name,
         mode=mode,
-        cloud_path=cloud_path,
+        cloud_path=key,
         seconds=seconds,
         note=None if any(counts.values()) else NO_OBJECTS,
         cloud_storage_id=cloud_storage_id,

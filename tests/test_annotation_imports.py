@@ -158,3 +158,8 @@ def test_import_already_running_is_explained():
 def test_other_409s_keep_the_generic_message():
     # e.g. CloudStorageMissingError when reading frames: waiting would not help
     assert explain(ApiException(409, "Conflict")).startswith("CVAT answered 409 Conflict")
+
+
+def test_result_shows_the_key_used():
+    result = _import(_client(_task()), task_id=1, cloud_path=" /annotations/a.json ")
+    assert result.cloud_path == "annotations/a.json"

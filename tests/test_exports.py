@@ -151,3 +151,36 @@ def test_failed_upload_points_at_the_storage_keys():
         InvalidArgument, match=r"Access Denied.*cloud storage #1 can write to the bucket.*update_cl"
     ):
         _export(client)
+
+
+def test_concurrent_export_to_the_same_key_refused():
+    client, task, _ = _client()
+    nested = []
+
+    def second_export(*_args, **_kwargs):  # runs while the first export holds the key
+        with pytest.raises(InvalidArgument, match="another export to exports/a.zip in cloud stor"):
+            _export(client)
+        nested.append("refused")
+
+    task.export_dataset.side_effect = second_export
+    assert _export(client).replaced is False
+    assert nested == ["refused"]
+    client2, _, _ = _client()  # the key is free again once the export returns
+    assert _export(client2).cloud_path == "exports/a.zip"
+
+
+@pytest.mark.parametrize("status", [403, 404])
+def test_unlistable_bucket_points_at_the_storage_keys(status):
+    client, task, listing = _client()
+    listing.side_effect = ApiException(status=status)
+    with pytest.raises(
+        InvalidArgument, match=r"could not list.*cloud storage #1 can read the bucket.*update_cl"
+    ):
+        _export(client)
+    task.export_dataset.assert_not_called()
+
+
+def test_export_already_running_is_explained():
+    client, _, _ = _client(upload_error=ApiException(status=409, reason="Conflict"))
+    with pytest.raises(InvalidArgument, match="another export of task 7 as COCO 1.0 is still run"):
+        _export(client)

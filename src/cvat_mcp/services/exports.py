@@ -1,7 +1,11 @@
+import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Literal
 
 from cvat_sdk import Client
+from cvat_sdk.api_client.exceptions import ApiException
 from cvat_sdk.core.proxies.types import Location
 from pydantic import BaseModel
 
@@ -26,6 +30,28 @@ def _export_key(cloud_path: str) -> str:
     return key if key.lower().endswith(".zip") else key + ".zip"  # CVAT exports a zip
 
 
+_exporting: set[tuple[int, str]] = set()
+_exporting_lock = threading.Lock()
+
+
+@contextmanager
+def _reserved(storage_id: int, key: str) -> Iterator[None]:
+    """Hold the key from the exists check until the upload ends: CVAT replaces an object
+    silently, so two exports to one key would lose the first file."""
+    with _exporting_lock:
+        if (storage_id, key) in _exporting:
+            raise InvalidArgument(
+                f"another export to {key} in cloud storage #{storage_id} is still running; "
+                "wait for it or pick another cloud_path"
+            )
+        _exporting.add((storage_id, key))
+    try:
+        yield
+    finally:
+        with _exporting_lock:
+            _exporting.discard((storage_id, key))
+
+
 def check_format(
     client: Client,
     format_name: str,
@@ -42,6 +68,41 @@ def check_format(
         )
 
 
+def _exists(client: Client, storage_id: int, key: str) -> bool:
+    try:
+        return object_exists(client, storage_id, key)
+    except ApiException as exc:
+        if exc.status not in (403, 404):  # CVAT's answer when the bucket refuses the keys
+            raise
+        raise InvalidArgument(
+            f"CVAT could not list the bucket to check whether {key} exists; check the bucket "
+            "name" + keys_hint(storage_id)
+        ) from exc
+
+
+def _export(task, format_name: str, include_images: bool, storage_id: int, key: str) -> None:
+    try:
+        # The SDK starts the export and waits for it; CVAT uploads the file under the key.
+        task.export_dataset(
+            format_name,
+            key,
+            include_images=include_images,
+            location=Location.CLOUD_STORAGE,
+            cloud_storage_id=storage_id,
+            status_check_period=1,  # the SDK default (5 s) makes even a tiny export take 5 s
+        )
+    except Exception as exc:
+        if isinstance(exc, ApiException) and exc.status == 409:  # CVAT: one per task and format
+            raise InvalidArgument(
+                f"another export of task {task.id} as {format_name} is still running (CVAT runs "
+                "one per task, format and include_images); wait for it, then call again"
+            ) from exc
+        if not is_refusal(exc):
+            raise
+        hint = f"check that {format_name} can export this task" + keys_hint(storage_id, "write to")
+        raise InvalidArgument(f"{explain(exc).rstrip()}; {hint}") from exc
+
+
 def export_dataset(
     client: Client,
     task_id: int,
@@ -55,31 +116,15 @@ def export_dataset(
     task = client.tasks.retrieve(task_id)
     check_format(client, format_name, str(task.dimension))
     check_storage(client, cloud_storage_id, key)
-    exists = object_exists(client, cloud_storage_id, key)
-    if exists and not overwrite:
-        raise InvalidArgument(
-            f"cloud storage #{cloud_storage_id} already has {key}; ask the user whether to "
-            "replace it, then call again with overwrite=true (or pick another cloud_path)"
-        )
-
-    started = time.monotonic()
-    try:
-        # The SDK starts the export and waits for it; CVAT uploads the file under the key.
-        task.export_dataset(
-            format_name,
-            key,
-            include_images=include_images,
-            location=Location.CLOUD_STORAGE,
-            cloud_storage_id=cloud_storage_id,
-            status_check_period=1,  # the SDK default (5 s) makes even a tiny export take 5 s
-        )
-    except Exception as exc:
-        if not is_refusal(exc):
-            raise
-        hint = f"check that {format_name} can export this task" + keys_hint(
-            cloud_storage_id, "write to"
-        )
-        raise InvalidArgument(f"{explain(exc).rstrip()}; {hint}") from exc
+    with _reserved(cloud_storage_id, key):
+        exists = _exists(client, cloud_storage_id, key)
+        if exists and not overwrite:
+            raise InvalidArgument(
+                f"cloud storage #{cloud_storage_id} already has {key}; ask the user whether to "
+                "replace it, then call again with overwrite=true (or pick another cloud_path)"
+            )
+        started = time.monotonic()
+        _export(task, format_name, include_images, cloud_storage_id, key)
     return ExportResult(
         cloud_storage_id=cloud_storage_id,
         cloud_path=key,
