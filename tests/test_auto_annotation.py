@@ -769,12 +769,14 @@ def test_wrong_model_refused_before_waiting_for_the_lock():
         aa._LOCK.release()
 
 
-@needs_torchvision
-def test_model_description_matches_torchvision():
-    import torchvision.models  # pylint: disable=import-outside-toplevel  # optional extra
-
-    detection = torchvision.models.list_models(module=torchvision.models.detection)
-    assert set(aa.DETECTION_MODELS) == set(detection)
+def test_model_description_names_patterns_not_a_copied_list():
+    description = tools.Model.__metadata__[0].description
+    for output, spec in aa.OUTPUTS.items():
+        assert f"{output} {spec.default}" in description  # the defaults
+    assert "boxes: any torchvision detection model" in description
+    assert "polygons: maskrcnn_*" in description and "skeletons: keypointrcnn_*" in description
+    assert "tags: any torchvision classification model" in description
+    assert not hasattr(aa, "DETECTION_MODELS")  # torchvision lists them at call time
 
 
 # --- the tool layer ---

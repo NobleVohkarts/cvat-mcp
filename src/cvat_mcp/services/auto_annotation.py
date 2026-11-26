@@ -33,7 +33,9 @@ Mode = Literal["append", "replace"]
 class _OutputSpec:
     function: str  # the SDK's built-in function: cvat_sdk.auto_annotation.functions.torchvision_*
     default: str  # its model when the caller names none
-    models: str | None  # fnmatch pattern over torchvision's detection models; None: classification
+    models: (
+        str | None
+    )  # fnmatch pattern over torchvision's detection models ("*": all); None: classification
     polygons: bool  # masks converted to polygons
 
 
@@ -49,22 +51,6 @@ OUTPUTS: dict[str, _OutputSpec] = {
     "tags": _OutputSpec("classification", "resnet50", None, False),
 }
 
-# torchvision.models.list_models(module=torchvision.models.detection), for the tool's description
-# (torchvision is an optional extra); a test keeps it in step with the installed torchvision.
-DETECTION_MODELS = (
-    "fasterrcnn_mobilenet_v3_large_320_fpn",
-    "fasterrcnn_mobilenet_v3_large_fpn",
-    "fasterrcnn_resnet50_fpn",
-    "fasterrcnn_resnet50_fpn_v2",
-    "fcos_resnet50_fpn",
-    "keypointrcnn_resnet50_fpn",
-    "maskrcnn_resnet50_fpn",
-    "maskrcnn_resnet50_fpn_v2",
-    "retinanet_resnet50_fpn",
-    "retinanet_resnet50_fpn_v2",
-    "ssd300_vgg16",
-    "ssdlite320_mobilenet_v3_large",
-)
 
 logger = logging.getLogger(__name__)
 

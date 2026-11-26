@@ -1,4 +1,3 @@
-import fnmatch
 from typing import Annotated
 
 from mcp.server.mcpserver import Context
@@ -7,7 +6,6 @@ from pydantic import Field
 from cvat_mcp.server import AUTO_ANNOTATION, get_client, open_client, tool
 from cvat_mcp.services import auto_annotation
 from cvat_mcp.services.auto_annotation import (
-    DETECTION_MODELS,
     OUTPUTS,
     AutoAnnotation,
     AutoAnnotationRunStatus,
@@ -34,13 +32,20 @@ Model = Annotated[
     Field(
         description="a built-in torchvision model; default per output: "
         + ", ".join(f"{output} {spec.default}" for output, spec in OUTPUTS.items())
+        # Patterns, not torchvision's list: importing it here would cost every server start
+        # seconds and hundreds of MB. A wrong name gets the installed models' list back.
         + ". Allowed: "
         + "; ".join(
             f"{output}: "
             + (
                 "any torchvision classification model (e.g. resnet50, convnext_tiny)"
                 if spec.models is None
-                else ", ".join(fnmatch.filter(DETECTION_MODELS, spec.models))
+                else (
+                    "any torchvision detection model (e.g. fasterrcnn_resnet50_fpn_v2, "
+                    "retinanet_resnet50_fpn_v2, ssdlite320_mobilenet_v3_large)"
+                    if spec.models == "*"
+                    else spec.models
+                )
             )
             for output, spec in OUTPUTS.items()
         )
