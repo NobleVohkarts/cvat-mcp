@@ -285,6 +285,21 @@ def check_storage(client: Client, storage_id: int, key: str) -> None:
         )
 
 
+def object_exists(client: Client, storage_id: int, key: str) -> bool:
+    """Whether the bucket has the object `key`, asked through CVAT (it holds the keys)."""
+    name, token = key.rsplit("/", 1)[-1], None
+    while True:
+        # prefix=<full key> lists that object by its last segment, plus longer names
+        page, _ = client.api_client.cloudstorages_api.retrieve_content_v2(
+            storage_id, prefix=key, **({"next_token": token} if token else {})
+        )
+        if any(e.name == name and str(e.type) == "REG" for e in page.content):
+            return True
+        token = page.next
+        if not token:
+            return False
+
+
 def keys_hint(storage_id: int) -> str:
     return (
         f", and that cloud storage #{storage_id} can read the bucket (its keys: "

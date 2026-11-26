@@ -1,3 +1,5 @@
+from unittest.mock import Mock
+
 import pytest
 from cvat_sdk.api_client.exceptions import ApiException
 from fakes import Obj, cloud_storage, fake_cloudstorages_api
@@ -9,6 +11,7 @@ from cvat_mcp.services.cloud_storages import (
     create_cloud_storage,
     delete_cloud_storage,
     list_cloud_storages,
+    object_exists,
     storage_info,
     update_cloud_storage,
 )
@@ -290,3 +293,34 @@ def test_delete_not_owned_refused():
 )
 def test_cloud_source(key, expected):
     assert cloud_source(key) == CloudSource(*expected)
+
+
+def _listing(*pages):
+    """retrieve_content_v2 returning `pages` in turn; each page is a list of (name, type)."""
+    replies = [
+        (Obj(content=[Obj(name=n, type=t) for n, t in page], next=str(i + 1) if i + 1 < len(pages) else None), None)
+        for i, page in enumerate(pages)
+    ]
+    return Mock(side_effect=replies)
+
+
+def _content_client(listing):
+    return Obj(api_client=Obj(cloudstorages_api=Obj(retrieve_content_v2=listing)))
+
+
+def test_object_exists_matches_the_last_key_segment():
+    listing = _listing([("a.zip", "REG")])
+    assert object_exists(_content_client(listing), 1, "exports/a.zip")
+    assert listing.call_args.args == (1,)
+    assert listing.call_args.kwargs["prefix"] == "exports/a.zip"
+
+
+def test_object_exists_ignores_longer_names_and_folders():
+    listing = _listing([("a.zip.bak", "REG"), ("a.zip", "DIR")])
+    assert not object_exists(_content_client(listing), 1, "exports/a.zip")
+
+
+def test_object_exists_follows_pages():
+    listing = _listing([("a.zip.bak", "REG")], [("a.zip", "REG")])
+    assert object_exists(_content_client(listing), 1, "exports/a.zip")
+    assert listing.call_args.kwargs["next_token"] == "1"
