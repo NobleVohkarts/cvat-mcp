@@ -336,3 +336,57 @@ def test_strict_arguments_and_version_in_process(monkeypatch):
     assert checks["not_object"] == "passed on to mcp"  # mcp's own validation answers
     # known arguments reach the tool body (which fails on the fake client)
     assert checks["known"] == ["result", True, "Error executing tool get_frame_annotations"]
+
+
+WRITE_IN_PROCESS = """
+import anyio, json
+import cvat_mcp.server as s, cvat_mcp.tools
+from mcp import Client
+from mcp.shared.exceptions import MCPError
+from cvat_mcp.errors import InvalidArgument
+
+class Reached:
+    def close(self):
+        pass
+
+    def __getattr__(self, name):  # the service's first use of the SDK client
+        raise InvalidArgument("reached the service")
+
+s._connect = lambda _settings: (Reached(), "admin")
+CALLS = {
+    "create_task": {"name": "t", "labels": [{"name": "car"}], "urls": ["https://e.com/a.jpg"]},
+    "import_annotations": {"task_id": 1, "cloud_storage_id": 1, "cloud_path": "a.json"},
+    "export_dataset": {"task_id": 1, "format": "COCO 1.0", "cloud_storage_id": 1,
+                       "cloud_path": "a.zip"},
+    "old_files": ["create_task", {"name": "t", "labels": [{"name": "car"}], "files": ["a.jpg"]}],
+    "old_file": ["import_annotations", {"task_id": 1, "file": "a.json"}],
+}
+
+async def outcome(client, name, arguments):
+    try:
+        result = await client.call_tool(name, arguments)
+        return ["result", result.content[0].text]
+    except MCPError as error:
+        return ["error", error.error.message]
+
+async def main():
+    async with Client(s.mcp) as client:
+        out = {}
+        for key, call in CALLS.items():
+            name, arguments = call if isinstance(call, list) else (key, call)
+            out[key] = await outcome(client, name, arguments)
+        print(json.dumps(out))
+
+anyio.run(main)
+"""
+
+
+def test_write_tools_pass_their_arguments_to_the_services(monkeypatch):
+    result = run(WRITE_IN_PROCESS, monkeypatch, "write")
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+    for name in ("create_task", "import_annotations", "export_dataset"):
+        assert out[name][1].endswith(": reached the service"), (name, out[name])
+    # local files are gone: the old arguments are unknown, not silently dropped
+    assert out["old_files"][0] == "error" and "files" in out["old_files"][1]
+    assert out["old_file"][0] == "error" and "file" in out["old_file"][1]

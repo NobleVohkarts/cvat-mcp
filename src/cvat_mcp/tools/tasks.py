@@ -59,7 +59,6 @@ def create_task(
         name,
         labels,
         project_id,
-        files,
         urls,
         cloud_storage_id,
         cloud_path,
