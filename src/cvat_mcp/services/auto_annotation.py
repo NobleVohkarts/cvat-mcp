@@ -208,16 +208,15 @@ def _old_objects(scope: Scope, frames: list[int]) -> dict[int, list]:
     return by_frame
 
 
-def _delete_stale(client: Client, scope: Scope, stale: list, saved: str) -> None:
-    """Deletes the old objects once the new ones are saved; a failure says both are there now."""
+def _delete_stale(client: Client, scope: Scope, stale: list) -> None:
+    """Deletes the old objects once the new ones are saved; a failure says both are there now
+    (what a retry does is _saved's to say)."""
     try:
         patch_annotations(client, "delete", scope, stale)
     except Exception as exc:
-        # Only replace deletes, and a repeated replace removes the old and the new ones alike.
         raise InvalidArgument(
-            f"the new objects were saved ({saved}), but deleting the {len(stale)} old shapes and "
-            f"tags failed: {explain(exc) or exc}; both are there now, and repeating the call "
-            "replaces them again"
+            f"the new objects were saved, but deleting the {len(stale)} old shapes and tags "
+            f"failed: {explain(exc) or exc}; both are there now"
         ) from exc
 
 
@@ -265,14 +264,18 @@ def label_map(fn, labels, polygons: bool) -> dict[int, tuple[int, dict[int, int]
     return mapping
 
 
-def remap(output, mapping, frame: int) -> list[tuple[str, object]]:
+def remap(
+    output, mapping, frame: int, names: dict[int, str], skipped: Counter
+) -> list[tuple[str, object]]:
     """The function's output as (kind, request) for the task's labels on that frame; objects of
-    labels the task lacks are dropped, and so are skeleton points it lacks."""
+    labels the task lacks are dropped (counted in skipped by the function's label names, names),
+    and so are skeleton points it lacks."""
     sent = []
     for obj in output:
         if obj.label_id not in mapping:
             raise _misfit(f"the model output an unknown label id {obj.label_id}")
         if (target := mapping[obj.label_id]) is None:
+            skipped[names[obj.label_id]] += 1
             continue
         label_id, points = target
         obj.label_id, obj.frame, obj.source = label_id, frame, "auto"
@@ -313,26 +316,21 @@ def annotate(  # pylint: disable=too-many-arguments,too-many-positional-argument
         batch = frames[start : start + FRAMES_PER_SAVE]
         sent = []
         for frame in batch:
+            # shortcut: one request per frame; on a video task CVAT decodes the chunk up to that
+            # frame each time (roughly 0.3-1 s next to ~5 s of inference); download a chunk at a
+            # time and decode it here if long video runs become common
             image = PIL.Image.open(scope.task.get_frame(frame, quality="original"))
             # shortcut: built-in functions ignore frame_name; upgrade to the file name from the
             # task meta if user-written functions are ever allowed
             output = fn.detect(Context(str(frame), opts.conf_threshold, opts.spec.polygons), image)
-            for obj in output:  # before remap rewrites label_id; an unknown id is remap's error
-                if obj.label_id in mapping and mapping[obj.label_id] is None:
-                    progress.skipped[function_names[obj.label_id]] += 1
-            sent += remap(output, mapping, frame)
+            sent += remap(output, mapping, frame, function_names, progress.skipped)
         ids = create_objects(client, scope, sent) if sent else []
         progress.frames_done += len(batch)
         progress.added.update(label_names[r.label_id] for _, r in sent)
         if progress.keep_objects:
             progress.objects += _objects(sent, ids, label_names)
         if stale := [item for frame in batch for item in old.get(frame, [])]:
-            saved = (
-                f"object ids {', '.join(map(str, ids)) or 'none'}"
-                if progress.keep_objects
-                else f"frames {batch[0]} to {batch[-1]}"
-            )
-            _delete_stale(client, scope, stale, saved)
+            _delete_stale(client, scope, stale)
 
 
 def _saved(progress: Progress, frames: list[int], opts: RunOptions) -> str:
@@ -409,8 +407,14 @@ def _answer(task_id: int, opts: RunOptions, started: float, **rest) -> AutoAnnot
     )
 
 
-def _note(objects: list, progress: Progress, labels) -> str | None:
-    if objects:
+def _prepare(opts: RunOptions, labels):
+    """The model (check_model passed, lock held) and its label mapping onto the task's."""
+    fn = load_function(opts)
+    return fn, label_map(fn, labels, opts.spec.polygons)
+
+
+def _note(progress: Progress, labels) -> str | None:
+    if progress.objects:
         return None
     names = ", ".join(sorted(label.name for label in labels))
     if progress.skipped:
@@ -431,9 +435,16 @@ def auto_annotate_frame(
     progress = Progress()
     check_model(opts)
     with _busy():
-        fn = load_function(opts)
-        mapping = label_map(fn, labels, opts.spec.polygons)
-        annotate(client, scope, fn, mapping, labels, opts, [frame], progress)
+        fn, mapping = _prepare(opts, labels)
+        try:
+            annotate(client, scope, fn, mapping, labels, opts, [frame], progress)
+        except Exception as exc:
+            if not progress.frames_done:
+                raise
+            ids = ", ".join(str(o.id) for o in progress.objects) or "none"
+            raise InvalidArgument(
+                f"{explain(exc) or exc}; object ids {ids}; {_saved(progress, [frame], opts)}"
+            ) from exc
     return _answer(
         task_id,
         opts,
@@ -441,7 +452,7 @@ def auto_annotate_frame(
         frame=frame,
         objects=progress.objects,
         skipped=dict(progress.skipped),
-        note=_note(progress.objects, progress, labels),
+        note=_note(progress, labels),
     )
 
 
@@ -510,8 +521,7 @@ def start_run(
     check_model(opts)
     _claim(run_id)
     try:
-        fn = load_function(opts)  # in this thread, so a bad model or download fails the call
-        mapping = label_map(fn, labels, opts.spec.polygons)  # and a model that doesn't fit
+        fn, mapping = _prepare(opts, labels)  # in this thread: a bad download fails the call
         run = AutoAnnotationRun(
             run_id=run_id,
             state="running",

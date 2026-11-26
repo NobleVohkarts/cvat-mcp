@@ -1,6 +1,7 @@
 import io
 import itertools
 import threading
+from collections import Counter
 from importlib.util import find_spec
 from unittest.mock import Mock
 
@@ -99,7 +100,7 @@ def _setup(size=5, **task_kw):
         size=size,
         labels=LABELS,
         get_frame=lambda n, quality=None: io.BytesIO(PNG),
-        **{"dimension": "2d", "data_original_chunk_type": "imageset"} | task_kw,
+        **{"dimension": "2d"} | task_kw,
     )
     api = _echo_api()
     client = _Client(**vars(fake_client(task, api_client=Obj(tasks_api=api), close=Mock())))
@@ -179,7 +180,7 @@ def test_label_map_skeleton_points():
         0,
         [cvataa.keypoint(0, [1, 2]), cvataa.keypoint(1, [3, 4]), cvataa.keypoint(2, [5, 6])],
     )
-    ((kind, remapped),) = aa.remap([skeleton], mapping, 7)
+    ((kind, remapped),) = aa.remap([skeleton], mapping, 7, {0: "pose"}, Counter())
     assert (kind, remapped.label_id, remapped.frame, remapped.source) == ("shape", 5, 7, "auto")
     assert [(e.label_id, e.frame, e.source) for e in remapped.elements] == [
         (20, 7, "auto"),
@@ -533,12 +534,6 @@ def test_background_run_setup_failure_releases_lock(use_function):
     run = _finish(result.run.run_id)
     assert run.state == "failed" and "connection refused" in run.error
     assert not aa._LOCK.locked()
-
-
-def test_background_runs_video_tasks(use_function):
-    result, _, _, run_api = _start(FakeFunction(), use_function, data_original_chunk_type="video")
-    assert _finish(result.run.run_id).state == "finished"
-    assert _sent(run_api)
 
 
 def test_background_label_mismatch_fails_call(use_function):

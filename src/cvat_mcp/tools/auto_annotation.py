@@ -1,3 +1,4 @@
+import fnmatch
 from typing import Annotated
 
 from mcp.server.mcpserver import Context
@@ -33,9 +34,16 @@ Model = Annotated[
     Field(
         description="a built-in torchvision model; default per output: "
         + ", ".join(f"{output} {spec.default}" for output, spec in OUTPUTS.items())
-        + f". boxes: any of {', '.join(DETECTION_MODELS)}; polygons and masks: maskrcnn_*; "
-        "skeletons: keypointrcnn_*; tags: any torchvision classification model (e.g. resnet50, "
-        "convnext_tiny)"
+        + ". Allowed: "
+        + "; ".join(
+            f"{output}: "
+            + (
+                "any torchvision classification model (e.g. resnet50, convnext_tiny)"
+                if spec.models is None
+                else ", ".join(fnmatch.filter(DETECTION_MODELS, spec.models))
+            )
+            for output, spec in OUTPUTS.items()
+        )
     ),
 ]
 
