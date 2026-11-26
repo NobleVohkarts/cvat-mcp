@@ -4,7 +4,7 @@ import pytest
 from cvat_sdk.api_client.exceptions import ApiException
 from cvat_sdk.core.exceptions import BackgroundRequestException
 from cvat_sdk.core.proxies.types import Location
-from fakes import Obj, cloud_storage, fake_client
+from fakes import Obj, cloud_storage, content_listing, fake_client, fake_cloudstorages_api
 
 from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.services.exports import check_format, export_dataset
@@ -40,11 +40,8 @@ def _client(content=(), storage=None, upload_error=None):
     task = Obj(
         id=7, dimension="2d", export_dataset=Mock(return_value=None, side_effect=upload_error)
     )
-    listing = Mock(
-        return_value=(Obj(content=[Obj(name=n, type=t) for n, t in content], next=None), None)
-    )
-    storage = storage or cloud_storage(1, "cvat")
-    api = Obj(retrieve=lambda id, **_: (storage, None), retrieve_content_v2=listing)
+    api = fake_cloudstorages_api([storage or cloud_storage(1, "cvat")])
+    api.retrieve_content_v2 = listing = content_listing(list(content))
     client = fake_client(task, api_client=Obj(server_api=FORMATS.server_api, cloudstorages_api=api))
     return client, task, listing
 
@@ -56,8 +53,11 @@ def _export(client, cloud_path="exports/a.zip", overwrite=False, fmt="COCO 1.0")
 def test_export_sends_the_key_to_the_storage():
     client, task, _ = _client()
     result = _export(client)
-    assert (result.task_id, result.format, result.cloud_storage_id) == (7, "COCO 1.0", 1)
-    assert (result.cloud_path, result.replaced) == ("exports/a.zip", False)
+    assert (result.cloud_storage_id, result.cloud_path, result.replaced) == (
+        1,
+        "exports/a.zip",
+        False,
+    )
     task.export_dataset.assert_called_once_with(
         "COCO 1.0",
         "exports/a.zip",

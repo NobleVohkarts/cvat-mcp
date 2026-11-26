@@ -178,3 +178,19 @@ def fake_cloudstorages_api(storages=()):
         retrieve=lambda id, **_: (next(s for s in storages if s.id == id), None),
         retrieve_status=Mock(return_value=(None, Obj(data=b'"AVAILABLE"'))),
     )
+
+
+def content_listing(*pages):
+    """cloudstorages_api.retrieve_content_v2 replying with `pages` in turn, each a list of
+    (name, type) pairs; every page but the last has a next token ("1", "2", ...)."""
+    replies = [
+        (
+            Obj(
+                content=[Obj(name=n, type=t) for n, t in page],
+                next=str(i + 1) if i + 1 < len(pages) else None,
+            ),
+            None,
+        )
+        for i, page in enumerate(pages)
+    ]
+    return Mock(side_effect=replies)

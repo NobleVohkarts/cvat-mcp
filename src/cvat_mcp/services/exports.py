@@ -6,12 +6,10 @@ from cvat_sdk.core.proxies.types import Location
 from pydantic import BaseModel
 
 from cvat_mcp.errors import InvalidArgument, explain, is_refusal
-from cvat_mcp.services.cloud_storages import check_storage, object_exists
+from cvat_mcp.services.cloud_storages import check_storage, keys_hint, object_exists
 
 
 class ExportResult(BaseModel):
-    task_id: int
-    format: str
     cloud_storage_id: int
     cloud_path: str  # the object key written
     replaced: bool  # an object was already there and was overwritten
@@ -78,13 +76,11 @@ def export_dataset(
     except Exception as exc:
         if not is_refusal(exc):
             raise
-        raise InvalidArgument(
-            f"{explain(exc).rstrip()}; check that cloud storage #{cloud_storage_id} can write "
-            "to the bucket (its keys: update_cloud_storage)"
-        ) from exc
+        hint = f"check that {format_name} can export this task" + keys_hint(
+            cloud_storage_id, "write to"
+        )
+        raise InvalidArgument(f"{explain(exc).rstrip()}; {hint}") from exc
     return ExportResult(
-        task_id=task_id,
-        format=format_name,
         cloud_storage_id=cloud_storage_id,
         cloud_path=key,
         replaced=exists,

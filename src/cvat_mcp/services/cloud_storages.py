@@ -300,8 +300,8 @@ def object_exists(client: Client, storage_id: int, key: str) -> bool:
             return False
 
 
-def keys_hint(storage_id: int) -> str:
+def keys_hint(storage_id: int, access: str = "read") -> str:
     return (
-        f", and that cloud storage #{storage_id} can read the bucket (its keys: "
+        f", and that cloud storage #{storage_id} can {access} the bucket (its keys: "
         "update_cloud_storage)"
     )
