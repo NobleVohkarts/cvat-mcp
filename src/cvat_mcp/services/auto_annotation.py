@@ -1,21 +1,19 @@
+import fnmatch
 import importlib
-import itertools
 import logging
 import threading
 import time
 from collections import Counter, defaultdict
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Literal
 
 import PIL.Image
 from cvat_sdk import Client
-
-# Private on purpose: annotate_task() runs whole tasks only and saves at the end; these two do
-# the per-frame work. Safe while cvat-sdk is pinned (==2.83.0); tests cover the mapping.
-from cvat_sdk.auto_annotation.driver import _AnnotationMapper, _DetectionFunctionContextImpl
-from cvat_sdk.auto_annotation.exceptions import BadFunctionError
+from cvat_sdk.api_client import models
+from cvat_sdk.auto_annotation import DetectionFunctionContext
 from pydantic import BaseModel
 
 from cvat_mcp.errors import InvalidArgument, explain
@@ -25,31 +23,59 @@ from cvat_mcp.services.annotation_edits import (
     create_objects,
     patch_annotations,
 )
-from cvat_mcp.services.annotations import Scope, scope_of, shape_bbox, target_scope
+from cvat_mcp.services.annotations import Scope, shape_bbox, target_scope
 
-Function = Literal["detection", "instance_segmentation", "keypoint_detection", "classification"]
+Output = Literal["boxes", "polygons", "masks", "skeletons", "tags"]
 Mode = Literal["append", "replace"]
 
-MAX_FRAMES = 20
-DEFAULT_MODELS: dict[str, str] = {
-    "detection": "fasterrcnn_resnet50_fpn_v2",
-    "instance_segmentation": "maskrcnn_resnet50_fpn_v2",
-    "keypoint_detection": "keypointrcnn_resnet50_fpn",
-    "classification": "resnet50",
+
+@dataclass(frozen=True)
+class _OutputSpec:
+    function: str  # the SDK's built-in function: cvat_sdk.auto_annotation.functions.torchvision_*
+    default: str  # its model when the caller names none
+    models: (
+        str | None
+    )  # fnmatch pattern over torchvision's detection models ("*": all); None: classification
+    polygons: bool  # masks converted to polygons
+
+
+OUTPUTS: dict[str, _OutputSpec] = {
+    "boxes": _OutputSpec("detection", "fasterrcnn_resnet50_fpn_v2", "*", False),
+    "polygons": _OutputSpec(
+        "instance_segmentation", "maskrcnn_resnet50_fpn_v2", "maskrcnn_*", True
+    ),
+    "masks": _OutputSpec("instance_segmentation", "maskrcnn_resnet50_fpn_v2", "maskrcnn_*", False),
+    "skeletons": _OutputSpec(
+        "keypoint_detection", "keypointrcnn_resnet50_fpn", "keypointrcnn_*", False
+    ),
+    "tags": _OutputSpec("classification", "resnet50", None, False),
 }
-# Detection models that also fit the segmentation / keypoint functions.
-_MODEL_PART = {"instance_segmentation": "maskrcnn", "keypoint_detection": "keypointrcnn"}
+
 
 logger = logging.getLogger(__name__)
+
+# Frames per save: one request each, far below CVAT's 100 MB body and 60 s answer limits.
+FRAMES_PER_SAVE = 10
 
 
 @dataclass(frozen=True)
 class RunOptions:
-    function: Function
+    output: Output
     model: str
     conf_threshold: float
-    polygons: bool
     mode: Mode
+
+    @property
+    def spec(self) -> _OutputSpec:
+        return OUTPUTS[self.output]
+
+
+# slots: the generated slot descriptors implement the interface's abstract properties
+@dataclass(frozen=True, slots=True)
+class Context(DetectionFunctionContext):
+    frame_name: str
+    conf_threshold: float | None
+    conv_mask_to_poly: bool
 
 
 class AutoObject(BaseModel):
@@ -65,8 +91,7 @@ class AutoAnnotationRun(BaseModel):
     run_id: str
     state: Literal["running", "finished", "failed"]
     task_id: int
-    job_id: int | None
-    function: str
+    output: str
     model: str
     mode: str
     frames_total: int
@@ -80,83 +105,80 @@ class AutoAnnotationRun(BaseModel):
 
 class AutoAnnotation(BaseModel):
     task_id: int
-    job_id: int | None
-    function: str
+    output: str
     model: str
     mode: str
-    frames: list[int] = []
+    frame: int | None = None
     objects: list[AutoObject] = []
     skipped: dict[str, int] = {}  # the function's label -> detections dropped (no such task label)
     seconds: float
     note: str | None = None
-    run: AutoAnnotationRun | None = None  # set for a background run (no frames given)
+    run: AutoAnnotationRun | None = None  # set for a background run (no frame given)
 
 
 @dataclass
 class Progress:
     keep_objects: bool = True  # False for background runs: nobody reads them, and they'd pile up
-    added: Counter = field(default_factory=Counter)
-    skipped: Counter = field(default_factory=Counter)
+    added: Counter = field(default_factory=Counter)  # task label -> saved objects
+    skipped: Counter = field(default_factory=Counter)  # function label -> dropped (no task label)
     objects: list[AutoObject] = field(default_factory=list)
-    saved_frames: list[int] = field(default_factory=list)
+    frames_done: int = 0  # frames saved, in order
 
 
 def check_options(
-    function: Function, model: str | None, conf_threshold: float, polygons: bool, mode: Mode
+    output: Output, model: str | None, conf_threshold: float, mode: Mode
 ) -> RunOptions:
     if not 0 <= conf_threshold <= 1:
         raise InvalidArgument("conf_threshold must be between 0 and 1")
-    return RunOptions(function, model or DEFAULT_MODELS[function], conf_threshold, polygons, mode)
+    return RunOptions(output, model or OUTPUTS[output].default, conf_threshold, mode)
 
 
-def _model_choices(function: str) -> list[str]:
+def _model_choices(spec: _OutputSpec) -> list[str]:
     import torchvision.models  # pylint: disable=import-outside-toplevel  # optional extra
 
-    if function == "classification":
+    if spec.models is None:
         return torchvision.models.list_models(module=torchvision.models)
-    part = _MODEL_PART.get(function, "")
-    return [
-        m for m in torchvision.models.list_models(module=torchvision.models.detection) if part in m
-    ]
+    detection = torchvision.models.list_models(module=torchvision.models.detection)
+    return fnmatch.filter(detection, spec.models)
 
 
-_loaded: tuple[tuple[str, str], object] | None = None
+class _OneModel:
+    """The last model used, kept loaded: loading and warming one up takes ~15 s. The old one is
+    dropped before the next one loads, so two (~2 GB each) are never in memory together, which
+    functools.lru_cache would allow while switching."""
+
+    def __init__(self):
+        self._key: tuple[str, str] | None = None
+        self.cached = None
+
+    def get(self, key: tuple[str, str], load: Callable[[], object]):
+        if key != self._key:
+            self._key = self.cached = None
+            self.cached = load()
+            self._key = key
+        return self.cached
+
+
+_model = _OneModel()
+
+
+def check_model(opts: RunOptions) -> None:
+    """Refuses a model that does not give that output; called before the lock is taken, so the
+    caller learns it at once (and a wrong name keeps the loaded model)."""
+    choices = _model_choices(opts.spec)
+    if opts.model not in choices:
+        raise InvalidArgument(
+            f"model {opts.model!r} does not give {opts.output}; choose one of: {', '.join(choices)}"
+        )
 
 
 def load_function(opts: RunOptions):
-    """The built-in function with that model; the last one used stays loaded."""
-    global _loaded  # pylint: disable=global-statement
-    key = (opts.function, opts.model)
-    if _loaded is not None and _loaded[0] == key:
-        return _loaded[1]
-    choices = _model_choices(opts.function)
-    if opts.model not in choices:
-        raise InvalidArgument(
-            f"unknown {opts.function} model {opts.model!r}; choose one of: {', '.join(choices)}"
-        )
-    _loaded = None  # free the old model before loading the new one
-    module = importlib.import_module(f"cvat_sdk.auto_annotation.functions.torchvision_{key[0]}")
-    fn = module.create(opts.model)
-    _loaded = (key, fn)
-    return fn
-
-
-def target_frames(scope: Scope, frames: list[int] | None) -> list[int]:
-    allowed = scope.frames()
-    if frames is None:
-        return allowed
-    if not 1 <= len(frames) <= MAX_FRAMES:
-        raise InvalidArgument(
-            f"pass 1 to at most {MAX_FRAMES} frames, or none to annotate all frames in the "
-            "background"
-        )
-    if len(set(frames)) != len(frames):
-        raise InvalidArgument("a frame is listed twice")
-    for frame in frames:
-        scope.check_frame(frame)
-        if frame not in allowed:
-            raise InvalidArgument(f"frame {frame} is deleted in task {scope.task.id}")
-    return sorted(frames)
+    """The built-in function with that model (check_model passed); the last one stays loaded."""
+    module = f"cvat_sdk.auto_annotation.functions.torchvision_{opts.spec.function}"
+    return _model.get(
+        (opts.spec.function, opts.model),
+        lambda: importlib.import_module(module).create(opts.model),
+    )
 
 
 def _old_objects(scope: Scope, frames: list[int]) -> dict[int, list]:
@@ -171,12 +193,85 @@ def _old_objects(scope: Scope, frames: list[int]) -> dict[int, list]:
     return by_frame
 
 
-def _bad_function(opts: RunOptions, exc: BadFunctionError) -> InvalidArgument:
+def _delete_stale(client: Client, scope: Scope, stale: list) -> None:
+    """Deletes the old objects once the new ones are saved; a failure says both are there now
+    (what a retry does is _saved's to say)."""
+    try:
+        patch_annotations(client, "delete", scope, stale)
+    except Exception as exc:
+        raise InvalidArgument(
+            f"the new objects were saved, but deleting the {len(stale)} old shapes and tags "
+            f"failed: {explain(exc) or exc}; both are there now"
+        ) from exc
+
+
+def _misfit(detail: str) -> InvalidArgument:
     return InvalidArgument(
-        f"the {opts.function} output does not fit this task's labels: {exc}. The task's label "
-        "types must fit what the function outputs (e.g. a skeleton label for "
-        "keypoint_detection, or type any)"
+        f"the model's output does not fit this task's labels: {detail}. The task's label types "
+        "must fit what the function outputs (e.g. a skeleton label for output skeletons, or "
+        "type any)"
     )
+
+
+def label_map(fn, labels, polygons: bool) -> dict[int, tuple[int, dict[int, int]] | None]:
+    """Function label id -> (task label id, function point id -> task point id), matched by
+    name; None where the task has no such label. Refuses outputs the task's labels can't hold."""
+    by_name = {label.name: label for label in labels}
+    mapping: dict[int, tuple[int, dict[int, int]] | None] = {}
+    for spec in fn.spec.labels:
+        label = by_name.get(spec.name)
+        if label is None:
+            mapping[spec.id] = None
+            continue
+        output = getattr(spec, "type", "any")
+        if output == "mask" and polygons:
+            output = "polygon"
+        if (output == "skeleton") != (label.type == "skeleton") or (
+            output != "any" and label.type not in ("any", output)
+        ):
+            raise _misfit(f"label {spec.name!r} is {output!r} in the model, {label.type!r} here")
+        points = {p.name: p.id for p in getattr(spec, "sublabels", None) or []}
+        task_points = {p.name: p.id for p in getattr(label, "sublabels", None) or []}
+        if missing := sorted(set(task_points) - set(points)):
+            raise _misfit(
+                f"skeleton {spec.name!r} has points the model does not output: {', '.join(missing)}"
+            )
+        mapping[spec.id] = (label.id, {points[name]: i for name, i in task_points.items()})
+    if not any(mapping.values()):
+        # Nothing could be added, and replace would only delete: refuse before any write.
+        model_names = [spec.name for spec in fn.spec.labels]
+        shown = ", ".join(model_names[:12]) + (", ..." if len(model_names) > 12 else "")
+        raise InvalidArgument(
+            f"none of the model's labels are among the task's "
+            f"({', '.join(sorted(by_name))}); labels match by exact name, and the model's are: "
+            f"{shown}"
+        )
+    return mapping
+
+
+def remap(
+    output, mapping, frame: int, names: dict[int, str], skipped: Counter
+) -> list[tuple[str, object]]:
+    """The function's output as (kind, request) for the task's labels on that frame; objects of
+    labels the task lacks are dropped (counted in skipped by the function's label names, names),
+    and so are skeleton points it lacks."""
+    sent = []
+    for obj in output:
+        if obj.label_id not in mapping:
+            raise _misfit(f"the model output an unknown label id {obj.label_id}")
+        if (target := mapping[obj.label_id]) is None:
+            skipped[names[obj.label_id]] += 1
+            continue
+        label_id, points = target
+        obj.label_id, obj.frame, obj.source = label_id, frame, "auto"
+        obj.attributes = []  # built-in functions output none; their ids would not be the task's
+        elements = getattr(obj, "elements", None) or []
+        if elements:
+            obj.elements = [e for e in elements if e.label_id in points]
+            for e in obj.elements:
+                e.label_id, e.frame, e.source = points[e.label_id], frame, "auto"
+        sent.append(("tag" if isinstance(obj, models.LabeledImageRequest) else "shape", obj))
+    return sent
 
 
 def _objects(sent, ids, names: dict[int, str]) -> list[AutoObject]:
@@ -193,68 +288,50 @@ def _objects(sent, ids, names: dict[int, str]) -> list[AutoObject]:
     ]
 
 
-def annotate(
-    client: Client,
-    scope: Scope,
-    labels,
-    fn,
-    opts: RunOptions,
-    frames: list[int],
-    chunk_size: int,
-    progress: Progress,
+def annotate(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    client: Client, scope: Scope, fn, mapping, labels, opts: RunOptions, frames, progress
 ) -> None:
-    """Run fn on frames, saving each chunk of chunk_size frames in one upload."""
-    function_names = {label.id: label.name for label in fn.spec.labels}
-    names = {label.id: label.name for label in labels}
-    task_names = set(names.values())
-    try:
-        mapper = _AnnotationMapper(
-            client.logger,
-            fn.spec.labels,
-            labels,
-            allow_unmatched_labels=True,
-            conv_mask_to_poly=opts.polygons,
-        )
-    except BadFunctionError as exc:
-        raise _bad_function(opts, exc) from exc
-    # Fetched once, before any write; each chunk's old objects go just before its new ones, so a
-    # failure costs at most one chunk's old annotations.
+    """Runs fn on frames, saving every FRAMES_PER_SAVE frames in one request. With replace, a
+    batch's old shapes and tags are deleted right after its new ones are saved."""
+    function_names = {spec.id: spec.name for spec in fn.spec.labels}
+    label_names = {label.id: label.name for label in labels}
+    # Fetched once, before any write, so no batch deletes what an earlier batch saved.
     old = _old_objects(scope, frames) if opts.mode == "replace" else {}
-
-    for start in range(0, len(frames), chunk_size):
-        chunk = frames[start : start + chunk_size]
-        sent, skipped = [], Counter()
-        for frame in chunk:
+    for start in range(0, len(frames), FRAMES_PER_SAVE):
+        batch = frames[start : start + FRAMES_PER_SAVE]
+        sent = []
+        for frame in batch:
+            # shortcut: one request per frame; on a video task CVAT decodes the chunk up to that
+            # frame each time (roughly 0.3-1 s next to ~5 s of inference); download a chunk at a
+            # time and decode it here if long video runs become common
             image = PIL.Image.open(scope.task.get_frame(frame, quality="original"))
-            # https://github.com/pylint-dev/pylint/issues/9013 (the SDK silences it the same way)
-            # pylint: disable-next=abstract-class-instantiated
-            context = _DetectionFunctionContextImpl(
-                # shortcut: built-in functions ignore frame_name; upgrade to the file name from
-                # the task meta if user-written functions are ever allowed
-                frame_name=str(frame),
-                conf_threshold=opts.conf_threshold,
-                conv_mask_to_poly=opts.polygons,
-            )
-            output = fn.detect(context, image)
-            for a in output:  # an id outside the spec is the mapper's error to report
-                name = function_names.get(a.label_id)
-                if name is not None and name not in task_names:
-                    skipped[name] += 1
-            try:
-                tags, shapes = mapper.validate_and_remap(output, frame)
-            except BadFunctionError as exc:
-                raise _bad_function(opts, exc) from exc
-            sent += [("shape", s) for s in shapes] + [("tag", t) for t in tags]
-
-        stale = [item for frame in chunk for item in old.get(frame, [])]
-        if stale:
-            patch_annotations(client, "delete", scope, stale)
+            # shortcut: built-in functions ignore frame_name; upgrade to the file name from the
+            # task meta if user-written functions are ever allowed
+            output = fn.detect(Context(str(frame), opts.conf_threshold, opts.spec.polygons), image)
+            sent += remap(output, mapping, frame, function_names, progress.skipped)
         ids = create_objects(client, scope, sent) if sent else []
+        progress.frames_done += len(batch)
+        progress.added.update(label_names[r.label_id] for _, r in sent)
         if progress.keep_objects:
-            progress.objects += _objects(sent, ids, names)
-        progress.added.update(names[r.label_id] for _, r in sent)
-        progress.skipped.update(skipped)
-        progress.saved_frames += chunk
+            progress.objects += _objects(sent, ids, label_names)
+        if stale := [item for frame in batch for item in old.get(frame, [])]:
+            _delete_stale(client, scope, stale)
+
+
+def _saved(progress: Progress, frames: list[int], opts: RunOptions) -> str:
+    """What a failed run left in CVAT, and what running it again does."""
+    if not progress.frames_done:
+        return "nothing was saved"
+    # Not "use replace": that would also delete the annotations the frames had before.
+    again = (
+        "replaces them again"
+        if opts.mode == "replace"
+        else "duplicates them, so ask the user how to go on before running it again"
+    )
+    return (
+        f"the first {progress.frames_done} of {len(frames)} frames (through frame "
+        f"{frames[progress.frames_done - 1]}) are saved; running it again {again}"
+    )
 
 
 # One model run at a time: the CPU is the bottleneck, and two runs would also double the memory.
@@ -262,7 +339,9 @@ _LOCK = threading.Lock()
 _ACTIVE: str | None = None  # the background run holding the lock; None for a frame run
 
 
-def _acquire(run_id: str | None = None) -> None:
+def _claim(run_id: str | None = None) -> None:
+    """Takes the lock, or says who holds it. A background run's lock is released by its thread
+    (see _released), so a one-frame call uses _busy and a run calls this directly."""
     global _ACTIVE  # pylint: disable=global-statement
     if not _LOCK.acquire(blocking=False):
         if _ACTIVE is None:
@@ -274,14 +353,27 @@ def _acquire(run_id: str | None = None) -> None:
     _ACTIVE = run_id
 
 
-def _release() -> None:
+@contextmanager
+def _released():
+    """Releases the lock when the block ends, however it ends."""
     global _ACTIVE  # pylint: disable=global-statement
-    _ACTIVE = None
-    _LOCK.release()
+    try:
+        yield
+    finally:
+        _ACTIVE = None
+        _LOCK.release()
 
 
-def resolve_scope(client: Client, task_id: int | None, job_id: int | None) -> Scope:
-    scope = target_scope(client, task_id, job_id)
+@contextmanager
+def _busy():
+    """Holds the lock for a one-frame call."""
+    _claim()
+    with _released():
+        yield
+
+
+def resolve_scope(client: Client, task_id: int) -> Scope:
+    scope = target_scope(client, task_id, None)
     if str(scope.task.dimension) == "3d":
         raise InvalidArgument(
             f"task {scope.task.id} is a 3D task; auto-annotation supports 2D images"
@@ -290,11 +382,10 @@ def resolve_scope(client: Client, task_id: int | None, job_id: int | None) -> Sc
     return scope
 
 
-def _answer(scope: Scope, opts: RunOptions, started: float, **rest) -> AutoAnnotation:
+def _answer(task_id: int, opts: RunOptions, started: float, **rest) -> AutoAnnotation:
     return AutoAnnotation(
-        task_id=scope.task.id,
-        job_id=scope.job_id,
-        function=opts.function,
+        task_id=task_id,
+        output=opts.output,
         model=opts.model,
         mode=opts.mode,
         seconds=round(time.monotonic() - started, 1),
@@ -302,155 +393,184 @@ def _answer(scope: Scope, opts: RunOptions, started: float, **rest) -> AutoAnnot
     )
 
 
+def _prepare(opts: RunOptions, labels):
+    """The model (check_model passed, lock held) and its label mapping onto the task's."""
+    fn = load_function(opts)
+    return fn, label_map(fn, labels, opts.spec.polygons)
+
+
 def _note(progress: Progress, labels) -> str | None:
     if progress.objects:
         return None
     names = ", ".join(sorted(label.name for label in labels))
     if progress.skipped:
-        return f"nothing matched: the function's labels are not among the task's ({names})"
-    return "the model found nothing above conf_threshold on these frames"
+        found = ", ".join(sorted(progress.skipped))
+        return f"nothing matched: the model found only {found}, which the task lacks ({names})"
+    return "the model found nothing above conf_threshold on this frame"
 
 
-def auto_annotate_frames(
-    client: Client,
-    task_id: int | None,
-    job_id: int | None,
-    frames: list[int],
-    opts: RunOptions,
-    chunk_size: int,
+def auto_annotate_frame(
+    client: Client, task_id: int, frame: int, opts: RunOptions
 ) -> AutoAnnotation:
     started = time.monotonic()
-    scope = resolve_scope(client, task_id, job_id)
-    frames = target_frames(scope, frames)
+    scope = resolve_scope(client, task_id)
+    scope.check_frame(frame)
+    if frame not in scope.frames():
+        raise InvalidArgument(f"frame {frame} is deleted in task {scope.task.id}")
     labels = scope.task.get_labels()
     progress = Progress()
-    _acquire()
-    try:
-        fn = load_function(opts)
-        annotate(client, scope, labels, fn, opts, frames, chunk_size, progress)
-    except Exception as exc:
-        if not progress.saved_frames:
-            raise
-        # The model would otherwise retry the whole call and duplicate the saved objects.
-        ids = ", ".join(str(o.id) for o in progress.objects)
-        raise InvalidArgument(
-            f"auto-annotation failed after saving frames "
-            f"{', '.join(map(str, progress.saved_frames))} (object ids: {ids or 'none'}): "
-            f"{explain(exc) or exc}. Those frames are done: do not repeat them."
-        ) from exc
-    finally:
-        _release()
+    check_model(opts)
+    with _busy():
+        fn, mapping = _prepare(opts, labels)
+        try:
+            annotate(client, scope, fn, mapping, labels, opts, [frame], progress)
+        except Exception as exc:
+            if not progress.frames_done:
+                raise
+            ids = ", ".join(str(o.id) for o in progress.objects) or "none"
+            raise InvalidArgument(
+                f"{explain(exc) or exc}; object ids {ids}; {_saved(progress, [frame], opts)}"
+            ) from exc
     return _answer(
-        scope,
+        task_id,
         opts,
         started,
-        frames=frames,
+        frame=frame,
         objects=progress.objects,
         skipped=dict(progress.skipped),
         note=_note(progress, labels),
     )
 
 
-class AutoAnnotationRuns(BaseModel):
-    runs: list[AutoAnnotationRun]
-    note: str = (
-        "runs are kept in memory since the server started; a restart forgets them, and a run in "
-        "progress stops (the frames it saved stay in CVAT)"
-    )
+class AutoAnnotationRunStatus(BaseModel):
+    run: AutoAnnotationRun | None
+    note: str | None = None
 
 
-# shortcut: runs live in memory and are never pruned (a few hundred bytes each); persist them
-# if the server ever needs to resume runs after a restart.
-_RUNS: dict[str, tuple[AutoAnnotationRun, Progress]] = {}
-_RUN_NUMBERS = itertools.count(1)
+# Only the latest run: one runs at a time, and an older one's objects are already in CVAT.
+_latest: tuple[AutoAnnotationRun, Progress] | None = None
+_issued = 0  # run numbers handed out since the server started (run-1 .. run-_issued)
 
 
-def _snapshot(run_id: str) -> AutoAnnotationRun:
-    run, progress = _RUNS[run_id]
+def _was_issued(run_id: str) -> bool:
+    prefix, _, number = run_id.partition("-")
+    return prefix == "run" and number.isdigit() and 1 <= int(number) <= _issued
+
+
+def _snapshot(run: AutoAnnotationRun, progress: Progress) -> AutoAnnotationRun:
     return run.model_copy(
         update={
-            "frames_done": len(progress.saved_frames),
+            "frames_done": progress.frames_done,
             "added": dict(progress.added),
             "skipped": dict(progress.skipped),
         }
     )
 
 
-def _run(run: AutoAnnotationRun, progress: Progress, client_factory, opts, fn, frames, size):
-    client = None
-    try:
-        # Its own client: the request's client may close when the MCP session ends.
-        client = client_factory()
-        task = client.tasks.retrieve(run.task_id)
-        scope = scope_of(client, task, run.job_id)
-        annotate(client, scope, task.get_labels(), fn, opts, frames, size, progress)
-        run.state = "finished"
-    except Exception as exc:  # pylint: disable=broad-exception-caught  # recorded for the model
-        logger.exception("auto-annotation run %s failed", run.run_id)
-        run.state = "failed"
-        run.error = explain(exc) or f"{type(exc).__name__}: {exc}"
-    finally:
-        run.finished = datetime.now(timezone.utc)
-        if client is not None:
-            client.close()
-        _release()
+def _run(  # pylint: disable=too-many-arguments,too-many-positional-arguments  # thread args
+    run: AutoAnnotationRun,
+    progress: Progress,
+    client_factory,
+    opts: RunOptions,
+    fn,
+    mapping,
+    labels,
+    frames,
+):
+    with _released():  # start_run took the lock for this thread
+        try:
+            # Its own client: the request's client may close when the MCP session ends.
+            with client_factory() as client:
+                scope = Scope(client.tasks.retrieve(run.task_id))
+                annotate(client, scope, fn, mapping, labels, opts, frames, progress)
+        except Exception as exc:  # pylint: disable=broad-exception-caught  # recorded for the model
+            logger.exception("auto-annotation run %s failed", run.run_id)
+            error = explain(exc) or f"{type(exc).__name__}: {exc}"
+            _end(run, "failed", f"{error}; {_saved(progress, frames, opts)}")
+        else:
+            _end(run, "finished")
+
+
+def _end(run: AutoAnnotationRun, state: str, error: str | None = None) -> None:
+    """state last: get_run reads without the lock, so it never sees an end without its details."""
+    run.error, run.finished = error, datetime.now(timezone.utc)
+    run.state = state
 
 
 def start_run(
     client: Client,
     client_factory: Callable[[], Client],
-    task_id: int | None,
-    job_id: int | None,
+    task_id: int,
     opts: RunOptions,
-    chunk_size: int,
 ) -> AutoAnnotation:
-    """Check everything here, then annotate all the target's frames in a background thread."""
+    """Check everything here, then annotate the whole task in a background thread."""
+    global _latest, _issued  # pylint: disable=global-statement
     started = time.monotonic()
-    scope = resolve_scope(client, task_id, job_id)
-    frames = target_frames(scope, None)
+    scope = resolve_scope(client, task_id)
+    task = scope.task
+    frames = scope.frames()
     if not frames:
-        raise InvalidArgument(f"task {scope.task.id} has no frames to annotate")
-    run_id = f"run-{next(_RUN_NUMBERS)}"
-    _acquire(run_id)
+        raise InvalidArgument(f"task {task.id} has no frames to annotate")
+    labels = task.get_labels()
+    run_id = f"run-{_issued + 1}"
+    check_model(opts)
+    _claim(run_id)
+    _issued += 1  # only once the lock is held, so a refused call takes no number
     try:
-        fn = load_function(opts)  # in this thread, so a bad model or download fails the call
-    except BaseException:
-        _release()
-        raise
-    run = AutoAnnotationRun(
-        run_id=run_id,
-        state="running",
-        task_id=scope.task.id,
-        job_id=scope.job_id,
-        function=opts.function,
-        model=opts.model,
-        mode=opts.mode,
-        frames_total=len(frames),
-        started=datetime.now(timezone.utc),
-    )
-    progress = Progress(keep_objects=False)
-    _RUNS[run_id] = (run, progress)
-    answer = _snapshot(run_id)  # before the thread can change it
-    threading.Thread(
-        target=_run,
-        args=(run, progress, client_factory, opts, fn, frames, chunk_size),
-        name=f"auto-annotation {run_id}",
-        daemon=True,
-    ).start()
+        fn, mapping = _prepare(opts, labels)  # in this thread: a bad download fails the call
+        run = AutoAnnotationRun(
+            run_id=run_id,
+            state="running",
+            task_id=task.id,
+            output=opts.output,
+            model=opts.model,
+            mode=opts.mode,
+            frames_total=len(frames),
+            started=datetime.now(timezone.utc),
+        )
+        progress = Progress(keep_objects=False)
+        _latest = (run, progress)
+        answer = _snapshot(run, progress)  # before the thread can change it
+        threading.Thread(
+            target=_run,
+            args=(run, progress, client_factory, opts, fn, mapping, labels, frames),
+            name=f"auto-annotation {run_id}",
+            daemon=True,
+        ).start()  # from here on the thread owns the lock
+    except BaseException as exc:
+        if _latest is not None and _latest[0].run_id == run_id:  # registered, but never ran
+            _end(_latest[0], "failed", f"the run could not start: {exc}")
+        with _released():  # no thread started, so nothing else would release it
+            raise
     return _answer(
-        scope,
+        task.id,
         opts,
         started,
-        note=f"running in the background; follow it with get_auto_annotation_run(run_id={run_id!r})",
+        note="running in the background; follow it with "
+        f"get_auto_annotation_run(run_id={run_id!r})",
         run=answer,
     )
 
 
-def get_runs(run_id: str | None) -> AutoAnnotationRuns:
-    if run_id is None:
-        # a copy: another request's start_run may add a run meanwhile
-        return AutoAnnotationRuns(runs=[_snapshot(r) for r in reversed(list(_RUNS))])
-    if run_id not in _RUNS:
-        known = ", ".join(_RUNS) or "none since the server started"
-        raise InvalidArgument(f"unknown run_id {run_id!r}; known runs: {known}")
-    return AutoAnnotationRuns(runs=[_snapshot(run_id)])
+def get_run(run_id: str | None) -> AutoAnnotationRunStatus:
+    """The latest run; an older run_id gets it too, with a note saying so."""
+    latest = _latest  # one read: start_run may replace it meanwhile
+    if latest is None:
+        return AutoAnnotationRunStatus(
+            run=None, note="no auto-annotation run since the server started"
+        )
+    run = _snapshot(*latest)
+    notes = []
+    if run_id is not None and run_id != run.run_id:
+        notes.append(
+            f"{run_id} is no longer kept: only the latest run ({run.run_id}) is"
+            if _was_issued(run_id)
+            else f"unknown run_id {run_id}: this server has issued run-1 to run-{_issued} since "
+            f"it started; the latest is {run.run_id}"
+        )
+    if run.state == "running":
+        notes.append(
+            "a server restart stops it; the frames it saved by then stay "
+            f"(it saves every {FRAMES_PER_SAVE})"
+        )
+    return AutoAnnotationRunStatus(run=run, note="; ".join(notes) or None)
