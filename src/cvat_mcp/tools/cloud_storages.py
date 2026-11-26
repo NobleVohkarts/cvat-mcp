@@ -28,27 +28,31 @@ def list_cloud_storages(
 @tool(write=True, open_world_hint=True)
 def create_cloud_storage(
     ctx: Context,
-    url: str,
+    bucket: str,
+    endpoint_url: str | None = None,
+    region: str | None = None,
     access_key_id: str | None = None,
     secret_access_key: str | None = None,
     display_name: DisplayName | None = None,
-    region: str | None = None,
 ) -> CloudStorageStatus:
-    """Use to register an S3-compatible bucket (AWS S3, Cloudflare R2, MinIO) in CVAT, only
-    when the user asks: url is a bucket link (s3://bucket/..., https://<account>.r2.
-    cloudflarestorage.com/bucket/..., https://bucket.s3.<region>.amazonaws.com/...). The whole
-    bucket is registered; folders are chosen per task. Pass both keys for a private bucket, or
-    neither for a public one; never repeat the keys to the user. CVAT checks that the bucket is
-    reachable and refuses one it can't read. A bucket registered once is reused; change its keys
-    with update_cloud_storage."""
+    """Use to register an S3-compatible bucket in CVAT, only when the user asks: bucket is the
+    bucket name; endpoint_url is the S3 API endpoint of a host other than AWS (e.g.
+    https://<account_id>.r2.cloudflarestorage.com for Cloudflare R2, or a MinIO or other
+    S3-compatible server's URL), left out for AWS S3; region when the host needs one (an AWS
+    bucket outside us-east-1, "auto" for R2). The whole bucket is registered; folders are chosen
+    per task with cloud_path. Pass both keys for a private bucket, or neither for a public one;
+    never repeat the keys to the user. CVAT checks that the bucket is reachable and refuses one
+    it can't read. A bucket already registered with the same endpoint is refused with its id:
+    use that id, or change its keys with update_cloud_storage."""
     return cloud_storages.create_cloud_storage(
         get_client(ctx),
         settings.url,
-        url,
+        bucket,
+        endpoint_url,
+        region,
         access_key_id,
         secret_access_key,
         display_name,
-        region,
     )
 
 
