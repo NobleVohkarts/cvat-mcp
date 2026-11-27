@@ -43,7 +43,7 @@ def create_gt_job(
     return job_edits.create_gt_job(get_client(ctx), task_id, frame_count, frames, seed)
 
 
-def _confirm_delete_gt_job(ctx: Context, job_id: int):
+async def _confirm_delete_gt_job(ctx: Context, job_id: int):
     return ask(
         ctx,
         "delete_gt_job",
@@ -60,7 +60,6 @@ def delete_gt_job(
 ) -> DeletedJob:
     """Use to delete a ground-truth job with its annotations, only when the user explicitly asks.
     Only in tasks owned by this server's CVAT account; annotation jobs can't be deleted (CVAT
-    makes them from the task's segments). The client may ask the user to confirm first; "the user
-    declined" means it was not done: don't call again unless the user asks."""
+    makes them from the task's segments)."""
     require_yes(confirmation, f"ground-truth job {job_id} was not deleted")
     return job_edits.delete_gt_job(get_client(ctx), job_id)

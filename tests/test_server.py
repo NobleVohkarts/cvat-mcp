@@ -326,12 +326,10 @@ def test_http_mode_reports_unreachable_cvat_in_one_line(monkeypatch):
     assert "cannot reach CVAT" in result.stderr and "Traceback" not in result.stderr
 
 
-IN_PROCESS = """
+FAKE_CVAT = """
 import anyio, json
-from types import SimpleNamespace as Obj
 import cvat_mcp.server as s, cvat_mcp.tools
 from mcp import Client
-from mcp.shared.exceptions import MCPError
 from cvat_mcp.errors import InvalidArgument
 
 class Reached:
@@ -342,6 +340,11 @@ class Reached:
         raise InvalidArgument("reached the service")
 
 s._connect = lambda _settings: (Reached(), "admin")
+"""
+IN_PROCESS = FAKE_CVAT + """
+from types import SimpleNamespace as Obj
+from mcp.shared.exceptions import MCPError
+
 LABELS = [{"name": "car"}]
 CALLS = {  # write tools whose arguments changed: each must reach its service
     "create_task": ("create_task", {"name": "t", "labels": LABELS, "urls": ["https://e.com/a"]}),
@@ -402,23 +405,9 @@ def test_strict_arguments_and_version_in_process(monkeypatch):
     assert checks["old_file"][:2] == ["error", -32602] and "file" in checks["old_file"][2]
 
 
-CONFIRMATIONS = """
-import anyio, json
-from importlib.util import find_spec
-import cvat_mcp.server as s, cvat_mcp.tools
-from mcp import Client
+CONFIRMATIONS = FAKE_CVAT + """
 from mcp_types import ElicitResult
-from cvat_mcp.errors import InvalidArgument
 
-class Reached:
-    def close(self):
-        pass
-
-    def __getattr__(self, name):  # a tool's first use of the SDK client
-        raise InvalidArgument("reached the service")
-
-s._connect = lambda _settings: (Reached(), "admin")
-AA = all(find_spec(m) is not None for m in ("torch", "torchvision", "skimage"))
 CASES = {
     "delete_task": {"task_id": 7},
     "delete_gt_job": {"job_id": 73},
@@ -441,23 +430,22 @@ SAFE = {  # the same tools with arguments that ask nothing, and the deletes that
     "delete_issue": {"issue_id": 5},
     "delete_annotations": {"task_id": 7, "shape_ids": [1]},
 }
-if not AA:
-    del CASES["auto_annotate"], SAFE["auto_annotate"]
+CASES = {name: args for name, args in CASES.items() if name in s.REGISTERED_TOOLS}
+SAFE = {name: args for name, args in SAFE.items() if name in s.REGISTERED_TOOLS}
 
 async def outcomes(mode, calls, answer=None):
-    asked, current = {}, [None]
+    asked = []
 
     async def callback(_ctx, params):
-        asked.setdefault(current[0], []).append(params.message)
+        asked.append(params.message)
         return answer
 
     out = {}
-    callback_or_none = callback if answer is not None else None
-    async with Client(s.mcp, mode=mode, elicitation_callback=callback_or_none) as client:
+    async with Client(s.mcp, mode=mode, elicitation_callback=answer and callback) as client:
         for name, arguments in calls.items():
-            current[0] = name
+            asked.clear()
             result = await client.call_tool(name, arguments)
-            out[name] = [result.is_error, result.content[0].text, asked.get(name, [])]
+            out[name] = [result.is_error, result.content[0].text, list(asked)]
     return out
 
 async def main():
@@ -488,6 +476,7 @@ MESSAGES = {
     "auto_annotate": "Replace the shapes and tags on all frames of task 7 with the model's?",
     "export_dataset": "Overwrite a.zip in cloud storage 1 if it exists?",
 }
+AGAIN = "don't call again unless the user asks"
 REFUSALS = {
     "delete_task": "task 7 was not deleted",
     "delete_gt_job": "ground-truth job 73 was not deleted",
@@ -511,10 +500,10 @@ def test_confirmations_in_process(monkeypatch):
             assert is_error and text.endswith(": reached the service"), (mode, name, text)
         for name, (is_error, text, asked) in runs["decline"].items():
             assert asked == [MESSAGES[name]], (mode, name, asked)
-            refusal = f": the user declined: {REFUSALS[name]}"
+            refusal = f": the user declined: {REFUSALS[name]}; {AGAIN}"
             assert is_error and text.endswith(refusal), (mode, name, text)
         for name, (_, text, asked) in runs["safe"].items():
-            # test_import_default_mode_asks_nothing: an omitted mode means append
+            # an omitted mode means append, an omitted overwrite means false
             assert not asked, (mode, name, "asked without a risky argument")
             assert text.endswith(": reached the service"), (mode, name, text)
         for name, (_, text, asked) in runs["no_form"].items():

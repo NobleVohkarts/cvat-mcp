@@ -18,6 +18,7 @@ from cvat_mcp.confirm import YES, Answer, ask, can_show_form, needs_confirmation
 
 pytestmark = pytest.mark.anyio
 MODES = ["2026-07-28", "legacy"]
+DECLINED = ": the user declined: 7 was not replaced; don't call again unless the user asks"
 
 
 @pytest.fixture
@@ -68,7 +69,7 @@ async def test_accept_runs(mode):
 async def test_decline_and_cancel_refuse(mode, action):
     callback, asked = answering(action)
     is_error, text = await call(mode, {"x": 7, "mode": "replace"}, callback)
-    assert is_error and text.endswith(": the user declined: 7 was not replaced")  # mcp's prefix
+    assert is_error and text.endswith(DECLINED)  # after mcp's prefix
     assert asked == ["Replace 7?"]
 
 
@@ -76,7 +77,7 @@ async def test_decline_and_cancel_refuse(mode, action):
 async def test_accept_unchecked_is_a_decline(mode):
     callback, _ = answering("accept", {"confirm": False})
     is_error, text = await call(mode, {"x": 7, "mode": "replace"}, callback)
-    assert is_error and text.endswith(": the user declined: 7 was not replaced")
+    assert is_error and text.endswith(DECLINED)
 
 
 @pytest.mark.parametrize("mode", MODES)

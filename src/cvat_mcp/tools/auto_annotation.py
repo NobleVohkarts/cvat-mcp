@@ -55,7 +55,7 @@ Model = Annotated[
 ]
 
 
-def _confirm_replace(ctx: Context, task_id: int, frame: int | None = None, mode: Mode = "append"):
+async def _confirm_replace(ctx: Context, task_id: int, frame: int | None, mode: Mode):
     scope = (
         f"frame {frame} of task {task_id}" if frame is not None else f"all frames of task {task_id}"
     )
@@ -89,9 +89,7 @@ def auto_annotate(  # pylint: disable=too-many-arguments,too-many-positional-arg
     duplicates them); "replace" swaps the shapes and tags on the run's frames for the new ones
     (each batch's old ones deleted after its new ones are saved), never tracks, only when the
     user asks. One run at a time. Tasks with overlapping jobs are refused. The first use of a
-    model downloads its weights (~170 MB). With mode "replace" the client may ask the user to
-    confirm first; "the user declined" means it was not done: don't call again unless the user
-    asks."""
+    model downloads its weights (~170 MB)."""
     require_yes(confirmation, f"nothing was annotated on task {task_id}")
     opts = auto_annotation.check_options(output, model, conf_threshold, mode)
     client = get_client(ctx)

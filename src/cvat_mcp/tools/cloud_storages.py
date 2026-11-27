@@ -80,7 +80,7 @@ def update_cloud_storage(
     )
 
 
-def _confirm_delete_cloud_storage(ctx: Context, cloud_storage_id: int):
+async def _confirm_delete_cloud_storage(ctx: Context, cloud_storage_id: int):
     return ask(
         ctx,
         "delete_cloud_storage",
@@ -99,7 +99,6 @@ def delete_cloud_storage(
     """Use to delete a cloud storage from CVAT (the bucket itself is untouched), only when the
     user explicitly asks. Only storages owned by this server's CVAT account, and only when no
     task's frames come from it (delete or rebuild those first). Tasks and projects that import
-    or export through it switch back to local storage. The client may ask the user to confirm
-    first; "the user declined" means it was not done: don't call again unless the user asks."""
+    or export through it switch back to local storage."""
     require_yes(confirmation, f"cloud storage {cloud_storage_id} was not deleted")
     return cloud_storages.delete_cloud_storage(get_client(ctx), cloud_storage_id)

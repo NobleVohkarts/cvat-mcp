@@ -84,7 +84,7 @@ def update_task(
     return task_edits.update_task(get_client(ctx), task_id, name, assignee, project_id, add_labels)
 
 
-def _confirm_delete_task(ctx: Context, task_id: int):
+async def _confirm_delete_task(ctx: Context, task_id: int):
     return ask(
         ctx,
         "delete_task",
@@ -101,8 +101,6 @@ def delete_task(
 ) -> DeletedTask:
     """Use to delete a task, only when the user explicitly asks: removes it with all its jobs,
     annotations and issues, which can't be undone. Only tasks owned by this server's CVAT account
-    can be deleted; others are refused and must be handled in the CVAT UI. The client may ask the
-    user to confirm first; "the user declined" means it was not done: don't call again unless the
-    user asks."""
+    can be deleted; others are refused and must be handled in the CVAT UI."""
     require_yes(confirmation, f"task {task_id} was not deleted")
     return task_edits.delete_task(get_client(ctx), task_id)

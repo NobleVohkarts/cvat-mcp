@@ -9,9 +9,7 @@ from cvat_mcp.services import exports
 from cvat_mcp.services.exports import ExportResult
 
 
-def _confirm_overwrite(
-    ctx: Context, cloud_storage_id: int, cloud_path: str, overwrite: bool = False
-):
+async def _confirm_overwrite(ctx: Context, cloud_storage_id: int, cloud_path: str, overwrite: bool):
     return ask(
         ctx,
         "export_dataset",
@@ -39,8 +37,7 @@ def export_dataset(  # pylint: disable=too-many-arguments,too-many-positional-ar
     is added if missing). An existing object is refused: ask the user whether to replace it,
     then call again with overwrite=true. Waits for CVAT to prepare the file and upload it to
     the bucket; returns the key, not the contents. Big exports with images can take
-    minutes. With overwrite=true the client may ask the user to confirm first; "the user
-    declined" means it was not done: don't call again unless the user asks."""
+    minutes."""
     require_yes(confirmation, f"{cloud_path} was not overwritten")
     return exports.export_dataset(
         get_client(ctx), task_id, format, cloud_storage_id, cloud_path, include_images, overwrite

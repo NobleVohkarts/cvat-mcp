@@ -24,13 +24,17 @@ def _replace(arguments: Mapping[str, Any]) -> bool:
     return arguments.get("mode", "append") == "replace"
 
 
+def _overwrite(arguments: Mapping[str, Any]) -> bool:
+    return arguments.get("overwrite", False) is True
+
+
 RISKY: dict[str, Callable[[Mapping[str, Any]], bool]] = {
     "delete_task": _always,
     "delete_gt_job": _always,
     "delete_cloud_storage": _always,
     "import_annotations": _replace,
     "auto_annotate": _replace,
-    "export_dataset": lambda arguments: arguments.get("overwrite", False) is True,
+    "export_dataset": _overwrite,
 }
 
 Answer = ElicitationResult[Confirm]  # as a parameter type, decline and cancel reach the tool body
@@ -60,4 +64,4 @@ def ask(
 
 def require_yes(answer: Answer, refusal: str) -> None:
     if not (isinstance(answer, AcceptedElicitation) and answer.data.confirm):
-        raise ToolError(f"the user declined: {refusal}")
+        raise ToolError(f"the user declined: {refusal}; don't call again unless the user asks")

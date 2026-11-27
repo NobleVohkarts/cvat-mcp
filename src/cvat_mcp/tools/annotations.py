@@ -142,12 +142,8 @@ def _import_target(job_id: int | None, task_id: int | None) -> str:
     return f"job {job_id}" if job_id is not None else f"task {task_id}"
 
 
-def _confirm_import(
-    ctx: Context,
-    cloud_path: str,
-    job_id: int | None = None,
-    task_id: int | None = None,
-    mode: Mode = "append",
+async def _confirm_import(
+    ctx: Context, cloud_path: str, job_id: int | None, task_id: int | None, mode: Mode
 ):
     target = _import_target(job_id, task_id)
     return ask(
@@ -180,8 +176,7 @@ def import_annotations(  # pylint: disable=too-many-arguments,too-many-positiona
     same file twice duplicates the objects); "replace" first deletes all the target's annotations,
     so use it only when the user asks to replace them. Returns the object counts after the import. A
     file CVAT can't import takes about a minute to fail (CVAT retries it); wait for the answer
-    instead of calling again. With mode "replace" the client may ask the user to confirm first;
-    "the user declined" means it was not done: don't call again unless the user asks."""
+    instead of calling again."""
     require_yes(
         confirmation, f"the annotations of {_import_target(job_id, task_id)} were not replaced"
     )
