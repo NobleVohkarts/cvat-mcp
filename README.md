@@ -66,6 +66,7 @@ give the server a token of a separate reviewer account if those must be protecte
 | **Asynchrony stays inside.** Tools wait for CVAT background work themselves. | `export_dataset` returns only when CVAT's background export (`202` + `rq_id`) is done and uploaded to the bucket (`services/exports.py`); `create_report` waits for the quality report request (`services/quality.py`) |
 | **Protect the model's context.** `limit` + `total`, summaries instead of raw data, pydantic responses with only the needed fields, images downscaled to `max_side` and sent as JPEG. | `services/*.py` models, `render.py` |
 | **Security.** What isn't in the mode isn't registered; `ToolAnnotations` hints; Personal Access Token only (the server never stores or acts with a password); no local files: data moves through CVAT cloud storages or URLs; the token is never logged or returned. | `server.tool()`; remote access: `auth.py` |
+| **The user confirms what can't be undone.** `delete_task`, `delete_gt_job`, `delete_cloud_storage`, `import_annotations` and `auto_annotate` with `mode="replace"`, and `export_dataset` with `overwrite=true` ask the user through the client's confirmation form (MCP elicitation) before touching CVAT. A decline returns "the user declined: …" and changes nothing. Clients that can't show a form (e.g. MCP Inspector) run these calls as before; the instructions' "only when the user asks" rules apply either way. | `confirm.py`, the tools' `confirmation` parameter |
 | **Errors are written for the model.** 401/403/404/400 and argument mistakes become one-line hints with the next step. mcp shows only `ToolError` text, so every tool is wrapped. | `errors.explain`, `server.tool_errors`, `server.reject_unknown_arguments` |
 | **The server gives the model eyes, the model judges.** No heuristic checks on the server; rendering and facts only. | `render.py`, `services/annotations.py` |
 
@@ -78,6 +79,7 @@ cvat-mcp/
 │   ├── auth.py          # OAuth for remote clients: CVAT login page, in-memory tokens
 │   ├── server.py        # MCPServer, lifespan (one SDK client, token checked at startup),
 │   │                    # instructions, tool() registration by mode, tool_errors wrapper
+│   ├── confirm.py       # confirmation forms (elicitation) for calls that can't be undone
 │   ├── config.py        # settings from env/.env (pydantic-settings)
 │   ├── errors.py        # exception -> message for the model (no mcp dependency)
 │   ├── render.py        # draws annotations over a frame, downscales, encodes JPEG
