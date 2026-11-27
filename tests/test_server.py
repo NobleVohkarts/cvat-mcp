@@ -244,6 +244,40 @@ def test_http_mode_serves_oauth_and_protects_mcp(monkeypatch):
     assert checks["login"] == 400
 
 
+PROXY_CHECK = """
+import json, uvicorn, cvat_mcp.server as s, cvat_mcp.tools
+seen = {}
+async def serve(self, sockets=None):  # the app as uvicorn would serve it, without serving
+    self.config.load()
+    seen.update(app=type(self.config.loaded_app).__name__, trusted=self.config.forwarded_allow_ips)
+uvicorn.Server.serve = serve
+s.mcp.run("streamable-http", host="127.0.0.1", port=8765, transport_security=s.transport_security())
+print(json.dumps(seen))
+"""
+
+
+def test_http_mode_takes_the_client_from_a_local_proxy(monkeypatch):
+    # the login lockout keys on request.client: X-Forwarded-For must count, from 127.0.0.1 only
+    monkeypatch.setenv("CVAT_MCP_TRANSPORT", "http")
+    monkeypatch.setenv("CVAT_MCP_PUBLIC_URL", "http://localhost:8765")
+    monkeypatch.delenv("FORWARDED_ALLOW_IPS", raising=False)
+    result = run(PROXY_CHECK, monkeypatch)
+    assert result.returncode == 0, result.stderr
+    served = json.loads(result.stdout)
+    trusted = [h.strip() for h in served["trusted"].split(",")]
+    assert served["app"] == "ProxyHeadersMiddleware"
+    assert "127.0.0.1" in trusted and "*" not in trusted
+
+
+def test_http_mode_refuses_trusting_every_proxy(monkeypatch):
+    monkeypatch.setenv("CVAT_MCP_TRANSPORT", "http")
+    monkeypatch.setenv("CVAT_MCP_PUBLIC_URL", "http://localhost:8765")
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "127.0.0.1, *")
+    result = run("from cvat_mcp.__main__ import main; main()", monkeypatch)
+    assert result.returncode == 1
+    assert "FORWARDED_ALLOW_IPS" in result.stderr and "Traceback" not in result.stderr
+
+
 def test_stdio_mode_has_no_oauth_routes(monkeypatch):
     result = run(
         "import json, cvat_mcp.server as s, cvat_mcp.tools\n"

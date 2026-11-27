@@ -114,6 +114,8 @@ def list_tasks(client: Client, project_id: int | None, search: str | None, limit
 def get_task_overview(client: Client, task_id: int) -> TaskOverview:
     task = client.tasks.retrieve(task_id)
     labels = task.get_labels()
+    # shortcut: downloads all of the task's annotations just to count them (~24 MB for 30k
+    # polygons); fine for review-sized tasks, upgrade if CVAT adds per-label counts.
     annotations = task.get_annotations()
     label_names = {label.id: label.name for label in labels}
     objects = count_objects_by_label(

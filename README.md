@@ -111,7 +111,7 @@ Each model downloads its weights (about 170 MB) into `~/.cache/torch` on first u
 | `CVAT_ACCESS_TOKEN` | — (required) | Personal Access Token (CVAT UI → profile → Access tokens). Write mode needs a token **without** "read only". |
 | `CVAT_MCP_MODE` | `read-only` | `read-only` or `write` (adds the write tools for issues, annotations, tasks and jobs) |
 | `CVAT_MCP_TRANSPORT` | `stdio` | `http` serves Streamable HTTP with OAuth (set by `scripts/serve-public.sh`) |
-| `CVAT_MCP_PUBLIC_URL` | — | Public `https` URL in HTTP mode (the tunnel URL) |
+| `CVAT_MCP_PUBLIC_URL` | — | Public `https` URL in HTTP mode (the tunnel's or proxy's) |
 | `CVAT_MCP_PORT` | `8765` | Local port in HTTP mode; bound to `127.0.0.1` only |
 | `CVAT_MCP_REDIRECT_HOSTS` | `claude.ai,claude.com,localhost,127.0.0.1` | Hosts OAuth clients may register as callbacks |
 
@@ -129,7 +129,9 @@ claude mcp add cvat --scope local -e CVAT_MCP_MODE=write -- \
 claude mcp list   # cvat: ... ✔ Connected
 ```
 
-### Claude Desktop (not tested)
+### Claude Desktop
+
+Claude Desktop starts the same command as Claude Code above:
 
 ```json
 {
@@ -146,8 +148,11 @@ claude mcp list   # cvat: ... ✔ Connected
 ## Use from Claude on the web
 
 claude.ai connects to MCP servers from Anthropic's cloud, so the server needs a public HTTPS
-address. `scripts/serve-public.sh` starts a Cloudflare **quick tunnel** (no account needed) and the
-server in HTTP mode, protected by OAuth that the server implements itself:
+address. It serves HTTP mode on `127.0.0.1` only, protected by OAuth that it implements itself,
+and a tunnel or reverse proxy on the same machine gives it the public address.
+
+To try it, `scripts/serve-public.sh` starts a Cloudflare **quick tunnel** (no account needed) and
+the server, with a new URL on every run:
 
 ```bash
 CVAT_MCP_MODE=write scripts/serve-public.sh   # or read-only (the .env default)
@@ -155,8 +160,34 @@ CVAT_MCP_MODE=write scripts/serve-public.sh   # or read-only (the .env default)
 # Restart only the server (same URL): kill -USR1 <pid>
 ```
 
-In claude.ai: **Settings → Connectors → Add custom connector**, paste the URL, **Connect**, then
-sign in on the server's page with the CVAT account that owns `CVAT_ACCESS_TOKEN`.
+For a fixed address, point a reverse proxy (nginx, Caddy, Traefik) or a named Cloudflare tunnel
+at `http://127.0.0.1:8765` (`CVAT_MCP_PORT`) and start the server with its public URL:
+
+```bash
+CVAT_MCP_TRANSPORT=http CVAT_MCP_PUBLIC_URL=https://mcp.example.com CVAT_MCP_MODE=write \
+  uv run cvat-mcp
+```
+
+The proxy must send `X-Forwarded-For` (Caddy, Traefik and Cloudflare tunnels do by default), so
+failed logins count per client, and must not buffer the streamed answers. With a second proxy in
+front of it (e.g. Cloudflare's in front of nginx), the inner one must restore the client address
+first (nginx: `set_real_ip_from` + `real_ip_header`), or all clients share one lockout; the server
+logs a warning when a login comes without `X-Forwarded-For`. For nginx:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8765;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_buffering off;
+    proxy_read_timeout 1h;  # long tool calls and idle streams
+}
+```
+
+In claude.ai: **Settings → Connectors → Add custom connector**, paste the URL with `/mcp` at the
+end, **Connect**, then sign in on the server's page with the CVAT account that owns
+`CVAT_ACCESS_TOKEN`.
 
 How it is protected:
 
@@ -167,16 +198,16 @@ How it is protected:
   can't borrow its rights. The password is never stored or logged.
 - **Callbacks only to claude.ai / claude.com** (and localhost for testing): other clients can't
   register.
-- **Brute force:** about 1 s delay per failed login; 10 failures lock logins for 10 minutes.
-- **Bound to 127.0.0.1;** the tunnel is the only way in. The login page sends a strict CSP that
-  allows the form to post to the server and to the client's callback only.
+- **Brute force:** about 1 s delay per failed login; 10 failures from one client address (the
+  last one the local proxy added to `X-Forwarded-For`, so a client can't fake it) lock it out for
+  10 minutes.
+- **Strict CSP** on the login page: the form posts only to the server and to the client's callback.
 
 Agent says a tool lacks a documented option? claude.ai has a stale tool list: remove and re-add
 the connector (a refresh isn't enough). `server_info` reports `cvat_mcp_version`.
 
-Limits: the quick-tunnel URL is new every time the script starts (re-add the connector then);
-tokens live in memory, so after a server restart claude.ai asks you to **Connect** again (the
-`kill -USR1` restart keeps the URL). `uv run python scripts/check_remote.py <url>` runs the whole
+Limits: tokens live in memory, so after a server restart claude.ai asks you to **Connect** again
+(the `kill -USR1` restart keeps the quick-tunnel URL). `uv run python scripts/check_remote.py <url>` runs the whole
 OAuth flow and a tool call against a running server (it reads `CVAT_UI_USERNAME` /
 `CVAT_UI_PASSWORD` from `.env`; the server never does).
 
@@ -209,14 +240,10 @@ Not done yet:
 - a `review_task` prompt;
 - protocol and integration tests;
 - mypy strict;
-- a stable public URL (named Cloudflare tunnel on your own domain) and tokens that survive restarts.
-
-Learned while building it:
-
-- **A `region` (zoom) parameter for `render_frame`.** Given a shell, the model wrote its own crop
-  script to look closer at small objects. In very crowded frames (35+ captions) it can miss a
-  wrong label.
-- **Tracks in the frame tools.** Tracked objects are counted but not drawn or edited.
-- **Per-frame annotation fetching,** once CVAT supports a frame filter.
-- **Reading `.env` from the project directory,** not the working directory.
+- OAuth tokens that survive restarts;
+- a `region` (zoom) parameter for `render_frame`, for small objects and very crowded frames (35+
+  captions), where a wrong label can be missed;
+- tracks in the frame tools: tracked objects are counted but not drawn or edited;
+- per-frame annotation fetching, once CVAT supports a frame filter;
+- reading `.env` from the project directory, not the working directory.
 
