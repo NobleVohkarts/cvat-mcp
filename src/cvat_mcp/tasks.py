@@ -8,7 +8,7 @@ import asyncio
 import logging
 import time
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -51,6 +51,7 @@ class TaskRecord:  # pylint: disable=too-many-instance-attributes
     result: dict | None = None
     error: dict | None = None
     run_id: str | None = None  # an auto_annotate run this task follows: cancel stops it
+    cancel_requested: bool = False  # a cancel came before the run existed
 
 
 def _iso(seconds: float) -> str:
@@ -159,14 +160,16 @@ class Tasks(Extension):
             return await call_next(ctx)
         record = self.store.create(params.name)
         # The call outlives this request (checked over stdio and streamable HTTP).
-        running = asyncio.get_running_loop().create_task(self.finish(record, call_next, ctx))
+        running = asyncio.get_running_loop().create_task(self.finish(record, call_next(ctx)))
         self._running.add(running)
         running.add_done_callback(self._running.discard)
         return self.store.wire(record, created=True)
 
-    async def finish(self, record: TaskRecord, call_next, ctx) -> None:
+    async def finish(self, record: TaskRecord, call: Awaitable) -> None:
+        """Runs the call to its end; any exception fails the task, or the client polls forever.
+        A finished coroutine drops its frame, so a followed run doesn't keep the request alive."""
         try:
-            result = await call_next(ctx)
+            result = await self._outcome(record, await call)
         except Exception as exc:  # pylint: disable=broad-exception-caught  # for the client
             if isinstance(exc, MCPError):
                 error = exc.error.model_dump(mode="json", exclude_none=True)
@@ -175,28 +178,40 @@ class Tasks(Extension):
                 error = {"code": INTERNAL_ERROR, "message": f"internal error: {type(exc).__name__}"}
             self.store.update(record, status="failed", error=error)
             return
-        del call_next, ctx  # a followed run can last hours: don't keep the request alive
+        if result is not None:
+            self.store.update(record, status="completed", result=_dump(result))
+
+    async def _outcome(self, record: TaskRecord, result) -> CallToolResult | None:
+        """The task's final answer; None when it was cancelled."""
         if isinstance(result, InputRequiredResult):
             # shortcut: becomes_task saw every question answered yes; if the SDK still asks,
             # the call ends here and the model calls again
             text = "the confirmation was not answered; call again"
-            result = CallToolResult(is_error=True, content=[TextContent(type="text", text=text)])
-        elif record.tool == "auto_annotate" and not result.is_error:  # a whole-task run
-            result = await self._follow(
+            return CallToolResult(is_error=True, content=[TextContent(type="text", text=text)])
+        if record.tool == "auto_annotate" and not result.is_error:  # a whole-task run
+            return await self._follow(
                 record, AutoAnnotation.model_validate(result.structured_content)
             )
-            if result is None:
-                return
-        self.store.update(record, status="completed", result=_dump(result))
+        return result
 
     async def _follow(self, record: TaskRecord, started: AutoAnnotation) -> CallToolResult | None:
-        """The task ends when the run does: its final answer, or None when it was cancelled."""
+        """The task ends when the run does."""
         record.run_id = started.run.run_id
-        while (run := get_run(record.run_id).run) is not None and run.state == "running":
+        if record.cancel_requested:
+            cancel_run(record.run_id)
+
+        def own(run):  # only the latest run is kept: a newer one means ours is gone
+            return run is not None and run.run_id == record.run_id
+
+        while own(run := get_run(record.run_id).run) and run.state == "running":
             message = f"frames saved {run.frames_done} of {run.frames_total}"
             self.store.update(record, status_message=message)
             await asyncio.sleep(RUN_POLL_SECONDS)
-        run = run or started.run  # shortcut: only a restart forgets a run, and this task with it
+        if not own(run):
+            text = (
+                f"{record.run_id} is no longer kept: get_auto_annotation_run shows the latest run"
+            )
+            return CallToolResult(is_error=True, content=[TextContent(type="text", text=text)])
         if run.state == "cancelled":
             self.store.update(record, status="cancelled", status_message=run.error)
             return None
@@ -205,6 +220,7 @@ class Tasks(Extension):
         return CallToolResult(
             content=[TextContent(type="text", text=text)],
             structured_content=final.model_dump(mode="json"),
+            is_error=run.state == "failed",
         )
 
     def methods(self):
@@ -225,7 +241,10 @@ class Tasks(Extension):
     async def _cancel(self, _ctx, params: TaskParams) -> dict[str, Any]:
         record = self.store.get(params.task_id)
         if record.status == "working":
-            if record.run_id is None:
+            if record.tool == "auto_annotate" and record.run_id is None:  # still starting
+                record.cancel_requested = True
+                self.store.update(record, status_message="stopping once the run starts")
+            elif record.run_id is None:
                 self.store.update(record, status_message="CVAT can't stop this job; it will finish")
             elif cancel_run(record.run_id):
                 self.store.update(record, status_message="stopping after the current batch")

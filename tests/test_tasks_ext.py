@@ -135,7 +135,8 @@ def export_dataset(
 
 
 @server.tool()
-def auto_annotate(task_id: int, frame: int | None = None) -> AutoAnnotation:
+def auto_annotate(task_id: int, frame: int | None = None, delay: float = 0) -> AutoAnnotation:
+    time.sleep(delay)  # start_run's checks and a first model download take this long
     started = {"task_id": task_id, "output": "boxes", "model": "m", "mode": "append", "seconds": 1}
     if frame is not None:
         return AutoAnnotation(**started, frame=frame)
@@ -144,9 +145,9 @@ def auto_annotate(task_id: int, frame: int | None = None) -> AutoAnnotation:
     )
 
 
-def _run(state, done=0, error=None):
+def _run(state, done=0, error=None, run_id="run-1"):
     return AutoAnnotationRun(
-        run_id="run-1",
+        run_id=run_id,
         state=state,
         task_id=7,
         output="boxes",
@@ -214,7 +215,7 @@ async def test_unexpected_exception_fails():
     async def broken(_ctx):
         raise RuntimeError("boom")
 
-    await Tasks(store).finish(record, broken, None)
+    await Tasks(store).finish(record, broken(None))
     assert record.status == "failed"
     assert record.error == {"code": -32603, "message": "internal error: RuntimeError"}
 
@@ -347,3 +348,51 @@ async def test_auto_annotate_with_frame_is_never_a_task():
     async with tasks_client(tasks=tasks) as client:
         result = await client.call_tool("auto_annotate", {"task_id": 7, "frame": 0})
     assert result.structured_content["frame"] == 0 and not tasks.seen
+
+
+@pytest.mark.anyio
+async def test_cancel_before_the_run_starts(fake_run):
+    states, cancelled = fake_run
+    states[:] = [_run("running", 0)]
+    tasks = TasksClient(poll_seconds=0.01)
+    async with tasks_client(tasks=tasks) as client:
+        async with anyio.create_task_group() as group:
+            group.start_soon(client.call_tool, "auto_annotate", {"task_id": 7, "delay": 0.3})
+            while not tasks.task_ids:
+                await anyio.sleep(0.01)
+            await send(client.session, "tasks/cancel", tasks.task_ids[0])
+            state = await send(client.session, "tasks/get", tasks.task_ids[0])
+            assert state["statusMessage"] == "stopping once the run starts"
+    assert cancelled == ["run-1"]  # applied as soon as the run existed
+    assert tasks.seen[-1][0] == "cancelled"
+
+
+@pytest.mark.anyio
+async def test_follow_failure_fails_the_task(monkeypatch):
+    def get_run(_run_id):
+        raise RuntimeError("snapshot broke")
+
+    monkeypatch.setattr(tasks_module, "get_run", get_run)
+    async with tasks_client(tasks=TasksClient(poll_seconds=0.01)) as client:
+        with pytest.raises(MCPError) as caught:
+            await client.call_tool("auto_annotate", {"task_id": 7})
+    assert caught.value.error.code == -32603
+    assert caught.value.error.message == "internal error: RuntimeError"
+
+
+@pytest.mark.anyio
+async def test_follow_stops_at_another_run(fake_run):
+    states, _ = fake_run
+    states[:] = [_run("running", 10), _run("finished", 20, run_id="run-2")]
+    async with tasks_client(tasks=TasksClient(poll_seconds=0.01)) as client:
+        result = await client.call_tool("auto_annotate", {"task_id": 7})
+    assert result.is_error and "run-1 is no longer kept" in result.content[0].text
+
+
+@pytest.mark.anyio
+async def test_failed_run_is_an_error(fake_run):
+    states, _ = fake_run
+    states[:] = [_run("failed", 10, "model crashed; the first 10 of 20 frames are saved")]
+    async with tasks_client(tasks=TasksClient(poll_seconds=0.01)) as client:
+        result = await client.call_tool("auto_annotate", {"task_id": 7})
+    assert result.is_error and result.structured_content["run"]["state"] == "failed"
