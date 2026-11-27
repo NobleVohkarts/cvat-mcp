@@ -145,6 +145,8 @@ def _import_target(job_id: int | None, task_id: int | None) -> str:
 async def _confirm_import(
     ctx: Context, cloud_path: str, job_id: int | None, task_id: int | None, mode: Mode
 ):
+    if (job_id is None) == (task_id is None):
+        return YES.data  # nothing to confirm: the service refuses the call before any change
     target = _import_target(job_id, task_id)
     return ask(
         ctx,

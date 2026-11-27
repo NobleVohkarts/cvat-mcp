@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 
 class Confirm(BaseModel):
-    confirm: bool = Field(title="Yes, go ahead")
+    confirm: bool = Field(default=False, title="Yes, go ahead")  # left out: a decline
 
 
 def _always(_arguments: Mapping[str, Any]) -> bool:
@@ -56,8 +56,8 @@ def ask(
     ctx: Context, tool: str, arguments: Mapping[str, Any], message: str
 ) -> Elicit[Confirm] | Confirm:
     """A resolver's answer: the question, or a yes without asking (the SDK wraps a plain value
-    as accepted)."""
-    if not needs_confirmation(tool, arguments) or not can_show_form(ctx.client_capabilities):
+    as accepted). An unknown tool name raises: a typo must not switch the form off."""
+    if not RISKY[tool](arguments) or not can_show_form(ctx.client_capabilities):
         return YES.data
     return Elicit(message, Confirm)
 

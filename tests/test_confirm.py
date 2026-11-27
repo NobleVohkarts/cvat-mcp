@@ -81,6 +81,18 @@ async def test_accept_unchecked_is_a_decline(mode):
 
 
 @pytest.mark.parametrize("mode", MODES)
+async def test_accept_without_the_field_is_a_decline(mode):  # e.g. a box left unticked
+    callback, _ = answering("accept", {})
+    is_error, text = await call(mode, {"x": 7, "mode": "replace"}, callback)
+    assert is_error and text.endswith(DECLINED)
+
+
+def test_unknown_tool_name_is_an_error():  # a typo must not switch the form off silently
+    with pytest.raises(KeyError):
+        ask(None, "delete_tsak", {}, "Delete?")
+
+
+@pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("arguments", [{"x": 7, "mode": "append"}, {"x": 7}])
 async def test_not_risky_asks_nothing(mode, arguments):
     callback, asked = answering("decline")

@@ -5,6 +5,7 @@ from mcp.server.mcpserver.resolve import Resolve
 from pydantic import Field
 
 from cvat_mcp.confirm import YES, Answer, ask, require_yes
+from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.server import AUTO_ANNOTATION, get_client, open_client, tool
 from cvat_mcp.services import auto_annotation
 from cvat_mcp.services.auto_annotation import (
@@ -55,7 +56,19 @@ Model = Annotated[
 ]
 
 
-async def _confirm_replace(ctx: Context, task_id: int, frame: int | None, mode: Mode):
+async def _confirm_replace(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    ctx: Context,
+    task_id: int,
+    frame: int | None,
+    output: Output,
+    model: str | None,
+    conf_threshold: float,
+    mode: Mode,
+):
+    try:
+        auto_annotation.check_options(output, model, conf_threshold, mode)
+    except InvalidArgument:
+        return YES.data  # nothing to confirm: the body refuses the options before any change
     scope = (
         f"frame {frame} of task {task_id}" if frame is not None else f"all frames of task {task_id}"
     )

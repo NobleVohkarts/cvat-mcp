@@ -468,6 +468,12 @@ async def main():
             report["preapproved"] = [error.error.code, error.error.message]
     folder = {"task_id": 7, "format": "COCO 1.0", "cloud_storage_id": 1, "cloud_path": "x/"}
     report["bad_path"] = (await outcomes("2026-07-28", {"export_dataset": folder | {"overwrite": True}}, no))["export_dataset"]
+    hopeless = {  # calls the service refuses anyway: no form for them
+        "import_annotations": {"cloud_storage_id": 1, "cloud_path": "a.json", "mode": "replace"},
+        "auto_annotate": {"task_id": 7, "mode": "replace", "conf_threshold": 2},
+    }
+    hopeless = {name: args for name, args in hopeless.items() if name in s.REGISTERED_TOOLS}
+    report["hopeless"] = await outcomes("2026-07-28", hopeless, no)
     tools = await s.mcp.list_tools()
     report["schemas_with_confirmation"] = [
         t.name for t in tools if "confirmation" in t.input_schema.get("properties", {})
@@ -503,6 +509,12 @@ def test_confirmations_in_process(monkeypatch):
     assert report.pop("schemas_with_confirmation") == []  # the resolver parameter is hidden
     is_error, text, asked = report.pop("bad_path")  # nothing to confirm: refused before writing
     assert is_error and not asked and "cloud_path must name the file" in text, text
+    refusals = {
+        "import_annotations": "pass exactly one of job_id or task_id",
+        "auto_annotate": "conf_threshold must be between 0 and 1",
+    }
+    for name, (is_error, text, asked) in report.pop("hopeless").items():
+        assert is_error and not asked and refusals[name] in text, (name, asked, text)
     code, message = report.pop("preapproved")
     assert code == -32602 and "unknown argument(s) confirmation" in message
     expected = set(MESSAGES) if AUTO_ANNOTATION else set(MESSAGES) - {"auto_annotate"}
