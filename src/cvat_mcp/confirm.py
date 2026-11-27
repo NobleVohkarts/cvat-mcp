@@ -57,7 +57,12 @@ def ask(
 ) -> Elicit[Confirm] | Confirm:
     """A resolver's answer: the question, or a yes without asking (the SDK wraps a plain value
     as accepted). An unknown tool name raises: a typo must not switch the form off."""
-    if not RISKY[tool](arguments) or not can_show_form(ctx.client_capabilities):
+    if not RISKY[tool](arguments):
+        return YES.data
+    # A 2026-07-28 retry carries the answer: the SDK reads it only if the question is asked again,
+    # so a retry must never skip it (e.g. a retry whose capabilities went missing).
+    retry = ctx.input_responses is not None or ctx.request_state is not None
+    if not retry and not can_show_form(ctx.client_capabilities):
         return YES.data
     return Elicit(message, Confirm)
 
