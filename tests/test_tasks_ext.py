@@ -2,6 +2,7 @@
 
 import re
 import time
+from datetime import datetime, timezone
 from typing import Annotated
 
 import anyio
@@ -12,9 +13,12 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.mcpserver.resolve import Resolve
 from mcp.shared.exceptions import MCPError
 from mcp_types import ElicitResult
+from pydantic import BaseModel
 from tasks_client import TasksClient, send
 
+from cvat_mcp import tasks as tasks_module
 from cvat_mcp.confirm import YES, Answer, answered_yes, ask, require_yes
+from cvat_mcp.services.auto_annotation import AutoAnnotationRun, AutoAnnotationRunStatus
 from cvat_mcp.tasks import POLL_MS, TTL_MS, Tasks, TaskStore
 
 ISO_Z = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z$")
@@ -125,6 +129,59 @@ def export_dataset(
 ) -> str:
     require_yes(confirmation, "nothing was exported")
     return "exported"
+
+
+class Started(BaseModel):  # the real tool's AutoAnnotation, cut down to what the hook reads
+    task_id: int
+    frame: int | None = None
+    note: str | None = None
+    run: dict | None = None
+
+
+@server.tool()
+def auto_annotate(task_id: int, frame: int | None = None) -> Started:
+    if frame is not None:
+        return Started(task_id=task_id, frame=frame)
+    return Started(
+        task_id=task_id, note="follow it with get_auto_annotation_run", run=_run("running")
+    )
+
+
+def _run(state, done=0, error=None):
+    return AutoAnnotationRun(
+        run_id="run-1",
+        state=state,
+        task_id=7,
+        output="boxes",
+        model="m",
+        mode="append",
+        frames_total=20,
+        frames_done=done,
+        started=datetime(2026, 11, 27, tzinfo=timezone.utc),
+        error=error,
+    ).model_dump(mode="json")
+
+
+@pytest.fixture
+def fake_run(monkeypatch):
+    """get_run walks through `states`; cancel_run records its calls."""
+    states, cancelled = [], []
+
+    def get_run(run_id):
+        state = states.pop(0) if len(states) > 1 else states[0]
+        return AutoAnnotationRunStatus(run=AutoAnnotationRun.model_validate(state))
+
+    def cancel_run(run_id):
+        cancelled.append(run_id)
+        states[:] = [
+            _run("cancelled", 10, "stopped by a cancel; the first 10 of 20 frames are saved")
+        ]
+        return True
+
+    monkeypatch.setattr(tasks_module, "get_run", get_run)
+    monkeypatch.setattr(tasks_module, "cancel_run", cancel_run)
+    monkeypatch.setattr(tasks_module, "RUN_POLL_SECONDS", 0.01)
+    return states, cancelled
 
 
 def tasks_client(mode="2026-07-28", tasks=None, **kw):
@@ -260,3 +317,49 @@ def test_answered_yes():
     assert not answered_yes({"a": ElicitResult(action="accept", content={})})
     assert not answered_yes({})
     assert not answered_yes(None)
+
+
+@pytest.mark.anyio
+async def test_auto_annotate_task_follows_the_run(fake_run):
+    states, _ = fake_run
+    states[:] = [_run("running", 10), _run("running", 10), _run("finished", 20)]
+    tasks = TasksClient(poll_seconds=0.01)
+    async with tasks_client(tasks=tasks) as client:
+        result = await client.call_tool("auto_annotate", {"task_id": 7})
+    assert ("working", "frames saved 10 of 20") in tasks.seen
+    assert tasks.seen[-1][0] == "completed"
+    assert result.structured_content["run"]["state"] == "finished"
+    assert result.structured_content["run"]["frames_done"] == 20
+    assert result.structured_content["note"] is None
+
+
+@pytest.mark.anyio
+async def test_auto_annotate_cancel_ends_cancelled(fake_run):
+    states, cancelled = fake_run
+    states[:] = [_run("running", 10)]
+    tasks = TasksClient(poll_seconds=0.01)
+    async with tasks_client(tasks=tasks) as client:
+        async with anyio.create_task_group() as group:
+            outcome = {}
+
+            async def call():
+                outcome["result"] = await client.call_tool("auto_annotate", {"task_id": 7})
+
+            group.start_soon(call)
+            while not tasks.task_ids:
+                await anyio.sleep(0.01)
+            await send(client.session, "tasks/cancel", tasks.task_ids[0])
+    assert cancelled == ["run-1"]
+    assert tasks.seen[-1] == (
+        "cancelled",
+        "stopped by a cancel; the first 10 of 20 frames are saved",
+    )
+    assert outcome["result"].is_error
+
+
+@pytest.mark.anyio
+async def test_auto_annotate_with_frame_is_never_a_task():
+    tasks = TasksClient()
+    async with tasks_client(tasks=tasks) as client:
+        result = await client.call_tool("auto_annotate", {"task_id": 7, "frame": 0})
+    assert result.structured_content["frame"] == 0 and not tasks.seen

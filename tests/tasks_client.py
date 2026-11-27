@@ -6,7 +6,7 @@ import anyio
 from mcp.client.extension import ClientExtension, ResultClaim
 from mcp.shared.exceptions import MCPError
 from mcp.types import ErrorData
-from mcp_types import CallToolResult, Request, Result
+from mcp_types import CallToolResult, Request, Result, TextContent
 from pydantic import ConfigDict
 
 EXT = "io.modelcontextprotocol/tasks"
@@ -56,6 +56,7 @@ class TasksClient(ClientExtension):
                 return CallToolResult.model_validate(state["result"])
             if state["status"] == "failed":
                 raise MCPError.from_error_data(ErrorData.model_validate(state["error"]))
-            if state["status"] == "cancelled":
-                return CallToolResult.model_validate(state["result"])
+            if state["status"] == "cancelled":  # no result on the wire: say what happened
+                text = state.get("statusMessage") or "cancelled"
+                return CallToolResult(is_error=True, content=[TextContent(type="text", text=text)])
             await anyio.sleep(self.poll_seconds)

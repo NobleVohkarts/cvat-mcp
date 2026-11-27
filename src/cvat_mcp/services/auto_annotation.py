@@ -89,7 +89,7 @@ class AutoObject(BaseModel):
 
 class AutoAnnotationRun(BaseModel):
     run_id: str
-    state: Literal["running", "finished", "failed"]
+    state: Literal["running", "finished", "failed", "cancelled"]
     task_id: int
     output: str
     model: str
@@ -123,6 +123,7 @@ class Progress:
     skipped: Counter = field(default_factory=Counter)  # function label -> dropped (no task label)
     objects: list[AutoObject] = field(default_factory=list)
     frames_done: int = 0  # frames saved, in order
+    stop: threading.Event = field(default_factory=threading.Event)  # cancel_run sets it
 
 
 def check_options(
@@ -298,6 +299,8 @@ def annotate(  # pylint: disable=too-many-arguments,too-many-positional-argument
     # Fetched once, before any write, so no batch deletes what an earlier batch saved.
     old = _old_objects(scope, frames) if opts.mode == "replace" else {}
     for start in range(0, len(frames), FRAMES_PER_SAVE):
+        if progress.stop.is_set():  # a cancel: the batches saved so far stay
+            return
         batch = frames[start : start + FRAMES_PER_SAVE]
         sent = []
         for frame in batch:
@@ -488,7 +491,10 @@ def _run(  # pylint: disable=too-many-arguments,too-many-positional-arguments  #
             error = explain(exc) or f"{type(exc).__name__}: {exc}"
             _end(run, "failed", f"{error}; {_saved(progress, frames, opts)}")
         else:
-            _end(run, "finished")
+            if progress.frames_done < len(frames):  # annotate stopped early: a cancel
+                _end(run, "cancelled", f"stopped by a cancel; {_saved(progress, frames, opts)}")
+            else:
+                _end(run, "finished")
 
 
 def _end(run: AutoAnnotationRun, state: str, error: str | None = None) -> None:
@@ -550,6 +556,15 @@ def start_run(
         f"get_auto_annotation_run(run_id={run_id!r})",
         run=answer,
     )
+
+
+def cancel_run(run_id: str) -> bool:
+    """Asks the latest run to stop after its current batch; False when it isn't running."""
+    latest = _latest
+    if latest is None or latest[0].run_id != run_id or latest[0].state != "running":
+        return False
+    latest[1].stop.set()
+    return True
 
 
 def get_run(run_id: str | None) -> AutoAnnotationRunStatus:

@@ -548,6 +548,40 @@ def test_background_label_mismatch_fails_call(use_function):
     assert not aa._LOCK.locked()
 
 
+class Gate(FakeFunction):
+    """Holds the first frame until the test lets it go, so a cancel lands inside batch 1."""
+
+    def __init__(self):
+        super().__init__()
+        self.started, self.release = threading.Event(), threading.Event()
+
+    def detect(self, context, image):
+        if not self.contexts:
+            self.started.set()
+            self.release.wait(10)
+        return super().detect(context, image)
+
+
+def test_cancel_stops_after_the_current_batch(use_function, batches_of_2):
+    gate = Gate()
+    result, _, _, run_api = _start(gate, use_function)
+    assert gate.started.wait(10)
+    assert aa.cancel_run(result.run.run_id)
+    gate.release.set()
+    run = _finish(result.run.run_id)
+    assert (run.state, run.frames_done, run.added) == ("cancelled", 2, {"car": 2})
+    assert len(_sent(run_api)) == 1  # the batch that was running is saved, nothing after it
+    assert "stopped by a cancel" in run.error and "the first 2 of 5 frames" in run.error
+    assert not aa._LOCK.locked()
+
+
+def test_cancel_unknown_or_finished_run_is_false(use_function):
+    result, *_ = _start(FakeFunction(), use_function)
+    _finish(result.run.run_id)
+    assert not aa.cancel_run(result.run.run_id)
+    assert not aa.cancel_run("run-999")
+
+
 def test_get_run_none_yet(monkeypatch):
     monkeypatch.setattr(aa, "_latest", None)
     for run_id in (None, "run-7"):

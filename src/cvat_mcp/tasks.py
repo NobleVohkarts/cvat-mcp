@@ -5,6 +5,7 @@ Every store access happens on the server's event loop, so the store needs no loc
 """
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -21,8 +22,10 @@ from mcp_types.version import MODERN_PROTOCOL_VERSIONS, is_version_at_least
 from pydantic import Field
 
 from cvat_mcp.confirm import answered_yes, can_show_form, needs_confirmation
+from cvat_mcp.services.auto_annotation import cancel_run, get_run
 
 logger = logging.getLogger("cvat_mcp")
+RUN_POLL_SECONDS = 1.0
 
 EXT = "io.modelcontextprotocol/tasks"
 LONG_TOOLS = frozenset(
@@ -175,8 +178,33 @@ class Tasks(Extension):
             text = "the confirmation was not answered; call again"
             result = CallToolResult(is_error=True, content=[TextContent(type="text", text=text)])
         if isinstance(result, CallToolResult):
+            run = (result.structured_content or {}).get("run") if not result.is_error else None
+            if record.tool == "auto_annotate" and run:
+                await self._follow(record, result.structured_content, run["run_id"])
+                return
             result = result.model_dump(by_alias=True, mode="json", exclude_none=True)
         self.store.update(record, status="completed", result=result)
+
+    async def _follow(self, record: TaskRecord, started: dict, run_id: str) -> None:
+        """A whole-task auto_annotate returned its run at once: the task ends when the run does."""
+        record.cancel = lambda: cancel_run(run_id)
+        while (run := get_run(run_id).run) is not None and run.state == "running":
+            message = f"frames saved {run.frames_done} of {run.frames_total}"
+            self.store.update(record, status_message=message)
+            await asyncio.sleep(RUN_POLL_SECONDS)
+        if run is None:  # shortcut: only a restart forgets a run, and that forgets this task too
+            run_state = started["run"]
+        else:
+            run_state = run.model_dump(mode="json")
+        if run_state["state"] == "cancelled":
+            self.store.update(record, status="cancelled", status_message=run_state["error"])
+            return
+        final = started | {"run": run_state, "note": None}
+        result = CallToolResult(
+            content=[TextContent(type="text", text=json.dumps(final))], structured_content=final
+        )
+        dumped = result.model_dump(by_alias=True, mode="json", exclude_none=True)
+        self.store.update(record, status="completed", result=dumped)
 
     def methods(self):
         versions = frozenset(MODERN_PROTOCOL_VERSIONS)
