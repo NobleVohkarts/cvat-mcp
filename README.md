@@ -64,6 +64,7 @@ give the server a token of a separate reviewer account if those must be protecte
 | --- | --- |
 | **A tool is a user task, not an endpoint.** Verb + object names; each description says when to use the tool and how it differs from its neighbours. | `tools/*.py` docstrings |
 | **Asynchrony stays inside.** Tools wait for CVAT background work themselves. | `export_dataset` returns only when CVAT's background export (`202` + `rq_id`) is done and uploaded to the bucket (`services/exports.py`); `create_report` waits for the quality report request (`services/quality.py`) |
+| **Long calls can run as MCP tasks.** `create_task`, `import_annotations`, `export_dataset`, `create_report` and `auto_annotate` without a frame answer at once with a task when the client declares the tasks extension (`io.modelcontextprotocol/tasks`, protocol 2026-07-28); the client polls `tasks/get` for the same result the call would have returned. Other clients wait for the answer as before. A call that asks for confirmation asks first and becomes a task only after a yes. Tasks live in memory for an hour after they end; a restart forgets them. Cancelling stops `auto_annotate` after its current batch (the frames saved stay); CVAT's own jobs can't be stopped and finish anyway. | `tasks.py` |
 | **Protect the model's context.** `limit` + `total`, summaries instead of raw data, pydantic responses with only the needed fields, images downscaled to `max_side` and sent as JPEG. | `services/*.py` models, `render.py` |
 | **Security.** What isn't in the mode isn't registered; `ToolAnnotations` hints; Personal Access Token only (the server never stores or acts with a password); no local files: data moves through CVAT cloud storages or URLs; the token is never logged or returned. | `server.tool()`; remote access: `auth.py` |
 | **The user confirms what can't be undone.** `delete_task`, `delete_gt_job`, `delete_cloud_storage`, `import_annotations` and `auto_annotate` with `mode="replace"`, and `export_dataset` with `overwrite=true` ask the user through the client's confirmation form (MCP elicitation) before touching CVAT. A decline returns "the user declined: …" and changes nothing. Clients that can't show a form run these calls as before; the instructions' "only when the user asks" rules apply either way. | `confirm.py`, the tools' `confirmation` parameter |
@@ -83,6 +84,7 @@ cvat-mcp/
 │   ├── config.py        # settings from env/.env (pydantic-settings)
 │   ├── errors.py        # exception -> message for the model (no mcp dependency)
 │   ├── render.py        # draws annotations over a frame, downscales, encodes JPEG
+│   ├── tasks.py         # MCP tasks extension: long calls finish in the background
 │   ├── services/        # logic on cvat-sdk, pydantic results, no mcp dependency
 │   └── tools/           # thin MCP wrappers: descriptions and argument types
 ├── scripts/             # serve-public.sh (tunnel + HTTP), check_remote.py (OAuth smoke test)
