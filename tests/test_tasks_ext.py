@@ -2,7 +2,7 @@
 
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
 import anyio
@@ -17,11 +17,7 @@ from tasks_client import TasksClient, send
 
 from cvat_mcp import tasks as tasks_module
 from cvat_mcp.confirm import YES, Answer, answered_yes, ask, require_yes
-from cvat_mcp.services.auto_annotation import (
-    AutoAnnotation,
-    AutoAnnotationRun,
-    AutoAnnotationRunStatus,
-)
+from cvat_mcp.services.auto_annotation import AutoAnnotation, AutoAnnotationRun
 from cvat_mcp.tasks import POLL_MS, TTL_MS, Tasks, TaskStore
 
 ISO_Z = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z$")
@@ -145,8 +141,10 @@ def auto_annotate(task_id: int, frame: int | None = None, delay: float = 0) -> A
     )
 
 
-def _run(state, done=0, error=None, run_id="run-1"):
+def _run(state, done=0, error=None, run_id="run-1", seconds=None):
+    started = datetime(2026, 11, 27, tzinfo=timezone.utc)
     return AutoAnnotationRun(
+        finished=None if seconds is None else started + timedelta(seconds=seconds),
         run_id=run_id,
         state=state,
         task_id=7,
@@ -155,19 +153,22 @@ def _run(state, done=0, error=None, run_id="run-1"):
         mode="append",
         frames_total=20,
         frames_done=done,
-        started=datetime(2026, 11, 27, tzinfo=timezone.utc),
+        started=started,
         error=error,
     ).model_dump(mode="json")
 
 
 @pytest.fixture
 def fake_run(monkeypatch):
-    """get_run walks through `states`; cancel_run records its calls."""
+    """The run's reader walks through `states` (none: the run is gone); cancel_run records."""
     states, cancelled = [], []
 
-    def get_run(run_id):
+    def read():
         state = states.pop(0) if len(states) > 1 else states[0]
-        return AutoAnnotationRunStatus(run=AutoAnnotationRun.model_validate(state))
+        return AutoAnnotationRun.model_validate(state)
+
+    def watch_run(run_id):
+        return read if states else None
 
     def cancel_run(run_id):
         cancelled.append(run_id)
@@ -176,7 +177,7 @@ def fake_run(monkeypatch):
         ]
         return True
 
-    monkeypatch.setattr(tasks_module, "get_run", get_run)
+    monkeypatch.setattr(tasks_module, "watch_run", watch_run)
     monkeypatch.setattr(tasks_module, "cancel_run", cancel_run)
     monkeypatch.setattr(tasks_module, "RUN_POLL_SECONDS", 0.01)
     return states, cancelled
@@ -307,12 +308,13 @@ def test_answered_yes():
 @pytest.mark.anyio
 async def test_auto_annotate_task_follows_the_run(fake_run):
     states, _ = fake_run
-    states[:] = [_run("running", 10), _run("running", 10), _run("finished", 20)]
+    states[:] = [_run("running", 10), _run("running", 10), _run("finished", 20, seconds=90)]
     tasks = TasksClient(poll_seconds=0.01)
     async with tasks_client(tasks=tasks) as client:
         result = await client.call_tool("auto_annotate", {"task_id": 7})
     assert ("working", "frames saved 10 of 20") in tasks.seen
-    assert tasks.seen[-1][0] == "completed"
+    assert tasks.seen[-1] == ("completed", None)  # no stale progress next to the result
+    assert result.structured_content["seconds"] == 90  # the run's time, not the start call's
     assert result.structured_content["run"]["state"] == "finished"
     assert result.structured_content["run"]["frames_done"] == 20
     assert result.structured_content["note"] is None
@@ -369,10 +371,10 @@ async def test_cancel_before_the_run_starts(fake_run):
 
 @pytest.mark.anyio
 async def test_follow_failure_fails_the_task(monkeypatch):
-    def get_run(_run_id):
+    def read():
         raise RuntimeError("snapshot broke")
 
-    monkeypatch.setattr(tasks_module, "get_run", get_run)
+    monkeypatch.setattr(tasks_module, "watch_run", lambda _run_id: read)
     async with tasks_client(tasks=TasksClient(poll_seconds=0.01)) as client:
         with pytest.raises(MCPError) as caught:
             await client.call_tool("auto_annotate", {"task_id": 7})
@@ -381,9 +383,9 @@ async def test_follow_failure_fails_the_task(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_follow_stops_at_another_run(fake_run):
+async def test_follow_of_a_forgotten_run(fake_run):
     states, _ = fake_run
-    states[:] = [_run("running", 10), _run("finished", 20, run_id="run-2")]
+    states[:] = []  # a newer run replaced it before the task started following
     async with tasks_client(tasks=TasksClient(poll_seconds=0.01)) as client:
         result = await client.call_tool("auto_annotate", {"task_id": 7})
     assert result.is_error and "run-1 is no longer kept" in result.content[0].text
@@ -396,3 +398,24 @@ async def test_failed_run_is_an_error(fake_run):
     async with tasks_client(tasks=TasksClient(poll_seconds=0.01)) as client:
         result = await client.call_tool("auto_annotate", {"task_id": 7})
     assert result.is_error and result.structured_content["run"]["state"] == "failed"
+
+
+@pytest.mark.anyio
+async def test_cancel_note_stays_while_the_batch_ends(fake_run, monkeypatch):
+    states, _ = fake_run
+    states[:] = [_run("running", 10)]
+    monkeypatch.setattr(tasks_module, "cancel_run", lambda _run_id: True)  # the batch goes on
+    tasks = TasksClient(poll_seconds=0.01)
+    async with tasks_client(tasks=tasks) as client:
+        async with anyio.create_task_group() as group:
+            group.start_soon(client.call_tool, "auto_annotate", {"task_id": 7})
+            while not tasks.task_ids:
+                await anyio.sleep(0.01)
+            await send(client.session, "tasks/cancel", tasks.task_ids[0])
+            await anyio.sleep(0.05)  # several progress polls
+            state = await send(client.session, "tasks/get", tasks.task_ids[0])
+            assert state["statusMessage"] == (
+                "frames saved 10 of 20; stopping after the current batch"
+            )
+            states[:] = [_run("cancelled", 20, "stopped by a cancel")]
+    assert tasks.seen[-1] == ("cancelled", "stopped by a cancel")

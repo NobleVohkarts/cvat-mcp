@@ -582,6 +582,18 @@ def test_cancel_unknown_or_finished_run_is_false(use_function):
     assert not aa.cancel_run("run-999")
 
 
+def test_watch_run_keeps_its_run_after_a_newer_one(use_function):
+    first, *_ = _start(FakeFunction(), use_function)
+    _finish(first.run.run_id)
+    read = aa.watch_run(first.run.run_id)
+    second, *_ = _start(FakeFunction(), use_function)
+    _finish(second.run.run_id)
+    assert aa.get_run(None).run.run_id == second.run.run_id  # only the latest is kept...
+    run = read()  # ...but a reader keeps its own run
+    assert (run.run_id, run.state, run.frames_done) == (first.run.run_id, "finished", 5)
+    assert aa.watch_run("run-999") is None
+
+
 def test_get_run_none_yet(monkeypatch):
     monkeypatch.setattr(aa, "_latest", None)
     for run_id in (None, "run-7"):

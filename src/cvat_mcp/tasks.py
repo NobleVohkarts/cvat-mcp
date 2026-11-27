@@ -21,7 +21,7 @@ from mcp_types import CallToolResult, InputRequiredResult, RequestParams, TextCo
 from mcp_types.version import MODERN_PROTOCOL_VERSIONS, is_version_at_least
 
 from cvat_mcp.confirm import answered_yes, can_show_form, needs_confirmation
-from cvat_mcp.services.auto_annotation import AutoAnnotation, cancel_run, get_run
+from cvat_mcp.services.auto_annotation import AutoAnnotation, cancel_run, watch_run
 
 logger = logging.getLogger("cvat_mcp")
 
@@ -51,7 +51,7 @@ class TaskRecord:  # pylint: disable=too-many-instance-attributes
     result: dict | None = None
     error: dict | None = None
     run_id: str | None = None  # an auto_annotate run this task follows: cancel stops it
-    cancel_requested: bool = False  # a cancel came before the run existed
+    cancel_requested: bool = False  # cancelled: before the run existed, or while it runs
 
 
 def _iso(seconds: float) -> str:
@@ -179,6 +179,7 @@ class Tasks(Extension):
             self.store.update(record, status="failed", error=error)
             return
         if result is not None:
+            record.status_message = None  # the last progress line would contradict the result
             self.store.update(record, status="completed", result=_dump(result))
 
     async def _outcome(self, record: TaskRecord, result) -> CallToolResult | None:
@@ -197,25 +198,25 @@ class Tasks(Extension):
     async def _follow(self, record: TaskRecord, started: AutoAnnotation) -> CallToolResult | None:
         """The task ends when the run does."""
         record.run_id = started.run.run_id
-        if record.cancel_requested:
-            cancel_run(record.run_id)
-
-        def own(run):  # only the latest run is kept: a newer one means ours is gone
-            return run is not None and run.run_id == record.run_id
-
-        while own(run := get_run(record.run_id).run) and run.state == "running":
-            message = f"frames saved {run.frames_done} of {run.frames_total}"
-            self.store.update(record, status_message=message)
-            await asyncio.sleep(RUN_POLL_SECONDS)
-        if not own(run):
+        read = watch_run(record.run_id)  # bound to this run, even after a newer one starts
+        if read is None:
             text = (
                 f"{record.run_id} is no longer kept: get_auto_annotation_run shows the latest run"
             )
             return CallToolResult(is_error=True, content=[TextContent(type="text", text=text)])
+        if record.cancel_requested:
+            cancel_run(record.run_id)
+        while (run := read()).state == "running":
+            message = f"frames saved {run.frames_done} of {run.frames_total}"
+            if record.cancel_requested:
+                message += "; stopping after the current batch"
+            self.store.update(record, status_message=message)
+            await asyncio.sleep(RUN_POLL_SECONDS)
         if run.state == "cancelled":
             self.store.update(record, status="cancelled", status_message=run.error)
             return None
-        final = started.model_copy(update={"run": run, "note": None})
+        seconds = (run.finished - run.started).total_seconds() if run.finished else started.seconds
+        final = started.model_copy(update={"run": run, "note": None, "seconds": seconds})
         text = pydantic_core.to_json(final, indent=2).decode()  # as mcp writes a direct answer
         return CallToolResult(
             content=[TextContent(type="text", text=text)],
@@ -247,5 +248,6 @@ class Tasks(Extension):
             elif record.run_id is None:
                 self.store.update(record, status_message="CVAT can't stop this job; it will finish")
             elif cancel_run(record.run_id):
+                record.cancel_requested = True  # the progress line keeps saying so
                 self.store.update(record, status_message="stopping after the current batch")
         return {}

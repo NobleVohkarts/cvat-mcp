@@ -558,6 +558,15 @@ def start_run(
     )
 
 
+def watch_run(run_id: str) -> Callable[[], AutoAnnotationRun] | None:
+    """A reader of this run's state that keeps working after a newer run replaces it as the
+    latest (get_run then shows only the newer one); None when it isn't the latest any more."""
+    latest = _latest  # one read: start_run may replace it meanwhile
+    if latest is None or latest[0].run_id != run_id:
+        return None
+    return lambda: _snapshot(*latest)
+
+
 def cancel_run(run_id: str) -> bool:
     """Asks the latest run to stop after its current batch; False when it isn't running."""
     latest = _latest
