@@ -487,9 +487,9 @@ MESSAGES = {
     "delete_gt_job": "Delete ground-truth job 73 with its annotations? This can't be undone.",
     "delete_cloud_storage": "Delete cloud storage 1 from CVAT? The bucket and its files stay; "
     "tasks and projects using it for import or export switch to local storage.",
-    "import_annotations": "Replace all annotations of task 7 with the ones in a.json?",
+    "import_annotations": "Replace all annotations of task 7 with the ones in 'a.json'?",
     "auto_annotate": "Replace the shapes and tags on all frames of task 7 with the model's?",
-    "export_dataset": "Overwrite a.zip in cloud storage 1 if it exists?",  # cloud_path "a"
+    "export_dataset": "Overwrite 'a.zip' in cloud storage 1 if it exists?",  # cloud_path "a"
 }
 AGAIN = "don't call again unless the user asks"
 REFUSALS = {

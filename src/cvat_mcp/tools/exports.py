@@ -19,7 +19,7 @@ async def _confirm_overwrite(ctx: Context, cloud_storage_id: int, cloud_path: st
         ctx,
         "export_dataset",
         {"overwrite": overwrite},
-        f"Overwrite {key} in cloud storage {cloud_storage_id} if it exists?",
+        f"Overwrite {key!r} in cloud storage {cloud_storage_id} if it exists?",
     )
 
 

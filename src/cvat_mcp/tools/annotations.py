@@ -152,7 +152,8 @@ async def _confirm_import(
         ctx,
         "import_annotations",
         {"mode": mode},
-        f"Replace all annotations of {target} with the ones in {cloud_path}?",
+        # quoted, as in export_dataset's: text in a path can't pass for the server's question
+        f"Replace all annotations of {target} with the ones in {cloud_path!r}?",
     )
 
 
