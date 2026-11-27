@@ -1,11 +1,12 @@
 """Confirmation through elicitation, on a standalone server (no CVAT, no cvat_mcp.server)."""
 
+from types import SimpleNamespace
 from typing import Annotated
 
 import pytest
 from mcp import Client
 from mcp.server.mcpserver import Context, MCPServer
-from mcp.server.mcpserver.resolve import Resolve
+from mcp.server.mcpserver.resolve import Elicit, Resolve
 from mcp_types import (
     ClientCapabilities,
     ElicitationCapability,
@@ -138,3 +139,22 @@ def test_can_show_form():
     assert can_show_form(caps(ElicitationCapability(form=form)))
     assert can_show_form(caps(ElicitationCapability(form=form, url=url)))
     assert not can_show_form(caps(ElicitationCapability(url=url)))
+
+
+@pytest.mark.parametrize(
+    "retry",
+    [
+        {"input_responses": {"q": ElicitResult(action="decline")}, "request_state": "sealed"},
+        {"input_responses": None, "request_state": "sealed"},
+    ],
+)
+def test_a_retry_always_asks_again(retry):
+    """On a 2026-07-28 retry the recorded answer is consulted only if the resolver asks again:
+    a retry whose capabilities went missing must not turn a decline into a yes."""
+    ctx = SimpleNamespace(client_capabilities=None, **retry)
+    assert isinstance(ask(ctx, "delete_task", {"task_id": 7}, "Delete?"), Elicit)
+
+
+def test_first_round_without_a_form_asks_nothing():
+    ctx = SimpleNamespace(client_capabilities=None, input_responses=None, request_state=None)
+    assert not isinstance(ask(ctx, "delete_task", {"task_id": 7}, "Delete?"), Elicit)
