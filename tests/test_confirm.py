@@ -21,11 +21,6 @@ MODES = ["2026-07-28", "legacy"]
 DECLINED = ": the user declined: 7 was not replaced; don't call again unless the user asks"
 
 
-@pytest.fixture
-def anyio_backend():
-    return "asyncio"
-
-
 def _confirm_drop(ctx: Context, x: int, mode: str = "append"):
     return ask(ctx, "import_annotations", {"mode": mode}, f"Replace {x}?")
 

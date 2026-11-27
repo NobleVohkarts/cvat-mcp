@@ -13,12 +13,15 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.mcpserver.resolve import Resolve
 from mcp.shared.exceptions import MCPError
 from mcp_types import ElicitResult
-from pydantic import BaseModel
 from tasks_client import TasksClient, send
 
 from cvat_mcp import tasks as tasks_module
 from cvat_mcp.confirm import YES, Answer, answered_yes, ask, require_yes
-from cvat_mcp.services.auto_annotation import AutoAnnotationRun, AutoAnnotationRunStatus
+from cvat_mcp.services.auto_annotation import (
+    AutoAnnotation,
+    AutoAnnotationRun,
+    AutoAnnotationRunStatus,
+)
 from cvat_mcp.tasks import POLL_MS, TTL_MS, Tasks, TaskStore
 
 ISO_Z = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z$")
@@ -100,7 +103,7 @@ def test_working_task_never_expires():
 
 # The tools/call hook, on a standalone server whose fake tools carry the real long tools' names.
 server = MCPServer("t", extensions=[Tasks()])
-TOOL_SECONDS = 0.3
+TOOL_SECONDS = 0.1
 
 
 @server.tool()
@@ -131,19 +134,13 @@ def export_dataset(
     return "exported"
 
 
-class Started(BaseModel):  # the real tool's AutoAnnotation, cut down to what the hook reads
-    task_id: int
-    frame: int | None = None
-    note: str | None = None
-    run: dict | None = None
-
-
 @server.tool()
-def auto_annotate(task_id: int, frame: int | None = None) -> Started:
+def auto_annotate(task_id: int, frame: int | None = None) -> AutoAnnotation:
+    started = {"task_id": task_id, "output": "boxes", "model": "m", "mode": "append", "seconds": 1}
     if frame is not None:
-        return Started(task_id=task_id, frame=frame)
-    return Started(
-        task_id=task_id, note="follow it with get_auto_annotation_run", run=_run("running")
+        return AutoAnnotation(**started, frame=frame)
+    return AutoAnnotation(
+        **started, note="follow it with get_auto_annotation_run", run=_run("running")
     )
 
 
@@ -188,28 +185,15 @@ def tasks_client(mode="2026-07-28", tasks=None, **kw):
     return Client(server, mode=mode, extensions=[tasks] if tasks else [], **kw)
 
 
-@pytest.fixture
-def anyio_backend():
-    return "asyncio"
-
-
-@pytest.mark.anyio
-async def test_long_tool_becomes_task():
-    tasks = TasksClient()
-    async with tasks_client(tasks=tasks) as client:
-        result = await client.call_tool("create_report", {"n": 1})
-    assert not result.is_error and result.content[0].text == "report 1"
-    assert tasks.seen[0][0] == "working" and tasks.seen[-1][0] == "completed"
-
-
 @pytest.mark.anyio
 async def test_task_outlives_its_request():
     tasks = TasksClient()
     async with tasks_client(tasks=tasks) as client:
         started = time.monotonic()
         result = await client.call_tool("create_report", {"n": 2})
-    assert result.content[0].text == "report 2"
+    assert not result.is_error and result.content[0].text == "report 2"
     assert tasks.seen[0][0] == "working"  # the first poll found it still running
+    assert tasks.seen[-1][0] == "completed"
     assert time.monotonic() - started >= TOOL_SECONDS
 
 

@@ -5,34 +5,38 @@ Every store access happens on the server's event loop, so the store needs no loc
 """
 
 import asyncio
-import json
 import logging
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
 
+import pydantic_core
 from mcp.server.extension import Extension, MethodBinding
 from mcp.shared.exceptions import MCPError
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 from mcp_types import CallToolResult, InputRequiredResult, RequestParams, TextContent
 from mcp_types.version import MODERN_PROTOCOL_VERSIONS, is_version_at_least
-from pydantic import Field
 
 from cvat_mcp.confirm import answered_yes, can_show_form, needs_confirmation
-from cvat_mcp.services.auto_annotation import cancel_run, get_run
+from cvat_mcp.services.auto_annotation import AutoAnnotation, cancel_run, get_run
 
 logger = logging.getLogger("cvat_mcp")
-RUN_POLL_SECONDS = 1.0
 
 EXT = "io.modelcontextprotocol/tasks"
-LONG_TOOLS = frozenset(
-    {"create_task", "import_annotations", "export_dataset", "create_report", "auto_annotate"}
-)
+# tool -> whether a call with these arguments is long (auto_annotate with a frame waits seconds)
+LONG_TOOLS: dict[str, Callable[[Mapping[str, Any]], bool]] = {
+    "create_task": lambda _arguments: True,
+    "import_annotations": lambda _arguments: True,
+    "export_dataset": lambda _arguments: True,
+    "create_report": lambda _arguments: True,
+    "auto_annotate": lambda arguments: arguments.get("frame") is None,
+}
 TTL_MS = 3_600_000  # finished tasks are kept an hour
 POLL_MS = 5_000
+RUN_POLL_SECONDS = 1.0  # how often an auto_annotate task reads its run's progress
 Status = Literal["working", "completed", "failed", "cancelled"]
 
 
@@ -46,11 +50,15 @@ class TaskRecord:  # pylint: disable=too-many-instance-attributes
     status_message: str | None = None
     result: dict | None = None
     error: dict | None = None
-    cancel: Callable[[], bool] | None = None  # True when the work will stop
+    run_id: str | None = None  # an auto_annotate run this task follows: cancel stops it
 
 
 def _iso(seconds: float) -> str:
     return datetime.fromtimestamp(seconds, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _dump(result: CallToolResult) -> dict[str, Any]:
+    return result.model_dump(by_alias=True, mode="json", exclude_none=True)
 
 
 class TaskStore:
@@ -111,27 +119,28 @@ class TaskStore:
         }
         if record.status_message is not None:
             answer["statusMessage"] = record.status_message
-        if record.status == "completed" and record.result is not None:
+        if record.result is not None:  # set only with "completed"
             answer["result"] = record.result
-        if record.status == "failed" and record.error is not None:
+        if record.error is not None:  # set only with "failed"
             answer["error"] = record.error
         return answer
 
 
 class TaskParams(RequestParams):
-    task_id: str = Field(alias="taskId")
+    task_id: str  # taskId on the wire (mcp's models use camelCase aliases)
 
 
 def becomes_task(params, ctx) -> bool:
     """A long call from a client that declared tasks on 2026-07-28, with no question still open:
     a call that asks first answers input_required as usual, and only its yes retry is a task."""
     name, arguments = params.name, params.arguments or {}
-    if name not in LONG_TOOLS or (name == "auto_annotate" and arguments.get("frame") is not None):
+    long = LONG_TOOLS.get(name)
+    if long is None or not long(arguments):
         return False
     if not is_version_at_least(ctx.protocol_version or "", MODERN_PROTOCOL_VERSIONS[0]):
         return False
     capabilities = ctx.session.client_capabilities
-    if EXT not in ((capabilities.extensions or {}) if capabilities is not None else {}):
+    if capabilities is None or EXT not in (capabilities.extensions or {}):
         return False
     if needs_confirmation(name, arguments) and can_show_form(capabilities):
         return answered_yes(params.input_responses)
@@ -158,53 +167,45 @@ class Tasks(Extension):
     async def finish(self, record: TaskRecord, call_next, ctx) -> None:
         try:
             result = await call_next(ctx)
-        except MCPError as exc:
-            self.store.update(
-                record,
-                status="failed",
-                error={"code": exc.error.code, "message": exc.error.message},
-            )
-            return
-        except (
-            Exception
-        ) as exc:  # pylint: disable=broad-exception-caught  # recorded for the client
-            logger.exception("task %s (%s) failed", record.task_id, record.tool)
-            error = {"code": INTERNAL_ERROR, "message": f"internal error: {type(exc).__name__}"}
+        except Exception as exc:  # pylint: disable=broad-exception-caught  # for the client
+            if isinstance(exc, MCPError):
+                error = exc.error.model_dump(mode="json", exclude_none=True)
+            else:
+                logger.exception("task %s (%s) failed", record.task_id, record.tool)
+                error = {"code": INTERNAL_ERROR, "message": f"internal error: {type(exc).__name__}"}
             self.store.update(record, status="failed", error=error)
             return
+        del call_next, ctx  # a followed run can last hours: don't keep the request alive
         if isinstance(result, InputRequiredResult):
             # shortcut: becomes_task saw every question answered yes; if the SDK still asks,
             # the call ends here and the model calls again
             text = "the confirmation was not answered; call again"
             result = CallToolResult(is_error=True, content=[TextContent(type="text", text=text)])
-        if isinstance(result, CallToolResult):
-            run = (result.structured_content or {}).get("run") if not result.is_error else None
-            if record.tool == "auto_annotate" and run:
-                await self._follow(record, result.structured_content, run["run_id"])
+        elif record.tool == "auto_annotate" and not result.is_error:  # a whole-task run
+            result = await self._follow(
+                record, AutoAnnotation.model_validate(result.structured_content)
+            )
+            if result is None:
                 return
-            result = result.model_dump(by_alias=True, mode="json", exclude_none=True)
-        self.store.update(record, status="completed", result=result)
+        self.store.update(record, status="completed", result=_dump(result))
 
-    async def _follow(self, record: TaskRecord, started: dict, run_id: str) -> None:
-        """A whole-task auto_annotate returned its run at once: the task ends when the run does."""
-        record.cancel = lambda: cancel_run(run_id)
-        while (run := get_run(run_id).run) is not None and run.state == "running":
+    async def _follow(self, record: TaskRecord, started: AutoAnnotation) -> CallToolResult | None:
+        """The task ends when the run does: its final answer, or None when it was cancelled."""
+        record.run_id = started.run.run_id
+        while (run := get_run(record.run_id).run) is not None and run.state == "running":
             message = f"frames saved {run.frames_done} of {run.frames_total}"
             self.store.update(record, status_message=message)
             await asyncio.sleep(RUN_POLL_SECONDS)
-        if run is None:  # shortcut: only a restart forgets a run, and that forgets this task too
-            run_state = started["run"]
-        else:
-            run_state = run.model_dump(mode="json")
-        if run_state["state"] == "cancelled":
-            self.store.update(record, status="cancelled", status_message=run_state["error"])
-            return
-        final = started | {"run": run_state, "note": None}
-        result = CallToolResult(
-            content=[TextContent(type="text", text=json.dumps(final))], structured_content=final
+        run = run or started.run  # shortcut: only a restart forgets a run, and this task with it
+        if run.state == "cancelled":
+            self.store.update(record, status="cancelled", status_message=run.error)
+            return None
+        final = started.model_copy(update={"run": run, "note": None})
+        text = pydantic_core.to_json(final, indent=2).decode()  # as mcp writes a direct answer
+        return CallToolResult(
+            content=[TextContent(type="text", text=text)],
+            structured_content=final.model_dump(mode="json"),
         )
-        dumped = result.model_dump(by_alias=True, mode="json", exclude_none=True)
-        self.store.update(record, status="completed", result=dumped)
 
     def methods(self):
         versions = frozenset(MODERN_PROTOCOL_VERSIONS)
@@ -218,17 +219,14 @@ class Tasks(Extension):
         return self.store.wire(self.store.get(params.task_id))
 
     async def _update(self, _ctx, params: TaskParams) -> dict[str, Any]:
-        self.store.get(params.task_id)  # no task here ever waits for input
+        self.store.get(params.task_id)  # the spec lists it; no task here ever waits for input
         return {}
 
     async def _cancel(self, _ctx, params: TaskParams) -> dict[str, Any]:
         record = self.store.get(params.task_id)
         if record.status == "working":
-            if record.cancel is None:
-                message = "CVAT can't stop this job; it will finish"
-            elif record.cancel():
-                message = "stopping after the current batch"
-            else:
-                message = None
-            self.store.update(record, status_message=message)
+            if record.run_id is None:
+                self.store.update(record, status_message="CVAT can't stop this job; it will finish")
+            elif cancel_run(record.run_id):
+                self.store.update(record, status_message="stopping after the current batch")
         return {}
