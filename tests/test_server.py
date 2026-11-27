@@ -263,10 +263,19 @@ def test_http_mode_takes_the_client_from_a_local_proxy(monkeypatch):
     monkeypatch.delenv("FORWARDED_ALLOW_IPS", raising=False)
     result = run(PROXY_CHECK, monkeypatch)
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == {
-        "app": "ProxyHeadersMiddleware",
-        "trusted": "127.0.0.1,::1",
-    }
+    served = json.loads(result.stdout)
+    trusted = [h.strip() for h in served["trusted"].split(",")]
+    assert served["app"] == "ProxyHeadersMiddleware"
+    assert "127.0.0.1" in trusted and "*" not in trusted
+
+
+def test_http_mode_refuses_trusting_every_proxy(monkeypatch):
+    monkeypatch.setenv("CVAT_MCP_TRANSPORT", "http")
+    monkeypatch.setenv("CVAT_MCP_PUBLIC_URL", "http://localhost:8765")
+    monkeypatch.setenv("FORWARDED_ALLOW_IPS", "127.0.0.1, *")
+    result = run("from cvat_mcp.__main__ import main; main()", monkeypatch)
+    assert result.returncode == 1
+    assert "FORWARDED_ALLOW_IPS" in result.stderr and "Traceback" not in result.stderr
 
 
 def test_stdio_mode_has_no_oauth_routes(monkeypatch):

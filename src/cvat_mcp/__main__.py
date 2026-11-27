@@ -1,4 +1,5 @@
 import logging
+import os
 import sys
 
 from pydantic import ValidationError
@@ -27,6 +28,11 @@ def main() -> None:
 
     try:
         if HTTP_MODE:
+            if "*" in (h.strip() for h in os.environ.get("FORWARDED_ALLOW_IPS", "").split(",")):
+                sys.exit(
+                    "cvat-mcp: FORWARDED_ALLOW_IPS=* lets any client name its own address and "
+                    "dodge the login lockout; list the proxies' addresses instead."
+                )
             # The web server swallows exits from its lifespan, so check CVAT before serving.
             check_cvat()
             # Bound to localhost only: a tunnel or reverse proxy on this machine is the one way in.

@@ -7,6 +7,7 @@ endpoint can't be used to fill it; a restart means the client connects again.
 
 import functools
 import html
+import logging
 import secrets
 import time
 from collections.abc import Callable
@@ -31,6 +32,8 @@ from starlette.responses import HTMLResponse, RedirectResponse, Response
 from urllib3.exceptions import HTTPError
 
 from cvat_mcp.config import is_secure_url
+
+logger = logging.getLogger("cvat_mcp")
 
 SCOPE = "cvat"
 LOGIN_TTL = 600
@@ -108,6 +111,7 @@ class CvatOAuthProvider(
         self._pairs: dict[str, tuple[str, str]] = {}  # either token -> (access, refresh)
         self._failures: dict[str, list[float]] = {}  # client IP -> recent failure times
         self._login_lock = anyio.Lock()  # one CVAT check at a time: exact counts, no thread pile-up
+        self._warned_no_forwarded_for = False
 
     def _live(self, store: dict, key: str):
         """The item, or None if it's missing or expired (expired items are dropped)."""
@@ -245,8 +249,14 @@ class CvatOAuthProvider(
         )
 
         # uvicorn takes the client from X-Forwarded-For only when a local proxy or tunnel sent it
-        # (FORWARDED_ALLOW_IPS, default 127.0.0.1), the last address that proxy appended.
+        # (FORWARDED_ALLOW_IPS, default 127.0.0.1,::1), the last address that proxy appended.
         ip = getattr(request.client, "host", "")
+        if "x-forwarded-for" not in request.headers and not self._warned_no_forwarded_for:
+            self._warned_no_forwarded_for = True
+            logger.warning(
+                "a login came without X-Forwarded-For: all clients share one login lockout; "
+                "make the proxy in front of the server send it (see the README)"
+            )
         async with self._login_lock:
             recent = [t for t in self._failures.get(ip, []) if t > self.now() - LOCKOUT]
             if len(recent) >= MAX_FAILURES:

@@ -266,7 +266,17 @@ def test_too_many_redirect_uris_refused(provider):
         )
 
 
-def test_lockout_is_per_client_behind_any_proxy(provider, web):
+def no_forwarded_for_warnings(caplog) -> int:
+    return sum("X-Forwarded-For" in r.getMessage() for r in caplog.records)
+
+
+def test_login_without_forwarded_for_warns_once(provider, web, caplog):
+    for _ in range(2):
+        login(web, start_login(provider)[1], password="bad")
+    assert no_forwarded_for_warnings(caplog) == 1
+
+
+def test_lockout_is_per_client_behind_any_proxy(provider, web, caplog):
     # As served: uvicorn's proxy-header handling in front, a proxy or tunnel on 127.0.0.1
     proxied = TestClient(
         ProxyHeadersMiddleware(web.app), client=("127.0.0.1", 50000), follow_redirects=False
@@ -281,6 +291,7 @@ def test_lockout_is_per_client_behind_any_proxy(provider, web):
         assert attempt(spoofed, "bad").status_code == 401
     assert attempt({"x-forwarded-for": "203.0.113.7"}).status_code == 429
     assert attempt({"x-forwarded-for": "198.51.100.1"}).status_code == 302  # the owner elsewhere
+    assert no_forwarded_for_warnings(caplog) == 0  # the proxy sends it
 
 
 def test_old_token_pairs_are_purged(provider, web, clock):

@@ -171,15 +171,17 @@ CVAT_MCP_TRANSPORT=http CVAT_MCP_PUBLIC_URL=https://mcp.example.com CVAT_MCP_MOD
 The proxy must send `X-Forwarded-For` (Caddy, Traefik and Cloudflare tunnels do by default), so
 failed logins count per client, and must not buffer the streamed answers. With a second proxy in
 front of it (e.g. Cloudflare's in front of nginx), the inner one must restore the client address
-first (nginx: `set_real_ip_from` + `real_ip_header`), or all clients share one lockout. For nginx:
+first (nginx: `set_real_ip_from` + `real_ip_header`), or all clients share one lockout; the server
+logs a warning when a login comes without `X-Forwarded-For`. For nginx:
 
 ```nginx
 location / {
     proxy_pass http://127.0.0.1:8765;
     proxy_http_version 1.1;
-    proxy_set_header Host $host;
+    proxy_set_header Host $http_host;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_buffering off;
+    proxy_read_timeout 1h;  # long tool calls and idle streams
 }
 ```
 
