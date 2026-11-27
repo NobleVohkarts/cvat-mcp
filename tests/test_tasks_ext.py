@@ -1,11 +1,21 @@
 """The tasks extension (io.modelcontextprotocol/tasks): store, methods, and the tools/call hook."""
 
 import re
+import time
+from typing import Annotated
 
+import anyio
 import pytest
+from mcp import Client
+from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.mcpserver.resolve import Resolve
 from mcp.shared.exceptions import MCPError
+from mcp_types import ElicitResult
+from tasks_client import TasksClient, send
 
-from cvat_mcp.tasks import POLL_MS, TTL_MS, TaskStore
+from cvat_mcp.confirm import YES, Answer, answered_yes, ask, require_yes
+from cvat_mcp.tasks import POLL_MS, TTL_MS, Tasks, TaskStore
 
 ISO_Z = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z$")
 
@@ -82,3 +92,171 @@ def test_working_task_never_expires():
     record = store.create("create_report")
     clock.now += 10_000
     assert store.get(record.task_id) is record
+
+
+# The tools/call hook, on a standalone server whose fake tools carry the real long tools' names.
+server = MCPServer("t", extensions=[Tasks()])
+TOOL_SECONDS = 0.3
+
+
+@server.tool()
+def create_report(n: int) -> str:
+    time.sleep(TOOL_SECONDS)
+    return f"report {n}"
+
+
+@server.tool()
+def import_annotations(n: int) -> str:
+    raise ToolError(f"bad file {n}")
+
+
+@server.tool()
+def list_tasks() -> str:
+    return "tasks"
+
+
+async def _confirm_overwrite(ctx: Context, overwrite: bool):
+    return ask(ctx, "export_dataset", {"overwrite": overwrite}, "Overwrite?")
+
+
+@server.tool()
+def export_dataset(
+    overwrite: bool = False, confirmation: Annotated[Answer, Resolve(_confirm_overwrite)] = YES
+) -> str:
+    require_yes(confirmation, "nothing was exported")
+    return "exported"
+
+
+def tasks_client(mode="2026-07-28", tasks=None, **kw):
+    return Client(server, mode=mode, extensions=[tasks] if tasks else [], **kw)
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
+@pytest.mark.anyio
+async def test_long_tool_becomes_task():
+    tasks = TasksClient()
+    async with tasks_client(tasks=tasks) as client:
+        result = await client.call_tool("create_report", {"n": 1})
+    assert not result.is_error and result.content[0].text == "report 1"
+    assert tasks.seen[0][0] == "working" and tasks.seen[-1][0] == "completed"
+
+
+@pytest.mark.anyio
+async def test_task_outlives_its_request():
+    tasks = TasksClient()
+    async with tasks_client(tasks=tasks) as client:
+        started = time.monotonic()
+        result = await client.call_tool("create_report", {"n": 2})
+    assert result.content[0].text == "report 2"
+    assert tasks.seen[0][0] == "working"  # the first poll found it still running
+    assert time.monotonic() - started >= TOOL_SECONDS
+
+
+@pytest.mark.anyio
+async def test_tool_error_completes_with_is_error():
+    tasks = TasksClient()
+    async with tasks_client(tasks=tasks) as client:
+        result = await client.call_tool("import_annotations", {"n": 3})
+    assert result.is_error and result.content[0].text.endswith("bad file 3")
+    assert tasks.seen[-1][0] == "completed"
+
+
+@pytest.mark.anyio
+async def test_unexpected_exception_fails():
+    store = TaskStore()
+    record = store.create("create_report")
+
+    async def broken(_ctx):
+        raise RuntimeError("boom")
+
+    await Tasks(store).finish(record, broken, None)
+    assert record.status == "failed"
+    assert record.error == {"code": -32603, "message": "internal error: RuntimeError"}
+
+
+@pytest.mark.anyio
+async def test_short_tool_never_a_task():
+    tasks = TasksClient()
+    async with tasks_client(tasks=tasks) as client:
+        assert (await client.call_tool("list_tasks", {})).content[0].text == "tasks"
+    assert not tasks.seen
+
+
+@pytest.mark.anyio
+async def test_client_without_extension_gets_direct_result():
+    async with tasks_client() as client:
+        assert (await client.call_tool("create_report", {"n": 4})).content[0].text == "report 4"
+
+
+@pytest.mark.anyio
+async def test_legacy_protocol_never_gets_a_task():
+    tasks = TasksClient()
+    async with tasks_client(mode="legacy", tasks=tasks) as client:
+        assert (await client.call_tool("create_report", {"n": 5})).content[0].text == "report 5"
+    assert not tasks.seen
+
+
+@pytest.mark.anyio
+async def test_cancel_cvat_task_keeps_working():
+    tasks = TasksClient()
+    async with tasks_client(tasks=tasks) as client:
+        async with anyio.create_task_group() as group:
+            group.start_soon(client.call_tool, "create_report", {"n": 6})
+            while not tasks.task_ids:
+                await anyio.sleep(0.01)
+            cancelled = await send(client.session, "tasks/cancel", tasks.task_ids[0])
+            assert cancelled == {"resultType": "complete"}  # empty: mcp stamps the resultType
+            state = await send(client.session, "tasks/get", tasks.task_ids[0])
+            assert state["status"] == "working"
+            assert state["statusMessage"] == "CVAT can't stop this job; it will finish"
+    assert tasks.seen[-1][0] == "completed"
+
+
+@pytest.mark.anyio
+async def test_unknown_task_over_the_wire():
+    async with tasks_client(tasks=TasksClient()) as client:
+        with pytest.raises(MCPError) as caught:
+            await send(client.session, "tasks/get", "nope")
+    assert caught.value.error.code == -32602
+
+
+@pytest.mark.anyio
+async def test_methods_are_2026_only():
+    async with tasks_client(mode="legacy") as client:
+        with pytest.raises(MCPError) as caught:
+            await send(client.session, "tasks/get", "nope")
+    assert caught.value.error.code == -32601  # METHOD_NOT_FOUND
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("action", ["accept", "decline"])
+async def test_confirmation_before_task(action):
+    tasks, asked = TasksClient(), []
+
+    async def callback(_ctx, params):
+        asked.append(params.message)
+        content = {"confirm": True} if action == "accept" else None
+        return ElicitResult(action=action, content=content)
+
+    async with tasks_client(tasks=tasks, elicitation_callback=callback) as client:
+        result = await client.call_tool("export_dataset", {"overwrite": True})
+    assert asked == ["Overwrite?"]
+    if action == "accept":
+        assert result.content[0].text == "exported" and tasks.seen  # asked, then a task
+    else:
+        assert result.is_error and "the user declined" in result.content[0].text
+        assert not tasks.seen  # a decline never starts a task
+
+
+def test_answered_yes():
+    yes = ElicitResult(action="accept", content={"confirm": True})
+    assert answered_yes({"a": yes})
+    assert not answered_yes({"a": ElicitResult(action="decline")})
+    assert not answered_yes({"a": ElicitResult(action="accept", content={"confirm": False})})
+    assert not answered_yes({"a": ElicitResult(action="accept", content={})})
+    assert not answered_yes({})
+    assert not answered_yes(None)

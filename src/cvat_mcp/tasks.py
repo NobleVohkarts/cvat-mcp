@@ -4,6 +4,8 @@ at once with a task and finish in the background; the client polls tasks/get for
 Every store access happens on the server's event loop, so the store needs no lock.
 """
 
+import asyncio
+import logging
 import time
 import uuid
 from collections.abc import Callable
@@ -13,12 +15,19 @@ from typing import Any, Literal
 
 from mcp.server.extension import Extension, MethodBinding
 from mcp.shared.exceptions import MCPError
-from mcp.types import INVALID_PARAMS
-from mcp_types import RequestParams
-from mcp_types.version import MODERN_PROTOCOL_VERSIONS
+from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
+from mcp_types import CallToolResult, InputRequiredResult, RequestParams, TextContent
+from mcp_types.version import MODERN_PROTOCOL_VERSIONS, is_version_at_least
 from pydantic import Field
 
+from cvat_mcp.confirm import answered_yes, can_show_form, needs_confirmation
+
+logger = logging.getLogger("cvat_mcp")
+
 EXT = "io.modelcontextprotocol/tasks"
+LONG_TOOLS = frozenset(
+    {"create_task", "import_annotations", "export_dataset", "create_report", "auto_annotate"}
+)
 TTL_MS = 3_600_000  # finished tasks are kept an hour
 POLL_MS = 5_000
 Status = Literal["working", "completed", "failed", "cancelled"]
@@ -110,11 +119,64 @@ class TaskParams(RequestParams):
     task_id: str = Field(alias="taskId")
 
 
+def becomes_task(params, ctx) -> bool:
+    """A long call from a client that declared tasks on 2026-07-28, with no question still open:
+    a call that asks first answers input_required as usual, and only its yes retry is a task."""
+    name, arguments = params.name, params.arguments or {}
+    if name not in LONG_TOOLS or (name == "auto_annotate" and arguments.get("frame") is not None):
+        return False
+    if not is_version_at_least(ctx.protocol_version or "", MODERN_PROTOCOL_VERSIONS[0]):
+        return False
+    capabilities = ctx.session.client_capabilities
+    if EXT not in ((capabilities.extensions or {}) if capabilities is not None else {}):
+        return False
+    if needs_confirmation(name, arguments) and can_show_form(capabilities):
+        return answered_yes(params.input_responses)
+    return True
+
+
 class Tasks(Extension):
     identifier = EXT
 
     def __init__(self, store: TaskStore | None = None):
         self.store = store or TaskStore()
+        self._running: set[asyncio.Task] = set()  # strong references until each call ends
+
+    async def intercept_tool_call(self, params, ctx, call_next):
+        if not becomes_task(params, ctx):
+            return await call_next(ctx)
+        record = self.store.create(params.name)
+        # The call outlives this request (checked over stdio and streamable HTTP).
+        running = asyncio.get_running_loop().create_task(self.finish(record, call_next, ctx))
+        self._running.add(running)
+        running.add_done_callback(self._running.discard)
+        return self.store.wire(record, created=True)
+
+    async def finish(self, record: TaskRecord, call_next, ctx) -> None:
+        try:
+            result = await call_next(ctx)
+        except MCPError as exc:
+            self.store.update(
+                record,
+                status="failed",
+                error={"code": exc.error.code, "message": exc.error.message},
+            )
+            return
+        except (
+            Exception
+        ) as exc:  # pylint: disable=broad-exception-caught  # recorded for the client
+            logger.exception("task %s (%s) failed", record.task_id, record.tool)
+            error = {"code": INTERNAL_ERROR, "message": f"internal error: {type(exc).__name__}"}
+            self.store.update(record, status="failed", error=error)
+            return
+        if isinstance(result, InputRequiredResult):
+            # shortcut: becomes_task saw every question answered yes; if the SDK still asks,
+            # the call ends here and the model calls again
+            text = "the confirmation was not answered; call again"
+            result = CallToolResult(is_error=True, content=[TextContent(type="text", text=text)])
+        if isinstance(result, CallToolResult):
+            result = result.model_dump(by_alias=True, mode="json", exclude_none=True)
+        self.store.update(record, status="completed", result=result)
 
     def methods(self):
         versions = frozenset(MODERN_PROTOCOL_VERSIONS)

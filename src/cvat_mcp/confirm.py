@@ -8,7 +8,7 @@ from mcp.server.elicitation import AcceptedElicitation, ElicitationResult
 from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.mcpserver.resolve import Elicit
-from mcp_types import ClientCapabilities
+from mcp_types import ClientCapabilities, ElicitResult
 from pydantic import BaseModel, Field
 
 
@@ -60,6 +60,14 @@ def ask(
     if not RISKY[tool](arguments) or not can_show_form(ctx.client_capabilities):
         return YES.data
     return Elicit(message, Confirm)
+
+
+def answered_yes(responses: Mapping[str, Any] | None) -> bool:
+    """A retry's raw input responses (2026-07-28) say yes to every question asked."""
+    return bool(responses) and all(
+        isinstance(r, ElicitResult) and r.action == "accept" and (r.content or {}).get("confirm")
+        for r in responses.values()
+    )
 
 
 def require_yes(answer: Answer, refusal: str) -> None:
