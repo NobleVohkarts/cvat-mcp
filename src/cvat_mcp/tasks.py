@@ -80,6 +80,9 @@ class TaskStore:
         self._records[record.task_id] = record
         return record
 
+    # shortcut: any session that knows a task id may read or cancel it; safe while one user owns
+    # the server (OAuth admits only the token's CVAT user, stdio has one) and ids are uuid4; bind
+    # tasks to their session or auth principal if several users ever share a server
     def get(self, task_id: str) -> TaskRecord:
         self._sweep()
         record = self._records.get(task_id)

@@ -594,6 +594,17 @@ def test_watch_run_keeps_its_run_after_a_newer_one(use_function):
     assert aa.watch_run("run-999") is None
 
 
+def test_watch_run_finds_a_recent_run_after_a_newer_one(use_function):
+    """The task asks for its reader only once the start call has returned; a quick run can be
+    finished and replaced by then."""
+    first, *_ = _start(FakeFunction(), use_function)
+    _finish(first.run.run_id)
+    second, *_ = _start(FakeFunction(), use_function)
+    _finish(second.run.run_id)
+    read = aa.watch_run(first.run.run_id)
+    assert read is not None and read().run_id == first.run.run_id
+
+
 def test_get_run_none_yet(monkeypatch):
     monkeypatch.setattr(aa, "_latest", None)
     for run_id in (None, "run-7"):
