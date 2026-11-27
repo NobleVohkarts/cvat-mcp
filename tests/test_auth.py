@@ -16,6 +16,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 from urllib3.exceptions import HTTPError
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from cvat_mcp import auth
 from cvat_mcp.auth import (
@@ -94,9 +95,11 @@ def start_login(provider):
     return client, parse_qs(urlsplit(url).query)["request"][0], url
 
 
-def login(web, request_id, username="admin", password=PASSWORD):
+def login(web, request_id, username="admin", password=PASSWORD, **kwargs):
     return web.post(
-        "/login", data={"request": request_id, "username": username, "password": password}
+        "/login",
+        data={"request": request_id, "username": username, "password": password},
+        **kwargs,
     )
 
 
@@ -263,29 +266,21 @@ def test_too_many_redirect_uris_refused(provider):
         )
 
 
-def test_lockout_is_per_client_ip(provider, web):
-    for _ in range(MAX_FAILURES):
-        _, request_id, _ = start_login(provider)
-        r = web.post(
-            "/login",
-            data={"request": request_id, "username": "admin", "password": "bad"},
-            headers={"cf-connecting-ip": "203.0.113.7"},
-        )
-        assert r.status_code == 401
-    _, request_id, _ = start_login(provider)
-    attacker = web.post(
-        "/login",
-        data={"request": request_id, "username": "admin", "password": PASSWORD},
-        headers={"cf-connecting-ip": "203.0.113.7"},
+def test_lockout_is_per_client_behind_any_proxy(provider, web):
+    # As served: uvicorn's proxy-header handling in front, a proxy or tunnel on 127.0.0.1
+    proxied = TestClient(
+        ProxyHeadersMiddleware(web.app), client=("127.0.0.1", 50000), follow_redirects=False
     )
-    assert attacker.status_code == 429
-    _, request_id, _ = start_login(provider)
-    owner = web.post(
-        "/login",
-        data={"request": request_id, "username": "admin", "password": PASSWORD},
-        headers={"cf-connecting-ip": "198.51.100.1"},
-    )
-    assert owner.status_code == 302
+
+    def attempt(headers, password=PASSWORD):
+        return login(proxied, start_login(provider)[1], password=password, headers=headers)
+
+    for i in range(MAX_FAILURES):
+        # neither a spoofed left part nor cf-connecting-ip makes a new client
+        spoofed = {"x-forwarded-for": f"10.0.0.{i}, 203.0.113.7", "cf-connecting-ip": f"10.1.{i}"}
+        assert attempt(spoofed, "bad").status_code == 401
+    assert attempt({"x-forwarded-for": "203.0.113.7"}).status_code == 429
+    assert attempt({"x-forwarded-for": "198.51.100.1"}).status_code == 302  # the owner elsewhere
 
 
 def test_old_token_pairs_are_purged(provider, web, clock):

@@ -278,10 +278,12 @@ auto-annotation = [
 [package.dev-dependencies]
 dev = [
     { name = "black" },
+    { name = "httpx2" },
     { name = "isort" },
     { name = "pre-commit" },
     { name = "pylint" },
     { name = "pytest" },
+    { name = "python-dotenv" },
 ]
 
 [package.metadata]
@@ -300,10 +302,12 @@ provides-extras = ["auto-annotation"]
 [package.metadata.requires-dev]
 dev = [
     { name = "black", specifier = "==26.*" },
+    { name = "httpx2", specifier = ">=2.16.2" },
     { name = "isort", specifier = "==7.*" },
     { name = "pre-commit" },
     { name = "pylint", specifier = "==4.0.9" },
     { name = "pytest", specifier = ">=8" },
+    { name = "python-dotenv", specifier = ">=1.2.4" },
 ]
 
 [[package]]

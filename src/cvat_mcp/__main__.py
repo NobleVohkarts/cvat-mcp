@@ -29,7 +29,7 @@ def main() -> None:
         if HTTP_MODE:
             # The web server swallows exits from its lifespan, so check CVAT before serving.
             check_cvat()
-            # Bound to localhost only: the tunnel is the one way in.
+            # Bound to localhost only: a tunnel or reverse proxy on this machine is the one way in.
             mcp.run(
                 "streamable-http",
                 host="127.0.0.1",

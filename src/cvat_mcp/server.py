@@ -195,7 +195,7 @@ if oauth is not None:
 
 
 def transport_security() -> TransportSecuritySettings:
-    """Accept only the public (tunnel) host and the local address as Host headers."""
+    """Accept only the public (tunnel or proxy) host and the local address as Host headers."""
     port = settings.mcp_port
     hosts = [f"127.0.0.1:{port}", f"localhost:{port}", urlsplit(settings.public_url).netloc]
     # browser-based clients (e.g. MCP Inspector) send an Origin header

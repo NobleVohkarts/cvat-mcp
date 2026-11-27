@@ -25,10 +25,12 @@ cvat-mcp = "cvat_mcp.__main__:main"
 [dependency-groups]
 dev = [
     "black==26.*",
+    "httpx2>=2.16.2",
     "isort==7.*",
     "pre-commit",
     "pylint==4.0.9",
     "pytest>=8",
+    "python-dotenv>=1.2.4",
 ]
 
 [[tool.uv.index]]

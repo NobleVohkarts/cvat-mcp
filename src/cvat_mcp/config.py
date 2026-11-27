@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     url: str = "http://localhost:8080"
     access_token: SecretStr
     mcp_mode: Literal["read-only", "write"] = "read-only"
-    # HTTP mode for remote clients (claude.ai) through a tunnel; stdio needs none of these.
+    # HTTP mode for remote clients (claude.ai) behind a tunnel or reverse proxy; stdio needs none.
     mcp_transport: Literal["stdio", "http"] = "stdio"
     mcp_public_url: str | None = Field(default=None, validate_default=True)
     mcp_port: int = 8765

@@ -244,8 +244,9 @@ class CvatOAuthProvider(
             _page, request_id=request_id, redirect_uri=str(pending.params.redirect_uri)
         )
 
-        # Behind the tunnel every request comes from 127.0.0.1; Cloudflare names the real client.
-        ip = request.headers.get("cf-connecting-ip") or getattr(request.client, "host", "")
+        # uvicorn takes the client from X-Forwarded-For only when a local proxy or tunnel sent it
+        # (FORWARDED_ALLOW_IPS, default 127.0.0.1), the last address that proxy appended.
+        ip = getattr(request.client, "host", "")
         async with self._login_lock:
             recent = [t for t in self._failures.get(ip, []) if t > self.now() - LOCKOUT]
             if len(recent) >= MAX_FAILURES:
