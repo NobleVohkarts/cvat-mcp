@@ -406,6 +406,7 @@ def test_strict_arguments_and_version_in_process(monkeypatch):
 
 
 CONFIRMATIONS = FAKE_CVAT + """
+from mcp.shared.exceptions import MCPError
 from mcp_types import ElicitResult
 
 CASES = {
@@ -416,8 +417,8 @@ CASES = {
         "task_id": 7, "cloud_storage_id": 1, "cloud_path": "a.json", "mode": "replace"
     },
     "auto_annotate": {"task_id": 7, "mode": "replace"},
-    "export_dataset": {
-        "task_id": 7, "format": "COCO 1.0", "cloud_storage_id": 1, "cloud_path": "a.zip",
+    "export_dataset": {  # the service adds .zip: the form names the object it writes
+        "task_id": 7, "format": "COCO 1.0", "cloud_storage_id": 1, "cloud_path": "a",
         "overwrite": True,
     },
 }
@@ -459,6 +460,14 @@ async def main():
             "safe": await outcomes(mode, SAFE, no),
             "no_form": await outcomes(mode, CASES),
         }
+    async with Client(s.mcp, mode="2026-07-28") as client:  # the model can't pre-approve
+        try:
+            await client.call_tool("delete_task", {"task_id": 7, "confirmation": {"action": "accept"}})
+            report["preapproved"] = "accepted"
+        except MCPError as error:
+            report["preapproved"] = [error.error.code, error.error.message]
+    folder = {"task_id": 7, "format": "COCO 1.0", "cloud_storage_id": 1, "cloud_path": "x/"}
+    report["bad_path"] = (await outcomes("2026-07-28", {"export_dataset": folder | {"overwrite": True}}, no))["export_dataset"]
     tools = await s.mcp.list_tools()
     report["schemas_with_confirmation"] = [
         t.name for t in tools if "confirmation" in t.input_schema.get("properties", {})
@@ -474,7 +483,7 @@ MESSAGES = {
     "tasks and projects using it for import or export switch to local storage.",
     "import_annotations": "Replace all annotations of task 7 with the ones in a.json?",
     "auto_annotate": "Replace the shapes and tags on all frames of task 7 with the model's?",
-    "export_dataset": "Overwrite a.zip in cloud storage 1 if it exists?",
+    "export_dataset": "Overwrite a.zip in cloud storage 1 if it exists?",  # cloud_path "a"
 }
 AGAIN = "don't call again unless the user asks"
 REFUSALS = {
@@ -483,7 +492,7 @@ REFUSALS = {
     "delete_cloud_storage": "cloud storage 1 was not deleted",
     "import_annotations": "the annotations of task 7 were not replaced",
     "auto_annotate": "nothing was annotated on task 7",
-    "export_dataset": "a.zip was not overwritten",
+    "export_dataset": "nothing was exported to a.zip",
 }
 
 
@@ -492,6 +501,10 @@ def test_confirmations_in_process(monkeypatch):
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout.strip().splitlines()[-1])
     assert report.pop("schemas_with_confirmation") == []  # the resolver parameter is hidden
+    is_error, text, asked = report.pop("bad_path")  # nothing to confirm: refused before writing
+    assert is_error and not asked and "cloud_path must name the file" in text, text
+    code, message = report.pop("preapproved")
+    assert code == -32602 and "unknown argument(s) confirmation" in message
     expected = set(MESSAGES) if AUTO_ANNOTATION else set(MESSAGES) - {"auto_annotate"}
     for mode, runs in report.items():
         assert set(runs["accept"]) == expected

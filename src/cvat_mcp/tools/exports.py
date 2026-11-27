@@ -4,17 +4,22 @@ from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.resolve import Resolve
 
 from cvat_mcp.confirm import YES, Answer, ask, require_yes
+from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.server import get_client, tool
 from cvat_mcp.services import exports
 from cvat_mcp.services.exports import ExportResult
 
 
 async def _confirm_overwrite(ctx: Context, cloud_storage_id: int, cloud_path: str, overwrite: bool):
+    try:
+        key = exports.export_key(cloud_path)  # the object the export writes (.zip added)
+    except InvalidArgument:
+        return YES.data  # nothing to confirm: the body refuses the path before writing anything
     return ask(
         ctx,
         "export_dataset",
         {"overwrite": overwrite},
-        f"Overwrite {cloud_path} in cloud storage {cloud_storage_id} if it exists?",
+        f"Overwrite {key} in cloud storage {cloud_storage_id} if it exists?",
     )
 
 
@@ -38,7 +43,7 @@ def export_dataset(  # pylint: disable=too-many-arguments,too-many-positional-ar
     then call again with overwrite=true. Waits for CVAT to prepare the file and upload it to
     the bucket; returns the key, not the contents. Big exports with images can take
     minutes."""
-    require_yes(confirmation, f"{cloud_path} was not overwritten")
+    require_yes(confirmation, f"nothing was exported to {exports.export_key(cloud_path)}")
     return exports.export_dataset(
         get_client(ctx), task_id, format, cloud_storage_id, cloud_path, include_images, overwrite
     )

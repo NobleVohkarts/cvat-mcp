@@ -20,7 +20,7 @@ class ExportResult(BaseModel):
     seconds: float
 
 
-def _export_key(cloud_path: str) -> str:
+def export_key(cloud_path: str) -> str:
     key = cloud_path.strip().lstrip("/")  # object keys never start with "/"
     if not key or key.endswith("/") or any(c in key for c in "*?"):
         raise InvalidArgument(
@@ -112,7 +112,7 @@ def export_dataset(
     include_images: bool,
     overwrite: bool,
 ) -> ExportResult:
-    key = _export_key(cloud_path)
+    key = export_key(cloud_path)
     task = client.tasks.retrieve(task_id)
     check_format(client, format_name, str(task.dimension))
     check_storage(client, cloud_storage_id, key)
