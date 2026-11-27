@@ -230,20 +230,3 @@ uv run pre-commit run --all-files
 ```
 
 Style follows CVAT: black and isort (line length 100), pylint with `.pylintrc` (copied from the CVAT repo).
-
-## Roadmap
-
-Not done yet:
-
-- a progress adapter for long operations;
-- a `full` mode with confirmation via elicitation;
-- a `review_task` prompt;
-- protocol and integration tests;
-- mypy strict;
-- OAuth tokens that survive restarts;
-- a `region` (zoom) parameter for `render_frame`, for small objects and very crowded frames (35+
-  captions), where a wrong label can be missed;
-- tracks in the frame tools: tracked objects are counted but not drawn or edited;
-- per-frame annotation fetching, once CVAT supports a frame filter;
-- reading `.env` from the project directory, not the working directory.
-
