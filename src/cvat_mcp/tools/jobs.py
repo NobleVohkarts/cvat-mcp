@@ -1,8 +1,10 @@
 from typing import Annotated
 
 from mcp.server.mcpserver import Context
+from mcp.server.mcpserver.resolve import Resolve
 from pydantic import Field
 
+from cvat_mcp.confirm import YES, Answer, ask, require_yes
 from cvat_mcp.server import get_client, tool
 from cvat_mcp.services import job_edits
 from cvat_mcp.services.job_edits import DeletedJob, GtJob, Stage, State
@@ -41,9 +43,24 @@ def create_gt_job(
     return job_edits.create_gt_job(get_client(ctx), task_id, frame_count, frames, seed)
 
 
+def _confirm_delete_gt_job(ctx: Context, job_id: int):
+    return ask(
+        ctx,
+        "delete_gt_job",
+        {"job_id": job_id},
+        f"Delete ground-truth job {job_id} with its annotations? This can't be undone.",
+    )
+
+
 @tool(write=True, destructive_hint=True, idempotent_hint=True)
-def delete_gt_job(ctx: Context, job_id: int) -> DeletedJob:
+def delete_gt_job(
+    ctx: Context,
+    job_id: int,
+    confirmation: Annotated[Answer, Resolve(_confirm_delete_gt_job)] = YES,
+) -> DeletedJob:
     """Use to delete a ground-truth job with its annotations, only when the user explicitly asks.
     Only in tasks owned by this server's CVAT account; annotation jobs can't be deleted (CVAT
-    makes them from the task's segments)."""
+    makes them from the task's segments). The client may ask the user to confirm first; "the user
+    declined" means it was not done: don't call again unless the user asks."""
+    require_yes(confirmation, f"ground-truth job {job_id} was not deleted")
     return job_edits.delete_gt_job(get_client(ctx), job_id)

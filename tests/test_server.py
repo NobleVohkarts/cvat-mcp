@@ -400,3 +400,122 @@ def test_strict_arguments_and_version_in_process(monkeypatch):
     # local files are gone: the old arguments are unknown, not silently dropped
     assert checks["old_files"][:2] == ["error", -32602] and "files" in checks["old_files"][2]
     assert checks["old_file"][:2] == ["error", -32602] and "file" in checks["old_file"][2]
+
+
+CONFIRMATIONS = """
+import anyio, json
+from importlib.util import find_spec
+import cvat_mcp.server as s, cvat_mcp.tools
+from mcp import Client
+from mcp_types import ElicitResult
+from cvat_mcp.errors import InvalidArgument
+
+class Reached:
+    def close(self):
+        pass
+
+    def __getattr__(self, name):  # a tool's first use of the SDK client
+        raise InvalidArgument("reached the service")
+
+s._connect = lambda _settings: (Reached(), "admin")
+AA = all(find_spec(m) is not None for m in ("torch", "torchvision", "skimage"))
+CASES = {
+    "delete_task": {"task_id": 7},
+    "delete_gt_job": {"job_id": 73},
+    "delete_cloud_storage": {"cloud_storage_id": 1},
+    "import_annotations": {
+        "task_id": 7, "cloud_storage_id": 1, "cloud_path": "a.json", "mode": "replace"
+    },
+    "auto_annotate": {"task_id": 7, "mode": "replace"},
+    "export_dataset": {
+        "task_id": 7, "format": "COCO 1.0", "cloud_storage_id": 1, "cloud_path": "a.zip",
+        "overwrite": True,
+    },
+}
+SAFE = {  # the same tools with arguments that ask nothing, and the deletes that never ask
+    "import_annotations": {"task_id": 7, "cloud_storage_id": 1, "cloud_path": "a.json"},
+    "auto_annotate": {"task_id": 7},
+    "export_dataset": {
+        "task_id": 7, "format": "COCO 1.0", "cloud_storage_id": 1, "cloud_path": "a.zip"
+    },
+    "delete_issue": {"issue_id": 5},
+    "delete_annotations": {"task_id": 7, "shape_ids": [1]},
+}
+if not AA:
+    del CASES["auto_annotate"], SAFE["auto_annotate"]
+
+async def outcomes(mode, calls, answer=None):
+    asked, current = {}, [None]
+
+    async def callback(_ctx, params):
+        asked.setdefault(current[0], []).append(params.message)
+        return answer
+
+    out = {}
+    callback_or_none = callback if answer is not None else None
+    async with Client(s.mcp, mode=mode, elicitation_callback=callback_or_none) as client:
+        for name, arguments in calls.items():
+            current[0] = name
+            result = await client.call_tool(name, arguments)
+            out[name] = [result.is_error, result.content[0].text, asked.get(name, [])]
+    return out
+
+async def main():
+    yes = ElicitResult(action="accept", content={"confirm": True})
+    no = ElicitResult(action="decline")
+    report = {}
+    for mode in ("2026-07-28", "legacy"):
+        report[mode] = {
+            "accept": await outcomes(mode, CASES, yes),
+            "decline": await outcomes(mode, CASES, no),
+            "safe": await outcomes(mode, SAFE, no),
+            "no_form": await outcomes(mode, CASES),
+        }
+    tools = await s.mcp.list_tools()
+    report["schemas_with_confirmation"] = [
+        t.name for t in tools if "confirmation" in t.input_schema.get("properties", {})
+    ]
+    print(json.dumps(report))
+
+anyio.run(main)
+"""
+MESSAGES = {
+    "delete_task": "Delete task 7 with all its jobs, annotations and issues? This can't be undone.",
+    "delete_gt_job": "Delete ground-truth job 73 with its annotations? This can't be undone.",
+    "delete_cloud_storage": "Delete cloud storage 1 from CVAT? The bucket and its files stay; "
+    "tasks and projects using it for import or export switch to local storage.",
+    "import_annotations": "Replace all annotations of task 7 with the ones in a.json?",
+    "auto_annotate": "Replace the shapes and tags on all frames of task 7 with the model's?",
+    "export_dataset": "Overwrite a.zip in cloud storage 1 if it exists?",
+}
+REFUSALS = {
+    "delete_task": "task 7 was not deleted",
+    "delete_gt_job": "ground-truth job 73 was not deleted",
+    "delete_cloud_storage": "cloud storage 1 was not deleted",
+    "import_annotations": "the annotations of task 7 were not replaced",
+    "auto_annotate": "nothing was annotated on task 7",
+    "export_dataset": "a.zip was not overwritten",
+}
+
+
+def test_confirmations_in_process(monkeypatch):
+    result = run(CONFIRMATIONS, monkeypatch, "write")
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout.strip().splitlines()[-1])
+    assert report.pop("schemas_with_confirmation") == []  # the resolver parameter is hidden
+    expected = set(MESSAGES) if AUTO_ANNOTATION else set(MESSAGES) - {"auto_annotate"}
+    for mode, runs in report.items():
+        assert set(runs["accept"]) == expected
+        for name, (is_error, text, asked) in runs["accept"].items():
+            assert asked == [MESSAGES[name]], (mode, name, asked)
+            assert is_error and text.endswith(": reached the service"), (mode, name, text)
+        for name, (is_error, text, asked) in runs["decline"].items():
+            assert asked == [MESSAGES[name]], (mode, name, asked)
+            refusal = f": the user declined: {REFUSALS[name]}"
+            assert is_error and text.endswith(refusal), (mode, name, text)
+        for name, (_, text, asked) in runs["safe"].items():
+            # test_import_default_mode_asks_nothing: an omitted mode means append
+            assert not asked, (mode, name, "asked without a risky argument")
+            assert text.endswith(": reached the service"), (mode, name, text)
+        for name, (_, text, asked) in runs["no_form"].items():
+            assert not asked and text.endswith(": reached the service"), (mode, name, text)
