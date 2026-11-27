@@ -170,17 +170,26 @@ class Tasks(Extension):
         A finished coroutine drops its frame, so a followed run doesn't keep the request alive."""
         try:
             result = await self._outcome(record, await call)
+        except asyncio.CancelledError:  # the loop stops it (shutdown): don't leave it working
+            self._fail(
+                record, {"code": INTERNAL_ERROR, "message": "internal error: the call was stopped"}
+            )
+            raise
         except Exception as exc:  # pylint: disable=broad-exception-caught  # for the client
             if isinstance(exc, MCPError):
                 error = exc.error.model_dump(mode="json", exclude_none=True)
             else:
                 logger.exception("task %s (%s) failed", record.task_id, record.tool)
                 error = {"code": INTERNAL_ERROR, "message": f"internal error: {type(exc).__name__}"}
-            self.store.update(record, status="failed", error=error)
+            self._fail(record, error)
             return
         if result is not None:
             record.status_message = None  # the last progress line would contradict the result
             self.store.update(record, status="completed", result=_dump(result))
+
+    def _fail(self, record: TaskRecord, error: dict) -> None:
+        record.status_message = None
+        self.store.update(record, status="failed", error=error)
 
     async def _outcome(self, record: TaskRecord, result) -> CallToolResult | None:
         """The task's final answer; None when it was cancelled."""
@@ -216,7 +225,9 @@ class Tasks(Extension):
             self.store.update(record, status="cancelled", status_message=run.error)
             return None
         seconds = (run.finished - run.started).total_seconds() if run.finished else started.seconds
-        final = started.model_copy(update={"run": run, "note": None, "seconds": seconds})
+        final = started.model_copy(
+            update={"run": run, "note": None, "seconds": seconds, "skipped": dict(run.skipped)}
+        )
         text = pydantic_core.to_json(final, indent=2).decode()  # as mcp writes a direct answer
         return CallToolResult(
             content=[TextContent(type="text", text=text)],

@@ -1,5 +1,6 @@
 """The tasks extension (io.modelcontextprotocol/tasks): store, methods, and the tools/call hook."""
 
+import asyncio
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -141,7 +142,7 @@ def auto_annotate(task_id: int, frame: int | None = None, delay: float = 0) -> A
     )
 
 
-def _run(state, done=0, error=None, run_id="run-1", seconds=None):
+def _run(state, done=0, error=None, run_id="run-1", seconds=None, skipped=None):
     started = datetime(2026, 11, 27, tzinfo=timezone.utc)
     return AutoAnnotationRun(
         finished=None if seconds is None else started + timedelta(seconds=seconds),
@@ -155,6 +156,7 @@ def _run(state, done=0, error=None, run_id="run-1", seconds=None):
         frames_done=done,
         started=started,
         error=error,
+        skipped=skipped or {},
     ).model_dump(mode="json")
 
 
@@ -308,13 +310,18 @@ def test_answered_yes():
 @pytest.mark.anyio
 async def test_auto_annotate_task_follows_the_run(fake_run):
     states, _ = fake_run
-    states[:] = [_run("running", 10), _run("running", 10), _run("finished", 20, seconds=90)]
+    states[:] = [
+        _run("running", 10),
+        _run("running", 10),
+        _run("finished", 20, seconds=90, skipped={"bench": 20}),
+    ]
     tasks = TasksClient(poll_seconds=0.01)
     async with tasks_client(tasks=tasks) as client:
         result = await client.call_tool("auto_annotate", {"task_id": 7})
     assert ("working", "frames saved 10 of 20") in tasks.seen
     assert tasks.seen[-1] == ("completed", None)  # no stale progress next to the result
     assert result.structured_content["seconds"] == 90  # the run's time, not the start call's
+    assert result.structured_content["skipped"] == {"bench": 20}  # the run's, not the start's
     assert result.structured_content["run"]["state"] == "finished"
     assert result.structured_content["run"]["frames_done"] == 20
     assert result.structured_content["note"] is None
@@ -371,13 +378,21 @@ async def test_cancel_before_the_run_starts(fake_run):
 
 @pytest.mark.anyio
 async def test_follow_failure_fails_the_task(monkeypatch):
-    def read():
+    reads = [AutoAnnotationRun.model_validate(_run("running", 10))]
+
+    def read():  # progress once, then a broken snapshot
+        if reads:
+            return reads.pop()
         raise RuntimeError("snapshot broke")
 
     monkeypatch.setattr(tasks_module, "watch_run", lambda _run_id: read)
-    async with tasks_client(tasks=TasksClient(poll_seconds=0.01)) as client:
+    monkeypatch.setattr(tasks_module, "RUN_POLL_SECONDS", 0.05)
+    tasks = TasksClient(poll_seconds=0.01)
+    async with tasks_client(tasks=tasks) as client:
         with pytest.raises(MCPError) as caught:
             await client.call_tool("auto_annotate", {"task_id": 7})
+    assert ("working", "frames saved 10 of 20") in tasks.seen
+    assert tasks.seen[-1] == ("failed", None)  # no progress line next to the error
     assert caught.value.error.code == -32603
     assert caught.value.error.message == "internal error: RuntimeError"
 
@@ -419,3 +434,17 @@ async def test_cancel_note_stays_while_the_batch_ends(fake_run, monkeypatch):
             )
             states[:] = [_run("cancelled", 20, "stopped by a cancel")]
     assert tasks.seen[-1] == ("cancelled", "stopped by a cancel")
+
+
+@pytest.mark.anyio
+async def test_a_cancelled_call_fails_the_task():
+    store = TaskStore()
+    record = store.create("create_report")
+
+    async def stopped():
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await Tasks(store).finish(record, stopped())
+    assert record.status == "failed"  # not "working" forever
+    assert record.error == {"code": -32603, "message": "internal error: the call was stopped"}
