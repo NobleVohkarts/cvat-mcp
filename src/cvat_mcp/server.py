@@ -21,6 +21,7 @@ from cvat_mcp import __version__
 from cvat_mcp.auth import SCOPE, CvatOAuthProvider, cvat_login_username
 from cvat_mcp.config import Settings
 from cvat_mcp.errors import explain
+from cvat_mcp.tasks import Tasks
 
 logger = logging.getLogger("cvat_mcp")
 
@@ -188,6 +189,7 @@ mcp = MCPServer(
     auth_server_provider=oauth,
     auth=auth,
     middleware=[reject_unknown_arguments],
+    extensions=[Tasks()],
 )
 if oauth is not None:
     mcp.custom_route("/login", ["GET"])(oauth.login_form)

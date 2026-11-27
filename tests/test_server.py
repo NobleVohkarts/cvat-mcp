@@ -9,6 +9,7 @@ import json
 import subprocess
 import sys
 from importlib.util import find_spec
+from pathlib import Path
 
 import pytest
 from cvat_sdk.api_client.exceptions import ApiException
@@ -533,3 +534,85 @@ def test_confirmations_in_process(monkeypatch):
             assert text.endswith(": reached the service"), (mode, name, text)
         for name, (_, text, asked) in runs["no_form"].items():
             assert not asked and text.endswith(": reached the service"), (mode, name, text)
+
+
+TASKS_IN_PROCESS = FAKE_CVAT + """
+import sys
+sys.path.insert(0, TESTS_DIR)
+from mcp_types import ElicitResult
+from tasks_client import TasksClient
+
+LABELS = [{"name": "car"}]
+EXPORT = {"task_id": 1, "format": "COCO 1.0", "cloud_storage_id": 1, "cloud_path": "a.zip"}
+LONG = {
+    "create_task": {"name": "t", "labels": LABELS, "urls": ["https://e.com/a"]},
+    "import_annotations": {"task_id": 1, "cloud_storage_id": 1, "cloud_path": "a.json"},
+    "export_dataset": EXPORT,
+    "create_report": {"task_id": 1},
+    "auto_annotate": {"task_id": 1},
+}
+SHORT = {
+    "get_frame_annotations": {"task_id": 1, "frame": 0},
+    "auto_annotate": {"task_id": 1, "frame": 0},
+}
+LONG = {name: args for name, args in LONG.items() if name in s.REGISTERED_TOOLS}
+SHORT = {name: args for name, args in SHORT.items() if name in s.REGISTERED_TOOLS}
+
+async def run(mode, calls, tasks=None, answer=None):
+    asked, out = [], {}
+
+    async def callback(_ctx, params):
+        asked.append(params.message)
+        return answer
+
+    extensions = [tasks] if tasks else []
+    callback_or_none = answer and callback
+    async with Client(
+        s.mcp, mode=mode, extensions=extensions, elicitation_callback=callback_or_none
+    ) as client:
+        for name, arguments in calls.items():
+            asked.clear()
+            before = len(tasks.seen) if tasks else 0
+            result = await client.call_tool(name, arguments)
+            task = bool(tasks) and len(tasks.seen) > before
+            out[name] = [result.is_error, result.content[0].text, task, list(asked)]
+    return out
+
+async def main():
+    yes = ElicitResult(action="accept", content={"confirm": True})
+    no = ElicitResult(action="decline")
+    overwrite = {"export_dataset": EXPORT | {"overwrite": True}}
+    print(json.dumps({
+        "long": await run("2026-07-28", LONG, TasksClient()),
+        "short": await run("2026-07-28", SHORT, TasksClient()),
+        "no_extension": await run("2026-07-28", LONG),
+        "legacy": await run("legacy", LONG, TasksClient()),
+        "accepted": await run("2026-07-28", overwrite, TasksClient(), yes),
+        "declined": await run("2026-07-28", overwrite, TasksClient(), no),
+    }))
+
+anyio.run(main)
+"""
+
+
+def test_tasks_in_process(monkeypatch):
+    tests_dir = repr(str(Path(__file__).parent))
+    result = run(TASKS_IN_PROCESS.replace("TESTS_DIR", tests_dir), monkeypatch, "write")
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout.strip().splitlines()[-1])
+    long_tools = {"create_task", "import_annotations", "export_dataset", "create_report"}
+    assert set(report["long"]) == long_tools | ({"auto_annotate"} if AUTO_ANNOTATION else set())
+    for name, (is_error, text, task, _) in report["long"].items():
+        assert task, (name, "not a task")
+        assert is_error and text.endswith(": reached the service"), (name, text)
+    for group in ("short", "no_extension", "legacy"):
+        for name, (_, text, task, _) in report[group].items():
+            assert not task, (group, name, "became a task")
+            assert text.endswith(": reached the service"), (group, name, text)
+    # test_confirmation_before_task: the form first, the task only after a yes
+    _, text, task, asked = report["accepted"]["export_dataset"]
+    assert asked == ["Overwrite a.zip in cloud storage 1 if it exists?"] and task
+    assert text.endswith(": reached the service")
+    _, text, task, asked = report["declined"]["export_dataset"]
+    assert len(asked) == 1 and not task
+    assert "the user declined: nothing was exported to a.zip" in text
