@@ -1,8 +1,9 @@
 from cvat_sdk import Client
 from cvat_sdk.api_client import models
+from cvat_sdk.api_client.exceptions import ApiException
 from pydantic import BaseModel
 
-from cvat_mcp.errors import InvalidArgument
+from cvat_mcp.errors import InvalidArgument, explain
 from cvat_mcp.services.annotations import check_frame, shape_bbox
 from cvat_mcp.services.users import is_own, require_own
 
@@ -36,6 +37,15 @@ class IssueList(BaseModel):
     task_id: int
     frame: int | None
     issues: list[IssueInfo]
+
+
+class UpdatedIssue(BaseModel):
+    issue_id: int
+    job_id: int
+    frame: int
+    resolved: bool
+    replies: int
+    url: str
 
 
 class DeletedIssue(BaseModel):
@@ -154,6 +164,42 @@ def list_issues(client: Client, task_id: int, frame: int | None) -> IssueList:
             )
             for i in sorted(found, key=lambda i: (i.frame, i.id))
         ],
+    )
+
+
+def update_issue(
+    client: Client, base_url: str, issue_id: int, reply: str | None, resolved: bool | None
+) -> UpdatedIssue:
+    """Reply to an issue and/or resolve or reopen it; any issue CVAT lets this user change."""
+    if reply is None and resolved is None:
+        raise InvalidArgument("pass reply, resolved or both")
+    if reply is not None and not reply.strip():
+        raise InvalidArgument("reply must say something; leave it out to only change resolved")
+
+    issue = client.issues.retrieve(issue_id)
+    comment = None
+    if reply is not None:  # first, so a reply-and-close keeps its reason even if the patch fails
+        comment = client.comments.create(models.CommentWriteRequest(issue=issue_id, message=reply))
+    if resolved is not None and resolved != issue.resolved:
+        try:
+            issue.update({"resolved": resolved})
+        except ApiException as error:
+            if comment is None:
+                raise
+            # Said explicitly, so the model doesn't post the same reply again on a retry.
+            raise InvalidArgument(
+                f"the reply was posted (comment #{comment.id}), but resolved was not changed: "
+                f"{explain(error) or error}"
+            ) from error
+    else:
+        issue.fetch()  # the reply count after our reply
+    return UpdatedIssue(
+        issue_id=issue_id,
+        job_id=issue.job,
+        frame=issue.frame,
+        resolved=issue.resolved,
+        replies=max(issue.comments.count - 1, 0),  # the first comment is the message
+        url=job_url(base_url, client.jobs.retrieve(issue.job).task_id, issue.job, issue.frame),
     )
 
 

@@ -1,15 +1,18 @@
 from unittest.mock import Mock
 
 import pytest
+from cvat_sdk.api_client.exceptions import ApiException
 from fakes import Obj, fake_client, fake_task, shape
 
 from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.services.issues import (
+    UpdatedIssue,
     check_bbox,
     create_issue,
     delete_issue,
     find_job_for_frame,
     list_issues,
+    update_issue,
 )
 
 GT = Obj(id=1, type="ground_truth", start_frame=0, stop_frame=39)
@@ -206,3 +209,100 @@ def test_delete_refuses_foreign_issue(owner, author):
     with pytest.raises(InvalidArgument, match=f"belongs to {author}.*CVAT UI"):
         delete_issue(_delete_client(issue), 40)
     remove.assert_not_called()
+
+
+def _update_client(issue, log, fail_update=None):
+    """A fake client for update_issue; `log` records comments.create / update / fetch in order."""
+
+    def create(request):
+        log.append(("reply", request.issue, request.message))
+        issue.comments.count += 1
+        return Obj(id=200)
+
+    def update(values):
+        log.append(("update", values))
+        if fail_update:
+            raise fail_update
+        issue.resolved = values["resolved"]
+
+    issue.update = update
+    issue.fetch = lambda: log.append(("fetch",))
+    return Obj(
+        issues=Obj(retrieve=lambda _id: issue),
+        comments=Obj(create=create),
+        jobs=Obj(retrieve=lambda _id: Obj(task_id=4)),
+    )
+
+
+def test_update_issue_reply_then_resolve():
+    log = []
+    result = update_issue(
+        _update_client(_issue(41, 3, 25, ME), log), "http://cvat", 41, "fixed, thanks", True
+    )
+    assert log == [("reply", 41, "fixed, thanks"), ("update", {"resolved": True})]
+    assert result == UpdatedIssue(
+        issue_id=41,
+        job_id=3,
+        frame=25,
+        resolved=True,
+        replies=1,
+        url="http://cvat/tasks/4/jobs/3?frame=25",
+    )
+
+
+def test_update_issue_reopen_without_reply():
+    log = []
+    issue = _issue(41, 3, 25, ME)
+    issue.resolved = True
+    result = update_issue(_update_client(issue, log), "http://cvat", 41, None, False)
+    assert log == [("update", {"resolved": False})]
+    assert result.resolved is False and result.replies == 0
+
+
+def test_update_issue_reply_only_keeps_state():
+    log = []
+    result = update_issue(
+        _update_client(_issue(41, 3, 25, ME), log), "http://cvat", 41, "why?", None
+    )
+    assert log == [("reply", 41, "why?"), ("fetch",)]
+    assert result.resolved is False and result.replies == 1
+
+
+def test_update_issue_same_state_sends_no_patch():
+    log = []
+    issue = _issue(41, 3, 25, ME)
+    issue.resolved = True
+    result = update_issue(_update_client(issue, log), "http://cvat", 41, None, True)
+    assert ("update", {"resolved": True}) not in log
+    assert result.resolved is True
+
+
+def test_update_issue_works_on_foreign_issue():
+    log = []
+    result = update_issue(
+        _update_client(_issue(40, 2, 5, ANNA), log), "http://cvat", 40, "done", True
+    )
+    assert result.resolved is True
+
+
+@pytest.mark.parametrize(
+    "reply, resolved, match",
+    [
+        (None, None, "reply, resolved or both"),
+        ("  ", None, "reply must say"),
+        ("", True, "reply must say"),
+    ],
+)
+def test_update_issue_argument_errors_need_no_requests(reply, resolved, match):
+    with pytest.raises(InvalidArgument, match=match):
+        update_issue(Obj(), "http://cvat", 41, reply, resolved)  # any request: AttributeError
+
+
+def test_update_issue_failed_resolve_says_reply_was_posted():
+    log = []
+    client = _update_client(_issue(41, 3, 25, ME), log, fail_update=ApiException(status=403))
+    with pytest.raises(
+        InvalidArgument, match=r"reply was posted \(comment #200\).*resolved was not changed"
+    ):
+        update_issue(client, "http://cvat", 41, "done", True)
+    assert log[0] == ("reply", 41, "done")
