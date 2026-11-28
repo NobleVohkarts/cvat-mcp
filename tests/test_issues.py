@@ -1,15 +1,18 @@
 from unittest.mock import Mock
 
 import pytest
+from cvat_sdk.api_client.exceptions import ApiException
 from fakes import Obj, fake_client, fake_task, shape
 
 from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.services.issues import (
+    UpdatedIssue,
     check_bbox,
     create_issue,
     delete_issue,
     find_job_for_frame,
     list_issues,
+    update_issue,
 )
 
 GT = Obj(id=1, type="ground_truth", start_frame=0, stop_frame=39)
@@ -83,21 +86,20 @@ ME = Obj(id=5, username="reviewer")
 ANNA = Obj(id=6, username="anna")
 
 
-def _issue(id, job, frame, owner, count=1, **kw):  # pylint: disable=redefined-builtin
+def _issue(id, job, frame, owner, resolved=False, **kw):  # pylint: disable=redefined-builtin
     return Obj(
         id=id,
         job=job,
         frame=frame,
         position=[1.0, 2.0, 3.0, 4.0],
-        resolved=False,
+        resolved=resolved,
         owner=owner,
-        comments=Obj(count=count),
         **kw,
     )
 
 
-def _comment(id, issue, message):  # pylint: disable=redefined-builtin
-    return Obj(id=id, issue=issue, message=message)
+def _comment(id, issue, message, owner=ME):  # pylint: disable=redefined-builtin
+    return Obj(id=id, issue=issue, message=message, owner=owner)
 
 
 @pytest.fixture
@@ -105,12 +107,14 @@ def listed():
     """Issue and comment repos for a fake client; records every call as (repo, filters)."""
     calls = []
     data = {
-        "issues": [_issue(41, 3, 25, ME, count=2), _issue(40, 2, 5, ANNA), _issue(42, 3, 25, None)],
+        "issues": [_issue(41, 3, 25, ME), _issue(40, 2, 5, ANNA), _issue(42, 3, 25, None)],
         "comments": [
             _comment(102, 41, "reply"),
             _comment(101, 41, "box misses the car"),
             _comment(100, 40, "label is wrong"),
             _comment(103, 42, "missing person"),
+            _comment(104, 41, "fixed", ANNA),
+            _comment(105, 41, "thanks", None),  # a deleted user's comment
         ],
     }
 
@@ -141,11 +145,21 @@ def _list_client(listed, organization=None):
 def test_list_issues_messages_authors_and_own(listed):
     result = list_issues(_list_client(listed), 4, None)
     assert [
-        (i.issue_id, i.frame, i.message, i.author, i.own, i.replies) for i in result.issues
+        (i.issue_id, i.frame, i.message, i.author, i.own, len(i.replies)) for i in result.issues
     ] == [
         (40, 5, "label is wrong", "anna", False, 0),
-        (41, 25, "box misses the car", "reviewer", True, 1),
+        (41, 25, "box misses the car", "reviewer", True, 3),
         (42, 25, "missing person", None, False, 0),
+    ]
+
+
+def test_list_issues_reply_texts_in_order(listed):
+    issue = {i.issue_id: i for i in list_issues(_list_client(listed), 4, None).issues}[41]
+    assert issue.message == "box misses the car"
+    assert [(r.author, r.message) for r in issue.replies] == [
+        ("reviewer", "reply"),
+        ("anna", "fixed"),
+        (None, "thanks"),
     ]
 
 
@@ -194,3 +208,110 @@ def test_delete_refuses_foreign_issue(owner, author):
     with pytest.raises(InvalidArgument, match=f"belongs to {author}.*CVAT UI"):
         delete_issue(_delete_client(issue), 40)
     remove.assert_not_called()
+
+
+def _update_client(issue, log, fail_patch=None, organization=None, fail_job=None):
+    """A fake client for update_issue; `log` records the reply and the PATCH in order."""
+
+    def create(request, **org):
+        log.append(("reply", request.issue, request.message, *org.items()))
+        return Obj(id=200), None
+
+    def partial_update(issue_id, patched_issue_write_request):
+        log.append(("patch", issue_id, patched_issue_write_request.resolved))
+        if fail_patch:
+            raise fail_patch
+
+    def retrieve_job(_id):
+        if fail_job:
+            raise fail_job
+        return Obj(task_id=4, organization=organization)
+
+    return Obj(
+        issues=Obj(retrieve=lambda _id: issue),
+        api_client=Obj(
+            issues_api=Obj(partial_update=partial_update), comments_api=Obj(create=create)
+        ),
+        jobs=Obj(retrieve=retrieve_job),
+    )
+
+
+def test_update_issue_reply_goes_to_the_issues_organization():
+    log = []
+    client = _update_client(_issue(41, 3, 25, ME), log, organization=9)
+    update_issue(client, "http://cvat", 41, "ok", None)
+    assert log == [("reply", 41, "ok", ("org_id", 9))]
+
+
+def test_update_issue_failed_job_lookup_posts_no_reply():
+    log = []
+    client = _update_client(_issue(41, 3, 25, ME), log, fail_job=ApiException(status=502))
+    with pytest.raises(ApiException):
+        update_issue(client, "http://cvat", 41, "fixed", True)
+    assert not log
+
+
+@pytest.mark.parametrize("owner", [ME, ANNA])  # anyone's issue, not only the account's own
+def test_update_issue_reply_then_resolve(owner):
+    log = []
+    issue = _issue(41, 3, 25, owner)
+    result = update_issue(_update_client(issue, log), "http://cvat", 41, "fixed, thanks", True)
+    assert log == [("reply", 41, "fixed, thanks"), ("patch", 41, True)]
+    assert result == UpdatedIssue(
+        issue_id=41,
+        job_id=3,
+        frame=25,
+        resolved=True,
+        reply_id=200,
+        url="http://cvat/tasks/4/jobs/3?frame=25",
+    )
+
+
+@pytest.mark.parametrize(
+    "resolved, patches", [(False, [("patch", 41, False)]), (True, [])]  # reopen; same state
+)
+def test_update_issue_of_a_resolved_issue(resolved, patches):
+    log = []
+    issue = _issue(41, 3, 25, ME, resolved=True)
+    result = update_issue(_update_client(issue, log), "http://cvat", 41, None, resolved)
+    assert log == patches
+    assert result.resolved is resolved and result.reply_id is None
+
+
+def test_update_issue_reply_only_keeps_state():
+    log = []
+    issue = _issue(41, 3, 25, ME)
+    result = update_issue(_update_client(issue, log), "http://cvat", 41, "why?", None)
+    assert log == [("reply", 41, "why?")]
+    assert result.resolved is False and result.reply_id == 200
+
+
+@pytest.mark.parametrize(
+    "reply, resolved, match",
+    [
+        (None, None, "reply, resolved or both"),
+        ("  ", None, "reply must say"),
+        ("", True, "reply must say"),
+    ],
+)
+def test_update_issue_argument_errors_need_no_requests(reply, resolved, match):
+    with pytest.raises(InvalidArgument, match=match):
+        update_issue(Obj(), "http://cvat", 41, reply, resolved)  # any request: AttributeError
+
+
+@pytest.mark.parametrize("error", [ApiException(status=403), TimeoutError("read timed out")])
+def test_update_issue_failed_resolve_says_reply_was_posted(error):
+    log = []
+    client = _update_client(_issue(41, 3, 25, ME), log, fail_patch=error)
+    with pytest.raises(
+        InvalidArgument, match=r"reply was posted \(comment #200\).*changing resolved failed"
+    ):
+        update_issue(client, "http://cvat", 41, "done", True)
+    assert log[0] == ("reply", 41, "done")
+
+
+def test_update_issue_failed_resolve_without_reply_raises_as_is():
+    error = ApiException(status=403)
+    client = _update_client(_issue(41, 3, 25, ME), [], fail_patch=error)
+    with pytest.raises(ApiException):
+        update_issue(client, "http://cvat", 41, None, True)

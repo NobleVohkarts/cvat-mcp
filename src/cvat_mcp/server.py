@@ -85,6 +85,8 @@ if WRITE_MODE:
         '(reviewing is not such a request). Issues belong to the job of type "annotation" '
         "whose frame range contains the frame. To rewrite or replace issues, list_issues for the "
         "frame, create_issue the new ones, then delete_issue the old ones"
+        ". To answer, resolve or reopen issues (update_issue), list_issues first; resolve issues "
+        "only when the user asks"
         ". Fix annotations with create_annotations / update_annotations / delete_annotations "
         "only when the user asks to fix them (reviewing or filing issues is not such a request), "
         "then render_frame again to check. Create, change or delete tasks (create_task, "

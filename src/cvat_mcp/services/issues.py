@@ -2,7 +2,7 @@ from cvat_sdk import Client
 from cvat_sdk.api_client import models
 from pydantic import BaseModel
 
-from cvat_mcp.errors import InvalidArgument
+from cvat_mcp.errors import InvalidArgument, explain
 from cvat_mcp.services.annotations import check_frame, shape_bbox
 from cvat_mcp.services.users import is_own, require_own
 
@@ -15,6 +15,11 @@ class IssueRef(BaseModel):
     url: str
 
 
+class Reply(BaseModel):
+    author: str | None
+    message: str
+
+
 class IssueInfo(BaseModel):
     issue_id: int
     job_id: int
@@ -23,7 +28,7 @@ class IssueInfo(BaseModel):
     message: str
     resolved: bool
     author: str | None
-    replies: int
+    replies: list[Reply]
     own: bool
 
 
@@ -31,6 +36,15 @@ class IssueList(BaseModel):
     task_id: int
     frame: int | None
     issues: list[IssueInfo]
+
+
+class UpdatedIssue(BaseModel):
+    issue_id: int
+    job_id: int
+    frame: int
+    resolved: bool
+    reply_id: int | None  # the comment this call posted
+    url: str
 
 
 class DeletedIssue(BaseModel):
@@ -123,11 +137,15 @@ def list_issues(client: Client, task_id: int, frame: int | None) -> IssueList:
     # An explicit org context: without it the comments endpoint answers an empty list.
     found = client.issues.list(org_id=task.organization, task_id=task_id, **filters)
     # CVAT keeps an issue's message as its first comment; comments filter by job, not task.
-    messages = {}
+    messages, replies = {}, {}
     for job_id in {i.job for i in found}:
         comments = client.comments.list(org_id=task.organization, job_id=job_id, **filters)
-        for comment in sorted(comments, key=lambda c: c.id):
-            messages.setdefault(comment.issue, comment.message)
+        for c in sorted(comments, key=lambda c: c.id):  # the first comment is the message
+            if c.issue in messages:
+                author = c.owner.username if c.owner else None
+                replies.setdefault(c.issue, []).append(Reply(author=author, message=c.message))
+            else:
+                messages[c.issue] = c.message
     me = client.users.retrieve_current_user().id
     return IssueList(
         task_id=task_id,
@@ -141,11 +159,51 @@ def list_issues(client: Client, task_id: int, frame: int | None) -> IssueList:
                 message=messages.get(i.id, ""),
                 resolved=i.resolved,
                 author=i.owner.username if i.owner else None,
-                replies=max(i.comments.count - 1, 0),  # the first comment is the message
+                replies=replies.get(i.id, []),
                 own=is_own(i, me),
             )
             for i in sorted(found, key=lambda i: (i.frame, i.id))
         ],
+    )
+
+
+def update_issue(
+    client: Client, base_url: str, issue_id: int, reply: str | None, resolved: bool | None
+) -> UpdatedIssue:
+    """Reply to an issue and/or resolve or reopen it; any issue CVAT lets this user change."""
+    if reply is None and resolved is None:
+        raise InvalidArgument("pass reply, resolved or both")
+    if reply is not None and not reply.strip():
+        raise InvalidArgument("reply must say something; leave it out to only change resolved")
+
+    issue = client.issues.retrieve(issue_id)
+    job = client.jobs.retrieve(issue.job)  # before the reply: nothing may fail after it unsaid
+    comment = None
+    if reply is not None:  # first, so a reply-and-close keeps its reason even if the patch fails
+        # CVAT checks a create in the request's org context, not the issue's.
+        org = {"org_id": job.organization} if job.organization is not None else {}
+        comment, _ = client.api_client.comments_api.create(
+            models.CommentWriteRequest(issue=issue_id, message=reply), **org
+        )
+    if resolved is not None and resolved != issue.resolved:
+        try:  # one PATCH: the SDK proxy's update() would GET the issue again
+            patch = models.PatchedIssueWriteRequest(resolved=resolved)
+            client.api_client.issues_api.partial_update(issue_id, patched_issue_write_request=patch)
+        except Exception as error:
+            if comment is None:
+                raise
+            # Said explicitly, so the model doesn't post the same reply again on a retry.
+            raise InvalidArgument(
+                f"the reply was posted (comment #{comment.id}), but changing resolved failed: "
+                f"{explain(error) or error}"
+            ) from error
+    return UpdatedIssue(
+        issue_id=issue_id,
+        job_id=issue.job,
+        frame=issue.frame,
+        resolved=issue.resolved if resolved is None else resolved,
+        reply_id=comment.id if comment else None,
+        url=job_url(base_url, job.task_id, issue.job, issue.frame),
     )
 
 
