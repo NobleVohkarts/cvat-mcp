@@ -1,8 +1,19 @@
 from collections import Counter
 from collections.abc import Iterable, Mapping
+from typing import Literal
 
 from cvat_sdk import Client
 from pydantic import BaseModel
+
+Stage = Literal["annotation", "validation", "acceptance"]
+State = Literal["new", "in progress", "rejected", "completed"]
+JobType = Literal["annotation", "ground_truth", "replica"]
+
+
+def job_url(base_url: str, task_id: int, job_id: int | None = None, frame: int = 0) -> str:
+    """A CVAT UI link to a task, or to a frame of one of its jobs."""
+    url = f"{base_url.rstrip('/')}/tasks/{task_id}"
+    return f"{url}/jobs/{job_id}?frame={frame}" if job_id is not None else url
 
 
 class JobProgress(BaseModel):
@@ -40,6 +51,20 @@ class JobInfo(BaseModel):
     stage: str
     state: str
     assignee: str | None
+
+
+class JobSummary(JobInfo):
+    task_id: int
+    task_name: str
+    project_id: int | None
+    frame_count: int
+    issues: int
+    url: str
+
+
+class JobList(BaseModel):
+    total: int
+    jobs: list[JobSummary]
 
 
 class TaskOverview(BaseModel):
@@ -107,6 +132,45 @@ def list_tasks(client: Client, project_id: int | None, search: str | None, limit
                 ),
             )
             for t in page.results
+        ],
+    )
+
+
+def list_jobs(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    client: Client,
+    base_url: str,
+    stage: Stage | None,
+    state: State | None,
+    assignee: str | None,
+    task_id: int | None,
+    project_id: int | None,
+    type_: JobType | None,
+    limit: int,
+) -> JobList:
+    """Jobs across tasks, newest first; one request (a job carries its task's name)."""
+    given = {
+        "stage": stage,
+        "state": state,
+        "assignee": assignee,
+        "task_id": task_id,
+        "project_id": project_id,
+        "type": type_,
+    }
+    filters = {k: v for k, v in given.items() if v is not None}
+    page, _ = client.api_client.jobs_api.list(page_size=clamp_limit(limit), sort="-id", **filters)
+    return JobList(
+        total=page.count,
+        jobs=[
+            JobSummary(
+                **job_info(j).model_dump(),
+                task_id=j.task_id,
+                task_name=j.task_name,
+                project_id=j.project_id,
+                frame_count=j.frame_count,
+                issues=j.issues.count,
+                url=job_url(base_url, j.task_id, j.id, j.start_frame),
+            )
+            for j in page.results
         ],
     )
 

@@ -1,5 +1,4 @@
 import logging
-from typing import Literal
 
 from cvat_sdk import Client
 from cvat_sdk.api_client import models
@@ -7,13 +6,10 @@ from pydantic import BaseModel
 
 from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.services.annotations import check_frame
-from cvat_mcp.services.tasks import JobInfo, job_info, task_frames
+from cvat_mcp.services.tasks import JobInfo, Stage, State, job_info, task_frames
 from cvat_mcp.services.users import require_own, user_id
 
 logger = logging.getLogger("cvat_mcp")
-
-Stage = Literal["annotation", "validation", "acceptance"]
-State = Literal["new", "in progress", "rejected", "completed"]
 
 
 class DeletedJob(BaseModel):
