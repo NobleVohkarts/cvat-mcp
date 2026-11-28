@@ -392,7 +392,7 @@ async def test_follow_failure_fails_the_task(monkeypatch):
         with pytest.raises(MCPError) as caught:
             await client.call_tool("auto_annotate", {"task_id": 7})
     assert ("working", "frames saved 10 of 20") in tasks.seen
-    assert tasks.seen[-1] == ("failed", None)  # no progress line next to the error
+    assert tasks.seen[-1] == ("failed", "internal error: RuntimeError")  # not the progress
     assert caught.value.error.code == -32603
     assert caught.value.error.message == "internal error: RuntimeError"
 
@@ -448,3 +448,28 @@ async def test_a_cancelled_call_fails_the_task():
         await Tasks(store).finish(record, stopped())
     assert record.status == "failed"  # not "working" forever
     assert record.error == {"code": -32603, "message": "internal error: the call was stopped"}
+    assert record.status_message == "internal error: the call was stopped"
+
+
+@pytest.mark.anyio
+async def test_string_overwrite_asks_before_the_task():
+    """The tool reads "true" as true: the hook must too, or the task would ask and dead-end."""
+    tasks, asked = TasksClient(), []
+
+    async def callback(_ctx, params):
+        asked.append(params.message)
+        return ElicitResult(action="accept", content={"confirm": True})
+
+    async with tasks_client(tasks=tasks, elicitation_callback=callback) as client:
+        result = await client.call_tool("export_dataset", {"overwrite": "true"})
+    assert asked == ["Overwrite?"] and tasks.seen  # asked first, then a task
+    assert not result.is_error and result.content[0].text == "exported"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("method", ["tasks/get", "tasks/update", "tasks/cancel"])
+async def test_methods_need_the_extension(method):
+    async with tasks_client() as client:  # 2026-07-28, no tasks extension declared
+        with pytest.raises(MCPError) as caught:
+            await send(client.session, method, "nope")
+    assert caught.value.error.code == -32021  # missing required client capability

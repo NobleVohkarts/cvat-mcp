@@ -118,6 +118,11 @@ def test_needs_confirmation():
     assert needs_confirmation("export_dataset", {"overwrite": True})
     assert not needs_confirmation("export_dataset", {"overwrite": False})
     assert not needs_confirmation("export_dataset", {})
+    # as the tool reads it (pydantic's lax bool): the hook must see what the tool will do
+    assert needs_confirmation("export_dataset", {"overwrite": "true"})
+    assert needs_confirmation("export_dataset", {"overwrite": 1})
+    assert not needs_confirmation("export_dataset", {"overwrite": "false"})
+    assert not needs_confirmation("export_dataset", {"overwrite": "maybe"})  # refused anyway
     assert not needs_confirmation("delete_issue", {"issue_id": 1})
     assert not needs_confirmation("delete_annotations", {"task_id": 1})
 

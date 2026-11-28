@@ -15,6 +15,7 @@ from typing import Any, Literal
 
 import pydantic_core
 from mcp.server.extension import Extension, MethodBinding
+from mcp.server.mcpserver.server import require_client_extension
 from mcp.shared.exceptions import MCPError
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 from mcp_types import CallToolResult, InputRequiredResult, RequestParams, TextContent
@@ -191,7 +192,7 @@ class Tasks(Extension):
             self.store.update(record, status="completed", result=_dump(result))
 
     def _fail(self, record: TaskRecord, error: dict) -> None:
-        record.status_message = None
+        record.status_message = error["message"]  # not the last progress line
         self.store.update(record, status="failed", error=error)
 
     async def _outcome(self, record: TaskRecord, result) -> CallToolResult | None:
@@ -246,14 +247,17 @@ class Tasks(Extension):
             MethodBinding("tasks/cancel", TaskParams, self._cancel, versions),
         ]
 
-    async def _get(self, _ctx, params: TaskParams) -> dict[str, Any]:
+    async def _get(self, ctx, params: TaskParams) -> dict[str, Any]:
+        require_client_extension(ctx, EXT)  # -32021 for a client that didn't declare tasks
         return self.store.wire(self.store.get(params.task_id))
 
-    async def _update(self, _ctx, params: TaskParams) -> dict[str, Any]:
+    async def _update(self, ctx, params: TaskParams) -> dict[str, Any]:
+        require_client_extension(ctx, EXT)
         self.store.get(params.task_id)  # the spec lists it; no task here ever waits for input
         return {}
 
-    async def _cancel(self, _ctx, params: TaskParams) -> dict[str, Any]:
+    async def _cancel(self, ctx, params: TaskParams) -> dict[str, Any]:
+        require_client_extension(ctx, EXT)
         record = self.store.get(params.task_id)
         if record.status == "working":
             if record.tool == "auto_annotate" and record.run_id is None:  # still starting
