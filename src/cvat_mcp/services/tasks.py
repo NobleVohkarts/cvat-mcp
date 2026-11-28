@@ -114,7 +114,7 @@ def count_objects_by_label(label_ids: Iterable[int], labels: Mapping[int, str]) 
     return {name: counts.get(label_id, 0) for label_id, name in labels.items()}
 
 
-def org_of(client: Client, task_id: int | None, project_id: int | None) -> dict:
+def org_of(client: Client, task_id: int | None = None, project_id: int | None = None) -> dict:
     """The org context of the filtered task or project: without it CVAT lists a user who isn't a
     superuser only their personal workspace, so an org's tasks and jobs would come back empty."""
     if task_id is not None:
@@ -131,7 +131,7 @@ def list_tasks(client: Client, project_id: int | None, search: str | None, limit
     filters = {
         k: v for k, v in {"project_id": project_id, "search": search}.items() if v is not None
     }
-    filters |= org_of(client, None, project_id)
+    filters |= org_of(client, project_id=project_id)
     page, _ = client.api_client.tasks_api.list(page_size=clamp_limit(limit), sort="-id", **filters)
     return TaskList(
         total=page.count,
@@ -177,9 +177,8 @@ def list_jobs(  # pylint: disable=too-many-arguments,too-many-positional-argumen
         "project_id": project_id,
         "type": type_,
     }
-    filters = {k: v for k, v in given.items() if v is not None} | org_of(
-        client, task_id, project_id
-    )
+    filters = {k: v for k, v in given.items() if v is not None}
+    filters |= org_of(client, task_id, project_id)
     page, _ = client.api_client.jobs_api.list(page_size=clamp_limit(limit), sort="-id", **filters)
     return JobList(
         total=page.count,
