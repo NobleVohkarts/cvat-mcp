@@ -3,6 +3,7 @@ from collections.abc import Iterable, Mapping
 from typing import Literal
 
 from cvat_sdk import Client
+from cvat_sdk.api_client.exceptions import ApiException
 from pydantic import BaseModel
 
 from cvat_mcp.errors import InvalidArgument
@@ -114,11 +115,30 @@ def count_objects_by_label(label_ids: Iterable[int], labels: Mapping[int, str]) 
     return {name: counts.get(label_id, 0) for label_id, name in labels.items()}
 
 
+def org_of(client: Client, task_id: int | None = None, project_id: int | None = None) -> dict:
+    """The org context of the filtered task or project: without it CVAT lists a user who isn't a
+    superuser only their personal workspace, so an org's tasks and jobs would come back empty."""
+    try:
+        if task_id is not None:
+            found, _ = client.api_client.tasks_api.retrieve(task_id)
+        elif project_id is not None:
+            found, _ = client.api_client.projects_api.retrieve(project_id)
+        else:
+            return {}
+    except ApiException as error:
+        # Missing, or visible only through its jobs: list as before rather than fail the list.
+        if error.status in (403, 404):
+            return {}
+        raise
+    return {"org_id": found.organization} if found.organization is not None else {}
+
+
 def list_tasks(client: Client, project_id: int | None, search: str | None, limit: int) -> TaskList:
     # client.tasks.list() fetches every page and has no limit/total, so use one paginated call.
     filters = {
         k: v for k, v in {"project_id": project_id, "search": search}.items() if v is not None
     }
+    filters |= org_of(client, project_id=project_id)
     page, _ = client.api_client.tasks_api.list(page_size=clamp_limit(limit), sort="-id", **filters)
     return TaskList(
         total=page.count,
@@ -149,7 +169,8 @@ def list_jobs(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     type_: JobType | None,
     limit: int,
 ) -> JobList:
-    """Jobs across tasks, newest first; one request (a job carries its task's name)."""
+    """Jobs across tasks, newest first; one list request (a job carries its task's name), plus
+    one for the org of a task or project filter."""
     if assignee == "":  # CVAT would filter for an empty username and silently match nothing
         raise InvalidArgument(
             "assignee must be a CVAT username; unassigned jobs can't be filtered here: list "
@@ -164,6 +185,7 @@ def list_jobs(  # pylint: disable=too-many-arguments,too-many-positional-argumen
         "type": type_,
     }
     filters = {k: v for k, v in given.items() if v is not None}
+    filters |= org_of(client, task_id, project_id)
     page, _ = client.api_client.jobs_api.list(page_size=clamp_limit(limit), sort="-id", **filters)
     return JobList(
         total=page.count,
