@@ -12,8 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from cvat_mcp.errors import InvalidArgument, explain, is_refusal
 from cvat_mcp.services.annotation_edits import check_value
 from cvat_mcp.services.cloud_storages import check_storage, cloud_source, keys_hint
-from cvat_mcp.services.issues import job_url
-from cvat_mcp.services.tasks import JobInfo, jobs_of
+from cvat_mcp.services.tasks import JobInfo, job_url, jobs_of
 from cvat_mcp.services.users import require_own, user_id
 
 logger = logging.getLogger("cvat_mcp")

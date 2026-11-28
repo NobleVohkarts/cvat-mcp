@@ -1,7 +1,7 @@
 from unittest.mock import Mock
 
 import pytest
-from fakes import Obj, fake_client, fake_task
+from fakes import Obj, annotation_job, fake_client, fake_task
 
 from cvat_mcp.services.tasks import (
     JobSummary,
@@ -43,16 +43,15 @@ def test_overview_uses_task_project_name_and_counts_tags():
     assert overview.total_objects == 3
 
 
-def _job(id, assignee, issues, start=0, stop=9):  # pylint: disable=redefined-builtin
-    return Obj(
-        id=id,
-        type="annotation",
-        start_frame=start,
-        stop_frame=stop,
+def _job(job_id, assignee, issues, start=0, stop=9):
+    return annotation_job(
+        job_id,
+        start,
+        stop,
+        task_id=4,
         stage="validation",
         state="new",
         assignee=assignee,
-        task_id=4,
         task_name="cars",
         project_id=None,
         frame_count=stop - start + 1,
@@ -89,24 +88,23 @@ def test_list_jobs_summaries():
     assert result.jobs[1].url == "http://cvat/tasks/4/jobs/11?frame=10"
 
 
-def test_list_jobs_sends_only_given_filters():
+@pytest.mark.parametrize(
+    "args, sent",
+    [
+        (
+            ("validation", None, None, None, 3, "annotation"),
+            {"stage": "validation", "project_id": 3, "type": "annotation"},
+        ),
+        (  # type None: no type filter, so every job type is listed
+            (None, "new", "anna", 4, None, None),
+            {"state": "new", "assignee": "anna", "task_id": 4},
+        ),
+    ],
+)
+def test_list_jobs_sends_only_given_filters(args, sent):
     client, listed = _jobs_client()
-    list_jobs(client, "http://cvat", "validation", None, None, None, 3, "annotation", 20)
-    listed.assert_called_once_with(
-        page_size=20, sort="-id", stage="validation", project_id=3, type="annotation"
-    )
-
-
-def test_list_jobs_type_none_sends_no_type():
-    client, listed = _jobs_client()
-    list_jobs(client, "http://cvat", None, "new", "anna", 4, None, None, 20)
-    assert listed.call_args.kwargs == {
-        "page_size": 20,
-        "sort": "-id",
-        "state": "new",
-        "assignee": "anna",
-        "task_id": 4,
-    }
+    list_jobs(client, "http://cvat", *args, 20)
+    listed.assert_called_once_with(page_size=20, sort="-id", **sent)
 
 
 @pytest.mark.parametrize("limit, page_size", [(0, 1), (500, 100), (20, 20)])
