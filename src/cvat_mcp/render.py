@@ -181,22 +181,20 @@ def render_frame(
     labels = task.get_labels()
     data = frame_annotations(scope_of(client, task, job_id), labels, frame)
     colors = {label.name: label.color for label in labels if label.color}
-    objects, rect, offset = data.objects, None, (0.0, 0.0)
+    objects, rect = data.objects, (0, 0, data.width, data.height)
     if region is not None:  # checked before the frame is downloaded
         rect = clip_region(region, data.width, data.height)
-        offset = rect[:2]
         objects = [o for o in objects if _touches(o.bbox, rect)]
-    # "compressed" frames are EXIF-rotated like CVAT's coordinates, and smaller than originals.
+    # "compressed" frames are EXIF-rotated like CVAT's coordinates, and may be smaller than the
+    # originals, whose pixels the coordinates are in.
     with Image.open(task.get_frame(frame, quality="compressed")) as image:
-        if rect is None:
-            resized, scale = resize(image, clamp_side(max_side))
-        else:
-            k = image.width / data.width  # original pixels -> this image's pixels
-            crop = image.crop(tuple(round(v * k) for v in rect))
-            resized, zoom = resize(crop, clamp_side(max_side), MAX_ZOOM)
-            scale = zoom * k
-    images = [annotate(resized, objects, colors, scale, offset)]
-    text = legend(objects, scale, frame, data.skipped_tracks, rect)
+        k = image.width / data.width  # original pixels -> this image's pixels
+        if region is not None:
+            image = image.crop(tuple(round(v * k) for v in rect))
+        resized, zoom = resize(image, clamp_side(max_side), MAX_ZOOM if region else 1.0)
+    scale = zoom * k  # original pixels -> output pixels
+    images = [annotate(resized, objects, colors, scale, rect[:2])]
+    text = legend(objects, scale, frame, data.skipped_tracks, rect if region else None)
     if include_clean:
         images.append(resized)
         text = "The second image is the same frame without annotations.\n" + text

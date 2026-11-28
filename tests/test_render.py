@@ -108,14 +108,9 @@ def test_clamp_side():
     assert clamp_side(10) == 256 and clamp_side(5000) == 2048 and clamp_side(1280) == 1280
 
 
-def test_resize_zooms_up_to_max_zoom():
-    out, scale = resize(Image.new("RGB", (100, 50)), 1280, max_zoom=4.0)
-    assert out.size == (400, 200) and scale == 4.0
-
-
 def test_resize_zoom_is_capped():
-    out, _ = resize(Image.new("RGB", (10, 10)), 1280, max_zoom=4.0)
-    assert out.size == (40, 40)
+    out, scale = resize(Image.new("RGB", (10, 10)), 1280, max_zoom=4.0)
+    assert out.size == (40, 40) and scale == 4.0
 
 
 def test_resize_zoom_still_fits_max_side():
@@ -139,7 +134,10 @@ def _png(size):
     return get_frame
 
 
-def _zoom(shapes, region, frame_size=(640, 480), include_clean=False):
+_frame_png = _png((640, 480))
+
+
+def _render(shapes, include_clean=False, region=None, frame_size=(640, 480)):
     task = fake_task(shapes, get_frame=_png(frame_size))
     return render_frame(fake_client(task), 1, 0, 1280, include_clean=include_clean, region=region)
 
@@ -148,7 +146,7 @@ CAR_SHAPE = shape(1, 1, 0, [100, 100, 300, 250])
 
 
 def test_region_crops_and_zooms():
-    jpegs, text = _zoom([CAR_SHAPE], [100, 100, 260, 220])  # 160x120 -> 4x
+    jpegs, text = _render([CAR_SHAPE], region=[100, 100, 260, 220])  # 160x120 -> 4x
     image = Image.open(io.BytesIO(jpegs[0]))
     assert image.size == (640, 480)
     assert image.getpixel((1, 240))[0] > 150  # the box's left edge at x = 0 (JPEG: loose)
@@ -158,18 +156,18 @@ def test_region_crops_and_zooms():
 
 def test_region_lists_only_touching_objects():
     shapes = [CAR_SHAPE, shape(2, 1, 0, [500, 400, 600, 470])]
-    _, text = _zoom(shapes, [0, 0, 320, 240])
+    _, text = _render(shapes, region=[0, 0, 320, 240])
     assert "#1 " in text and "#2 " not in text and "1 objects touch it" in text
 
 
 def test_region_partly_outside_is_clipped():
-    _, text = _zoom([], [600, 400, 700, 500])
+    _, text = _render([], region=[600, 400, 700, 500])
     assert "region [600, 400, 640, 480]" in text
 
 
 def test_region_keeps_zero_area_objects():
     dot = shape(1, 1, 0, [150, 150], type="points")
-    _, text = _zoom([dot], [100, 100, 200, 200])
+    _, text = _render([dot], region=[100, 100, 200, 200])
     assert "#1 " in text
 
 
@@ -182,14 +180,24 @@ def test_region_outside_frame_refused_before_download():
 
 
 def test_region_with_include_clean():
-    jpegs, _ = _zoom([CAR_SHAPE], [100, 100, 260, 220], include_clean=True)
+    jpegs, _ = _render([CAR_SHAPE], region=[100, 100, 260, 220], include_clean=True)
     annotated, clean = (Image.open(io.BytesIO(j)) for j in jpegs)
     assert annotated.size == clean.size == (640, 480)
     assert clean.getpixel((1, 240))[0] < 40  # nothing drawn on the clean crop
 
 
+def test_whole_frame_maps_onto_a_smaller_compressed_frame():
+    jpegs, text = _render([CAR_SHAPE], frame_size=(320, 240))  # meta: 640x480
+    image = Image.open(io.BytesIO(jpegs[0]))
+    assert image.size == (320, 240)  # never enlarged without a region
+    assert image.getpixel((50, 90))[0] > 150  # box left edge at 100 * 0.5 (was drawn at 100)
+    assert "image scaled by 0.500" in text
+
+
 def test_region_maps_onto_a_smaller_compressed_frame():
-    jpegs, text = _zoom([CAR_SHAPE], [0, 0, 320, 240], frame_size=(320, 240))  # meta: 640x480
+    jpegs, text = _render(
+        [CAR_SHAPE], region=[0, 0, 320, 240], frame_size=(320, 240)
+    )  # meta: 640x480
     assert Image.open(io.BytesIO(jpegs[0])).size == (640, 480)  # crop 160x120, zoom 4
     assert "image scaled by 2.000" in text
 
@@ -244,20 +252,8 @@ def test_caption_bar_lets_the_image_show_through():
     assert r > 200 and 60 < g < 230 and 60 < b < 230  # red blended with white, not solid
 
 
-def _frame_png(_frame, quality):  # pylint: disable=unused-argument
-    buffer = io.BytesIO()
-    Image.new("RGB", (640, 480)).save(buffer, "PNG")
-    buffer.seek(0)
-    return buffer
-
-
-def _render(shapes, include_clean):
-    task = fake_task(shapes, get_frame=_frame_png)
-    return render_frame(fake_client(task), 1, 0, 1280, include_clean=include_clean)
-
-
 def test_render_frame_can_add_the_clean_frame():
-    jpegs, text = _render([shape(1, 1, 0, [100, 100, 300, 250])], True)
+    jpegs, text = _render([CAR_SHAPE], True)
     annotated, clean = (Image.open(io.BytesIO(j)) for j in jpegs)
     assert annotated.size == clean.size == (640, 480)
     assert annotated.getpixel((100, 175))[0] > 150  # the red box edge
@@ -266,7 +262,7 @@ def test_render_frame_can_add_the_clean_frame():
 
 
 def test_render_frame_default_is_one_image():
-    jpegs, text = _render([shape(1, 1, 0, [100, 100, 300, 250])], False)
+    jpegs, text = _render([CAR_SHAPE], False)
     assert len(jpegs) == 1 and "without annotations" not in text
 
 
