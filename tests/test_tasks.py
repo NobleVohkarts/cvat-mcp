@@ -3,6 +3,7 @@ from unittest.mock import Mock
 import pytest
 from fakes import Obj, annotation_job, fake_client, fake_task
 
+from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.services.tasks import (
     JobSummary,
     clamp_limit,
@@ -105,6 +106,20 @@ def test_list_jobs_sends_only_given_filters(args, sent):
     client, listed = _jobs_client()
     list_jobs(client, "http://cvat", *args, 20)
     listed.assert_called_once_with(page_size=20, sort="-id", **sent)
+
+
+def test_list_jobs_job_without_task_name():
+    client, listed = _jobs_client()
+    listed.return_value[0].results[0].task_name = None
+    result = list_jobs(client, "http://cvat", None, None, None, None, None, None, 20)
+    assert result.jobs[0].task_name is None
+
+
+def test_list_jobs_refuses_empty_assignee():
+    client, listed = _jobs_client()
+    with pytest.raises(InvalidArgument, match="unassigned"):
+        list_jobs(client, "http://cvat", None, None, "", None, None, None, 20)
+    listed.assert_not_called()
 
 
 @pytest.mark.parametrize("limit, page_size", [(0, 1), (500, 100), (20, 20)])

@@ -5,6 +5,8 @@ from typing import Literal
 from cvat_sdk import Client
 from pydantic import BaseModel
 
+from cvat_mcp.errors import InvalidArgument
+
 Stage = Literal["annotation", "validation", "acceptance"]
 State = Literal["new", "in progress", "rejected", "completed"]
 JobType = Literal["annotation", "ground_truth", "replica"]
@@ -55,7 +57,7 @@ class JobInfo(BaseModel):
 
 class JobSummary(JobInfo):
     task_id: int
-    task_name: str
+    task_name: str | None
     project_id: int | None
     frame_count: int
     issues: int
@@ -148,6 +150,11 @@ def list_jobs(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     limit: int,
 ) -> JobList:
     """Jobs across tasks, newest first; one request (a job carries its task's name)."""
+    if assignee == "":  # CVAT would filter for an empty username and silently match nothing
+        raise InvalidArgument(
+            "assignee must be a CVAT username; unassigned jobs can't be filtered here: list "
+            "without assignee and look for assignee null"
+        )
     given = {
         "stage": stage,
         "state": state,

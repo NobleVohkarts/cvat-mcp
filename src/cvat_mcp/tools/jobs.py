@@ -24,9 +24,11 @@ def list_jobs(  # pylint: disable=too-many-arguments,too-many-positional-argumen
 ) -> JobList:
     """Use to find jobs across tasks, e.g. the ones waiting for review (stage="validation") or
     assigned to someone (a CVAT username): returns up to `limit` jobs (newest first, max 100)
-    with task, frame range, stage, state, assignee, issue count and a UI link, plus `total`,
-    the number of all matching jobs. `type` defaults to annotation jobs; None lists every type
-    (ground_truth, replica too). Use get_task_overview for one task's labels and object counts."""
+    with task, frame range, stage, state, assignee, issue count (resolved ones included; use
+    list_issues for open ones) and a UI link, plus `total`, the number of all matching jobs.
+    `type` defaults to annotation jobs; None lists every type (ground_truth, replica too).
+    Unassigned jobs can't be filtered: list without assignee and look for assignee null. Use
+    get_task_overview for one task's labels and object counts."""
     return tasks.list_jobs(
         get_client(ctx), settings.url, stage, state, assignee, task_id, project_id, type, limit
     )
