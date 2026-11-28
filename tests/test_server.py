@@ -107,6 +107,7 @@ def test_write_mode_adds_write_tools(monkeypatch):
         "import_annotations",
         "update_annotations",
         "update_cloud_storage",
+        "update_issue",
         "update_job",
         "update_quality_settings",
         "update_task",
@@ -115,6 +116,8 @@ def test_write_mode_adds_write_tools(monkeypatch):
     assert "only when the user asks" in result["instructions"]
     assert "Issues belong to the job" in result["instructions"]
     assert "create_issue the new ones, then delete_issue the old ones" in result["instructions"]
+    assert "update_issue" in result["instructions"]
+    assert "resolve issues only when the user asks" in result["instructions"]
     assert "only when the user asks to fix" in result["instructions"]
     assert sorted(result["destructive"]) == AA_WRITE + [  # replace clears the run's frames
         "delete_annotations",
