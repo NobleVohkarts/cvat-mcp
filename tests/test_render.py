@@ -11,6 +11,7 @@ from cvat_mcp.render import (
     annotate,
     clamp_side,
     clip_region,
+    crop_box,
     legend,
     place_caption,
     render,
@@ -184,6 +185,35 @@ def test_region_with_include_clean():
     annotated, clean = (Image.open(io.BytesIO(j)) for j in jpegs)
     assert annotated.size == clean.size == (640, 480)
     assert clean.getpixel((1, 240))[0] < 40  # nothing drawn on the clean crop
+
+
+@pytest.mark.parametrize(
+    "rect, k, box",
+    [
+        ((100.4, 100.4, 260, 220), 1.0, (100, 100, 260, 220)),  # the crop starts where it says
+        ((100.6, 100, 101.4, 200), 1.0, (100, 100, 102, 200)),  # under a pixel: still 2 wide
+        ((100, 100, 101, 200), 0.5, (50, 50, 51, 100)),  # a smaller compressed frame
+        ((0, 0, 640, 480), 1.0, (0, 0, 640, 480)),
+    ],
+)
+def test_crop_box_rounds_outwards(rect, k, box):
+    assert crop_box(rect, k, (640, 480)) == box
+
+
+@pytest.mark.parametrize("region", [[100.6, 100, 101.4, 200], [100, 100, 100.4, 200]])
+def test_narrow_region_renders(region):
+    jpegs, text = _render([CAR_SHAPE], region=region)
+    assert len(jpegs) == 1 and "#1 " in text
+
+
+def test_region_legend_keeps_fractions():
+    _, text = _render([], region=[123.456, 10, 300, 200])
+    assert "region [123.46, 10, 300, 200]" in text
+
+
+def test_inverted_region_names_region():
+    with pytest.raises(InvalidArgument, match="^region must be"):
+        _render([], region=[30, 30, 10, 10])
 
 
 def test_whole_frame_maps_onto_a_smaller_compressed_frame():

@@ -53,10 +53,10 @@ class DeletedIssue(BaseModel):
     frame: int
 
 
-def check_bbox(bbox: list[float]) -> None:
+def check_bbox(bbox: list[float], name: str = "bbox") -> None:
     if not (len(bbox) == 4 and bbox[0] < bbox[2] and bbox[1] < bbox[3]):
         raise InvalidArgument(
-            "bbox must be [x1, y1, x2, y2] in original pixels with x1 < x2 and y1 < y2"
+            f"{name} must be [x1, y1, x2, y2] in original pixels with x1 < x2 and y1 < y2"
         )
 
 

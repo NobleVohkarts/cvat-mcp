@@ -1,6 +1,7 @@
 """Draw annotations over a frame so the model can check them by looking."""
 
 import io
+import math
 
 from cvat_sdk import Client
 from PIL import Image, ImageColor, ImageDraw, ImageFont, ImageStat
@@ -64,9 +65,17 @@ def resize(image: Image.Image, max_side: int, max_zoom: float = 1.0) -> tuple[Im
     return out, out.width / image.width
 
 
+def crop_box(rect: Rect, k: float, size: tuple[int, int]) -> tuple[int, int, int, int]:
+    """The image pixels covering rect (original pixels, k = image / original), rounded outwards
+    so even a region thinner than a pixel crops at least one."""
+    x1, y1 = math.floor(rect[0] * k), math.floor(rect[1] * k)
+    x2, y2 = min(math.ceil(rect[2] * k), size[0]), min(math.ceil(rect[3] * k), size[1])
+    return x1, y1, max(x2, x1 + 1), max(y2, y1 + 1)
+
+
 def clip_region(region: list[float], width: int, height: int) -> Rect:
     """The region [x1, y1, x2, y2] (original pixels) clipped to the frame."""
-    check_bbox(region)
+    check_bbox(region, "region")
     x1, y1, x2, y2 = (
         max(region[0], 0),
         max(region[1], 0),
@@ -148,7 +157,7 @@ def legend(
 ) -> str:
     what = f"{len(objects)} objects"
     if region is not None:
-        what = f"region [{', '.join(f'{v:g}' for v in region)}], {what} touch it"
+        what = f"region [{', '.join(f'{round(v, 2):.12g}' for v in region)}], {what} touch it"
     head = (
         f"frame {frame}, {what}, image scaled by {scale:.3f} "
         "(coordinates below are original pixels)"
@@ -189,11 +198,13 @@ def render_frame(
     # originals, whose pixels the coordinates are in.
     with Image.open(task.get_frame(frame, quality="compressed")) as image:
         k = image.width / data.width  # original pixels -> this image's pixels
+        box = crop_box(rect, k, image.size)
         if region is not None:
-            image = image.crop(tuple(round(v * k) for v in rect))
+            image = image.crop(box)
         resized, zoom = resize(image, clamp_side(max_side), MAX_ZOOM if region else 1.0)
     scale = zoom * k  # original pixels -> output pixels
-    images = [annotate(resized, objects, colors, scale, rect[:2])]
+    origin = (box[0] / k, box[1] / k)  # where the crop really starts, in original pixels
+    images = [annotate(resized, objects, colors, scale, origin)]
     text = legend(objects, scale, frame, data.skipped_tracks, rect if region else None)
     if include_clean:
         images.append(resized)
