@@ -5,10 +5,31 @@ from mcp.server.mcpserver.resolve import Resolve
 from pydantic import Field
 
 from cvat_mcp.confirm import YES, Answer, ask, require_yes
-from cvat_mcp.server import get_client, tool
-from cvat_mcp.services import job_edits
-from cvat_mcp.services.job_edits import DeletedJob, GtJob, Stage, State
-from cvat_mcp.services.tasks import JobInfo
+from cvat_mcp.server import get_client, settings, tool
+from cvat_mcp.services import job_edits, tasks
+from cvat_mcp.services.job_edits import DeletedJob, GtJob
+from cvat_mcp.services.tasks import JobInfo, JobList, JobType, Stage, State
+
+
+@tool()
+def list_jobs(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    ctx: Context,
+    stage: Stage | None = None,
+    state: State | None = None,
+    assignee: str | None = None,
+    task_id: int | None = None,
+    project_id: int | None = None,
+    type: JobType | None = "annotation",  # pylint: disable=redefined-builtin
+    limit: int = 20,
+) -> JobList:
+    """Use to find jobs across tasks, e.g. the ones waiting for review (stage="validation") or
+    assigned to someone (a CVAT username): returns up to `limit` jobs (newest first, max 100)
+    with task, frame range, stage, state, assignee, issue count and a UI link, plus `total`,
+    the number of all matching jobs. `type` defaults to annotation jobs; None lists every type
+    (ground_truth, replica too). Use get_task_overview for one task's labels and object counts."""
+    return tasks.list_jobs(
+        get_client(ctx), settings.url, stage, state, assignee, task_id, project_id, type, limit
+    )
 
 
 @tool(write=True)
