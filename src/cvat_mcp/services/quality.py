@@ -6,8 +6,8 @@ from cvat_sdk.api_client.exceptions import ApiException
 from pydantic import BaseModel
 
 from cvat_mcp.errors import InvalidArgument
-from cvat_mcp.services.issues import job_url
 from cvat_mcp.services.quality_settings import settings_state
+from cvat_mcp.services.tasks import job_url
 
 
 class Ref(BaseModel):

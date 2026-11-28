@@ -122,7 +122,8 @@ INSTRUCTIONS = f"""\
 Tools for reviewing annotations in CVAT (computer vision annotation tool) and, in write mode,
 for fixing them and managing tasks and jobs.
 Mode: {settings.mcp_mode}.
-Typical flow: list_tasks -> get_task_overview (labels, jobs and their frame ranges)
+Typical flow: list_tasks (or list_jobs, e.g. stage "validation", for the jobs waiting for review)
+-> get_task_overview (labels, jobs and their frame ranges)
 -> render_frame for each frame to review (look for missing objects, wrong labels and boxes
 that miss their object) -> get_frame_annotations for exact ids and boxes
 (download_annotations for all of a job's annotations as JSON)

@@ -4,6 +4,7 @@ from pydantic import BaseModel
 
 from cvat_mcp.errors import InvalidArgument, explain
 from cvat_mcp.services.annotations import check_frame, shape_bbox
+from cvat_mcp.services.tasks import job_url
 from cvat_mcp.services.users import is_own, require_own
 
 
@@ -66,12 +67,6 @@ def find_job_for_frame(jobs, frame: int):
         (j for j in jobs if str(j.type) == "annotation" and j.start_frame <= frame <= j.stop_frame),
         None,
     )
-
-
-def job_url(base_url: str, task_id: int, job_id: int | None = None, frame: int = 0) -> str:
-    """A CVAT UI link to a task, or to a frame of one of its jobs."""
-    url = f"{base_url.rstrip('/')}/tasks/{task_id}"
-    return f"{url}/jobs/{job_id}?frame={frame}" if job_id is not None else url
 
 
 def create_issue(

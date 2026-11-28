@@ -96,7 +96,7 @@ def gt_job(shapes=(), included=(0, 2), task_id=1, job_id=30, deleted=(), **kw):
     )
 
 
-def annotation_job(job_id, start, stop, shapes=(), tags=(), tracks=(), task_id=1):
+def annotation_job(job_id, start, stop, shapes=(), tags=(), tracks=(), task_id=1, **kw):
     """An annotation job of frames start..stop."""
     return Obj(
         id=job_id,
@@ -105,6 +105,7 @@ def annotation_job(job_id, start, stop, shapes=(), tags=(), tracks=(), task_id=1
         start_frame=start,
         stop_frame=stop,
         get_annotations=lambda: Obj(shapes=list(shapes), tracks=list(tracks), tags=list(tags)),
+        **kw,
     )
 
 

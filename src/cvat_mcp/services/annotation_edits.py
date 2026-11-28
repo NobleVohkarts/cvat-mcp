@@ -13,7 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.services.annotations import Scope, scope_of
-from cvat_mcp.services.issues import check_bbox, find_job_for_frame, job_url
+from cvat_mcp.services.issues import check_bbox, find_job_for_frame
+from cvat_mcp.services.tasks import job_url
 
 ShapeType = Literal["rectangle", "polygon", "polyline", "points"]
 MIN_POINTS = {"polygon": 3, "polyline": 2, "points": 1}

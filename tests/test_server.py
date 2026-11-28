@@ -34,6 +34,7 @@ READ_TOOLS = [
     "get_task_overview",
     "list_cloud_storages",
     "list_issues",
+    "list_jobs",
     "list_tasks",
     "render_frame",
     "server_info",
@@ -77,6 +78,7 @@ def registered(monkeypatch, mode):
 def test_read_only_mode_registers_only_read_tools(monkeypatch, mode):
     result = registered(monkeypatch, mode)
     assert result["tools"] == READ_TOOLS
+    assert 'list_jobs, e.g. stage "validation"' in result["instructions"]
     assert "download_annotations for all of a job's annotations" in result["instructions"]
     assert "Write tools are disabled: the server runs in read-only mode" in result["instructions"]
     assert "create_issue" not in result["instructions"]
