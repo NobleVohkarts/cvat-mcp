@@ -1,6 +1,5 @@
 from cvat_sdk import Client
 from cvat_sdk.api_client import models
-from cvat_sdk.api_client.exceptions import ApiException
 from pydantic import BaseModel
 
 from cvat_mcp.errors import InvalidArgument, explain
@@ -44,7 +43,7 @@ class UpdatedIssue(BaseModel):
     job_id: int
     frame: int
     resolved: bool
-    replies: int
+    reply_id: int | None  # the comment this call posted
     url: str
 
 
@@ -138,11 +137,15 @@ def list_issues(client: Client, task_id: int, frame: int | None) -> IssueList:
     # An explicit org context: without it the comments endpoint answers an empty list.
     found = client.issues.list(org_id=task.organization, task_id=task_id, **filters)
     # CVAT keeps an issue's message as its first comment; comments filter by job, not task.
-    threads = {}
+    messages, replies = {}, {}
     for job_id in {i.job for i in found}:
         comments = client.comments.list(org_id=task.organization, job_id=job_id, **filters)
-        for comment in sorted(comments, key=lambda c: c.id):
-            threads.setdefault(comment.issue, []).append(comment)
+        for c in sorted(comments, key=lambda c: c.id):  # the first comment is the message
+            if c.issue in messages:
+                author = c.owner.username if c.owner else None
+                replies.setdefault(c.issue, []).append(Reply(author=author, message=c.message))
+            else:
+                messages[c.issue] = c.message
     me = client.users.retrieve_current_user().id
     return IssueList(
         task_id=task_id,
@@ -153,13 +156,10 @@ def list_issues(client: Client, task_id: int, frame: int | None) -> IssueList:
                 job_id=i.job,
                 frame=i.frame,
                 position=i.position,
-                message=threads[i.id][0].message if i.id in threads else "",
+                message=messages.get(i.id, ""),
                 resolved=i.resolved,
                 author=i.owner.username if i.owner else None,
-                replies=[  # the first comment is the message
-                    Reply(author=c.owner.username if c.owner else None, message=c.message)
-                    for c in threads.get(i.id, [])[1:]
-                ],
+                replies=replies.get(i.id, []),
                 own=is_own(i, me),
             )
             for i in sorted(found, key=lambda i: (i.frame, i.id))
@@ -181,9 +181,10 @@ def update_issue(
     if reply is not None:  # first, so a reply-and-close keeps its reason even if the patch fails
         comment = client.comments.create(models.CommentWriteRequest(issue=issue_id, message=reply))
     if resolved is not None and resolved != issue.resolved:
-        try:
-            issue.update({"resolved": resolved})
-        except ApiException as error:
+        try:  # one PATCH: the SDK proxy's update() would GET the issue again
+            patch = models.PatchedIssueWriteRequest(resolved=resolved)
+            client.api_client.issues_api.partial_update(issue_id, patched_issue_write_request=patch)
+        except Exception as error:
             if comment is None:
                 raise
             # Said explicitly, so the model doesn't post the same reply again on a retry.
@@ -191,14 +192,12 @@ def update_issue(
                 f"the reply was posted (comment #{comment.id}), but resolved was not changed: "
                 f"{explain(error) or error}"
             ) from error
-    else:
-        issue.fetch()  # the reply count after our reply
     return UpdatedIssue(
         issue_id=issue_id,
         job_id=issue.job,
         frame=issue.frame,
-        resolved=issue.resolved,
-        replies=max(issue.comments.count - 1, 0),  # the first comment is the message
+        resolved=issue.resolved if resolved is None else resolved,
+        reply_id=comment.id if comment else None,
         url=job_url(base_url, client.jobs.retrieve(issue.job).task_id, issue.job, issue.frame),
     )
 

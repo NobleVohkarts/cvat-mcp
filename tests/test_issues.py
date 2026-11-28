@@ -86,15 +86,14 @@ ME = Obj(id=5, username="reviewer")
 ANNA = Obj(id=6, username="anna")
 
 
-def _issue(id, job, frame, owner, count=1, **kw):  # pylint: disable=redefined-builtin
+def _issue(id, job, frame, owner, resolved=False, **kw):  # pylint: disable=redefined-builtin
     return Obj(
         id=id,
         job=job,
         frame=frame,
         position=[1.0, 2.0, 3.0, 4.0],
-        resolved=False,
+        resolved=resolved,
         owner=owner,
-        comments=Obj(count=count),
         **kw,
     )
 
@@ -108,7 +107,7 @@ def listed():
     """Issue and comment repos for a fake client; records every call as (repo, filters)."""
     calls = []
     data = {
-        "issues": [_issue(41, 3, 25, ME, count=2), _issue(40, 2, 5, ANNA), _issue(42, 3, 25, None)],
+        "issues": [_issue(41, 3, 25, ME), _issue(40, 2, 5, ANNA), _issue(42, 3, 25, None)],
         "comments": [
             _comment(102, 41, "reply"),
             _comment(101, 41, "box misses the car"),
@@ -211,78 +210,59 @@ def test_delete_refuses_foreign_issue(owner, author):
     remove.assert_not_called()
 
 
-def _update_client(issue, log, fail_update=None):
-    """A fake client for update_issue; `log` records comments.create / update / fetch in order."""
+def _update_client(issue, log, fail_patch=None):
+    """A fake client for update_issue; `log` records the reply and the PATCH in order."""
 
     def create(request):
         log.append(("reply", request.issue, request.message))
-        issue.comments.count += 1
         return Obj(id=200)
 
-    def update(values):
-        log.append(("update", values))
-        if fail_update:
-            raise fail_update
-        issue.resolved = values["resolved"]
+    def partial_update(issue_id, patched_issue_write_request):
+        log.append(("patch", issue_id, patched_issue_write_request.resolved))
+        if fail_patch:
+            raise fail_patch
 
-    issue.update = update
-    issue.fetch = lambda: log.append(("fetch",))
     return Obj(
         issues=Obj(retrieve=lambda _id: issue),
         comments=Obj(create=create),
+        api_client=Obj(issues_api=Obj(partial_update=partial_update)),
         jobs=Obj(retrieve=lambda _id: Obj(task_id=4)),
     )
 
 
-def test_update_issue_reply_then_resolve():
+@pytest.mark.parametrize("owner", [ME, ANNA])  # anyone's issue, not only the account's own
+def test_update_issue_reply_then_resolve(owner):
     log = []
-    result = update_issue(
-        _update_client(_issue(41, 3, 25, ME), log), "http://cvat", 41, "fixed, thanks", True
-    )
-    assert log == [("reply", 41, "fixed, thanks"), ("update", {"resolved": True})]
+    issue = _issue(41, 3, 25, owner)
+    result = update_issue(_update_client(issue, log), "http://cvat", 41, "fixed, thanks", True)
+    assert log == [("reply", 41, "fixed, thanks"), ("patch", 41, True)]
     assert result == UpdatedIssue(
         issue_id=41,
         job_id=3,
         frame=25,
         resolved=True,
-        replies=1,
+        reply_id=200,
         url="http://cvat/tasks/4/jobs/3?frame=25",
     )
 
 
-def test_update_issue_reopen_without_reply():
+@pytest.mark.parametrize(
+    "resolved, patches", [(False, [("patch", 41, False)]), (True, [])]  # reopen; same state
+)
+def test_update_issue_of_a_resolved_issue(resolved, patches):
     log = []
-    issue = _issue(41, 3, 25, ME)
-    issue.resolved = True
-    result = update_issue(_update_client(issue, log), "http://cvat", 41, None, False)
-    assert log == [("update", {"resolved": False})]
-    assert result.resolved is False and result.replies == 0
+    issue = _issue(41, 3, 25, ME, resolved=True)
+    result = update_issue(_update_client(issue, log), "http://cvat", 41, None, resolved)
+    assert log == patches
+    assert result.resolved is resolved and result.reply_id is None
 
 
 def test_update_issue_reply_only_keeps_state():
     log = []
-    result = update_issue(
-        _update_client(_issue(41, 3, 25, ME), log), "http://cvat", 41, "why?", None
-    )
-    assert log == [("reply", 41, "why?"), ("fetch",)]
-    assert result.resolved is False and result.replies == 1
-
-
-def test_update_issue_same_state_sends_no_patch():
-    log = []
     issue = _issue(41, 3, 25, ME)
-    issue.resolved = True
-    result = update_issue(_update_client(issue, log), "http://cvat", 41, None, True)
-    assert ("update", {"resolved": True}) not in log
-    assert result.resolved is True
-
-
-def test_update_issue_works_on_foreign_issue():
-    log = []
-    result = update_issue(
-        _update_client(_issue(40, 2, 5, ANNA), log), "http://cvat", 40, "done", True
-    )
-    assert result.resolved is True
+    result = update_issue(_update_client(issue, log), "http://cvat", 41, "why?", None)
+    assert log == [("reply", 41, "why?")]
+    assert result.resolved is False and result.reply_id == 200
 
 
 @pytest.mark.parametrize(
@@ -298,11 +278,19 @@ def test_update_issue_argument_errors_need_no_requests(reply, resolved, match):
         update_issue(Obj(), "http://cvat", 41, reply, resolved)  # any request: AttributeError
 
 
-def test_update_issue_failed_resolve_says_reply_was_posted():
+@pytest.mark.parametrize("error", [ApiException(status=403), TimeoutError("read timed out")])
+def test_update_issue_failed_resolve_says_reply_was_posted(error):
     log = []
-    client = _update_client(_issue(41, 3, 25, ME), log, fail_update=ApiException(status=403))
+    client = _update_client(_issue(41, 3, 25, ME), log, fail_patch=error)
     with pytest.raises(
         InvalidArgument, match=r"reply was posted \(comment #200\).*resolved was not changed"
     ):
         update_issue(client, "http://cvat", 41, "done", True)
     assert log[0] == ("reply", 41, "done")
+
+
+def test_update_issue_failed_resolve_without_reply_raises_as_is():
+    error = ApiException(status=403)
+    client = _update_client(_issue(41, 3, 25, ME), [], fail_patch=error)
+    with pytest.raises(ApiException):
+        update_issue(client, "http://cvat", 41, None, True)
