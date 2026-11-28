@@ -74,16 +74,19 @@ def render_frame(
     max_side: int = 1280,
     include_clean: bool = False,
     job_id: JobId = None,
+    region: Annotated[list[float], Field(min_length=4, max_length=4)] | None = None,
 ) -> list:
     """Use to look at a frame: returns the image (longest side up to max_side, 256..2048) with
     every object drawn on it (rectangles as boxes, polygons and polylines by their points,
     points as dots) with an `#id label` caption, plus a text legend with exact boxes in original
     pixels. Check visually for missing objects, wrong labels and boxes that miss
     their object. Set include_clean=True for crowded frames: you also get the same frame
-    without annotations, so nothing is hidden under captions. Use get_frame_annotations for
-    attributes."""
+    without annotations, so nothing is hidden under captions. For small objects or crowded
+    frames, set region [x1, y1, x2, y2] (original pixels, e.g. a box from the legend plus a
+    margin) to see that part enlarged up to 4x; only objects touching it are drawn and listed.
+    Use get_frame_annotations for attributes."""
     jpegs, text = render.render_frame(
-        get_client(ctx), task_id, frame, max_side, include_clean, job_id
+        get_client(ctx), task_id, frame, max_side, include_clean, job_id, region
     )
     return [*(Image(data=jpeg, format="jpeg") for jpeg in jpegs), text]
 

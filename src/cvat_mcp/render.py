@@ -17,6 +17,8 @@ def clamp_side(max_side: int) -> int:
     return clamp_limit(max_side, low=256, high=2048)
 
 
+MAX_ZOOM = 4.0  # a region is enlarged at most this much, so small crops don't turn to mush
+
 CAPTION_ALPHA = 140  # ~0.55: the frame stays visible under the caption bars
 
 Rect = tuple[float, float, float, float]
@@ -24,6 +26,13 @@ Rect = tuple[float, float, float, float]
 
 def _overlaps(a: Rect, b: Rect) -> bool:
     return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+def _touches(box: list[float], region: Rect) -> bool:
+    """Inclusive, so points and zero-area boxes inside or on the edge count."""
+    return (
+        box[0] <= region[2] and region[0] <= box[2] and box[1] <= region[3] and region[1] <= box[3]
+    )
 
 
 def place_caption(
@@ -130,9 +139,18 @@ def render(
     return annotate(resized, objects, colors, scale), scale
 
 
-def legend(objects: list[FrameObject], scale: float, frame: int, skipped_tracks: int = 0) -> str:
+def legend(
+    objects: list[FrameObject],
+    scale: float,
+    frame: int,
+    skipped_tracks: int = 0,
+    region: Rect | None = None,
+) -> str:
+    what = f"{len(objects)} objects"
+    if region is not None:
+        what = f"region [{', '.join(f'{v:g}' for v in region)}], {what} touch it"
     head = (
-        f"frame {frame}, {len(objects)} objects, image scaled by {scale:.3f} "
+        f"frame {frame}, {what}, image scaled by {scale:.3f} "
         "(coordinates below are original pixels)"
     )
     if skipped_tracks:
@@ -155,17 +173,30 @@ def render_frame(
     max_side: int,
     include_clean: bool = False,
     job_id: int | None = None,
+    region: list[float] | None = None,
 ) -> tuple[list[bytes], str]:
-    """JPEGs of the frame with its annotations drawn (and, optionally, clean), and a legend."""
+    """JPEGs of the frame (or of a region of it, enlarged up to MAX_ZOOM) with its annotations
+    drawn (and, optionally, clean), and a legend."""
     task = client.tasks.retrieve(task_id)
     labels = task.get_labels()
     data = frame_annotations(scope_of(client, task, job_id), labels, frame)
     colors = {label.name: label.color for label in labels if label.color}
+    objects, rect, offset = data.objects, None, (0.0, 0.0)
+    if region is not None:  # checked before the frame is downloaded
+        rect = clip_region(region, data.width, data.height)
+        offset = rect[:2]
+        objects = [o for o in objects if _touches(o.bbox, rect)]
     # "compressed" frames are EXIF-rotated like CVAT's coordinates, and smaller than originals.
     with Image.open(task.get_frame(frame, quality="compressed")) as image:
-        resized, scale = resize(image, clamp_side(max_side))
-    images = [annotate(resized, data.objects, colors, scale)]
-    text = legend(data.objects, scale, frame, data.skipped_tracks)
+        if rect is None:
+            resized, scale = resize(image, clamp_side(max_side))
+        else:
+            k = image.width / data.width  # original pixels -> this image's pixels
+            crop = image.crop(tuple(round(v * k) for v in rect))
+            resized, zoom = resize(crop, clamp_side(max_side), MAX_ZOOM)
+            scale = zoom * k
+    images = [annotate(resized, objects, colors, scale, offset)]
+    text = legend(objects, scale, frame, data.skipped_tracks, rect)
     if include_clean:
         images.append(resized)
         text = "The second image is the same frame without annotations.\n" + text

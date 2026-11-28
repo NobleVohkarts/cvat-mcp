@@ -1,4 +1,5 @@
 import io
+from unittest.mock import Mock
 
 import pytest
 from fakes import fake_client, fake_task, gt_job, job_client, shape
@@ -126,6 +127,71 @@ def test_annotate_offset_moves_the_box():
     out = annotate(Image.new("RGB", (400, 300)), [CAR], {"car": "#ff0000"}, 2.0, (100, 100))
     assert _red(out.getpixel((1, 150)))  # left edge: (100 - 100) * 2 = 0
     assert out.getpixel((200, 150)) == (0, 0, 0)  # inside stays untouched
+
+
+def _png(size):
+    def get_frame(_frame, quality):  # pylint: disable=unused-argument
+        buffer = io.BytesIO()
+        Image.new("RGB", size).save(buffer, "PNG")
+        buffer.seek(0)
+        return buffer
+
+    return get_frame
+
+
+def _zoom(shapes, region, frame_size=(640, 480), include_clean=False):
+    task = fake_task(shapes, get_frame=_png(frame_size))
+    return render_frame(fake_client(task), 1, 0, 1280, include_clean=include_clean, region=region)
+
+
+CAR_SHAPE = shape(1, 1, 0, [100, 100, 300, 250])
+
+
+def test_region_crops_and_zooms():
+    jpegs, text = _zoom([CAR_SHAPE], [100, 100, 260, 220])  # 160x120 -> 4x
+    image = Image.open(io.BytesIO(jpegs[0]))
+    assert image.size == (640, 480)
+    assert image.getpixel((1, 240))[0] > 150  # the box's left edge at x = 0 (JPEG: loose)
+    assert "region [100, 100, 260, 220], 1 objects touch it, image scaled by 4.000" in text
+    assert "#1 car [100.0, 100.0, 300.0, 250.0]" in text
+
+
+def test_region_lists_only_touching_objects():
+    shapes = [CAR_SHAPE, shape(2, 1, 0, [500, 400, 600, 470])]
+    _, text = _zoom(shapes, [0, 0, 320, 240])
+    assert "#1 " in text and "#2 " not in text and "1 objects touch it" in text
+
+
+def test_region_partly_outside_is_clipped():
+    _, text = _zoom([], [600, 400, 700, 500])
+    assert "region [600, 400, 640, 480]" in text
+
+
+def test_region_keeps_zero_area_objects():
+    dot = shape(1, 1, 0, [150, 150], type="points")
+    _, text = _zoom([dot], [100, 100, 200, 200])
+    assert "#1 " in text
+
+
+def test_region_outside_frame_refused_before_download():
+    get_frame = Mock(side_effect=_png((640, 480)))
+    task = fake_task([CAR_SHAPE], get_frame=get_frame)
+    with pytest.raises(InvalidArgument, match="640x480"):
+        render_frame(fake_client(task), 1, 0, 1280, region=[700, 0, 800, 100])
+    get_frame.assert_not_called()
+
+
+def test_region_with_include_clean():
+    jpegs, _ = _zoom([CAR_SHAPE], [100, 100, 260, 220], include_clean=True)
+    annotated, clean = (Image.open(io.BytesIO(j)) for j in jpegs)
+    assert annotated.size == clean.size == (640, 480)
+    assert clean.getpixel((1, 240))[0] < 40  # nothing drawn on the clean crop
+
+
+def test_region_maps_onto_a_smaller_compressed_frame():
+    jpegs, text = _zoom([CAR_SHAPE], [0, 0, 320, 240], frame_size=(320, 240))  # meta: 640x480
+    assert Image.open(io.BytesIO(jpegs[0])).size == (640, 480)  # crop 160x120, zoom 4
+    assert "image scaled by 2.000" in text
 
 
 @pytest.mark.parametrize(
