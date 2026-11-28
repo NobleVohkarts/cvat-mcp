@@ -113,9 +113,10 @@ def auto_annotate(  # pylint: disable=too-many-arguments,too-many-positional-arg
 
 @tool(write=True, read_only_hint=True, idempotent_hint=True, enabled=AUTO_ANNOTATION)
 def get_auto_annotation_run(run_id: str | None = None) -> AutoAnnotationRunStatus:
-    """Use to follow a background auto_annotate run: state (running, finished, failed), frames
-    saved out of the total, objects saved per label (added) and skipped, and the error if it
-    failed (with what was saved). Only the latest run is kept, in memory: an older run_id gets
-    the latest run, and a server restart forgets it and stops it if it is running (the frames
-    it saved stay)."""
+    """Use to follow a background auto_annotate run: state (running, finished, failed, or
+    cancelled: stopped by a task cancel after its current batch, the frames saved stay), frames
+    saved out of the total, objects saved per label (added) and skipped, and error: why it
+    failed or that it was cancelled, with what was saved. Only the latest run is kept, in
+    memory: an older run_id gets the latest run, and a server restart forgets it and stops it if
+    it is running (the frames it saved stay)."""
     return auto_annotation.get_run(run_id)

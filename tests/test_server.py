@@ -9,6 +9,7 @@ import json
 import subprocess
 import sys
 from importlib.util import find_spec
+from pathlib import Path
 
 import pytest
 from cvat_sdk.api_client.exceptions import ApiException
@@ -340,6 +341,27 @@ class Reached:
         raise InvalidArgument("reached the service")
 
 s._connect = lambda _settings: (Reached(), "admin")
+
+async def outcomes(mode, calls, answer=None, tasks=None):
+    # [is_error, text, the questions asked, whether it ran as a task] per call
+    asked = []
+
+    async def callback(_ctx, params):
+        asked.append(params.message)
+        return answer
+
+    out = {}
+    extensions = [tasks] if tasks else []
+    async with Client(
+        s.mcp, mode=mode, extensions=extensions, elicitation_callback=answer and callback
+    ) as client:
+        for name, arguments in calls.items():
+            asked.clear()
+            before = len(tasks.seen) if tasks else 0
+            result = await client.call_tool(name, arguments)
+            task = bool(tasks) and len(tasks.seen) > before
+            out[name] = [result.is_error, result.content[0].text, list(asked), task]
+    return out
 """
 IN_PROCESS = FAKE_CVAT + """
 from types import SimpleNamespace as Obj
@@ -434,21 +456,6 @@ SAFE = {  # the same tools with arguments that ask nothing, and the deletes that
 CASES = {name: args for name, args in CASES.items() if name in s.REGISTERED_TOOLS}
 SAFE = {name: args for name, args in SAFE.items() if name in s.REGISTERED_TOOLS}
 
-async def outcomes(mode, calls, answer=None):
-    asked = []
-
-    async def callback(_ctx, params):
-        asked.append(params.message)
-        return answer
-
-    out = {}
-    async with Client(s.mcp, mode=mode, elicitation_callback=answer and callback) as client:
-        for name, arguments in calls.items():
-            asked.clear()
-            result = await client.call_tool(name, arguments)
-            out[name] = [result.is_error, result.content[0].text, list(asked)]
-    return out
-
 async def main():
     yes = ElicitResult(action="accept", content={"confirm": True})
     no = ElicitResult(action="decline")
@@ -507,29 +514,91 @@ def test_confirmations_in_process(monkeypatch):
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout.strip().splitlines()[-1])
     assert report.pop("schemas_with_confirmation") == []  # the resolver parameter is hidden
-    is_error, text, asked = report.pop("bad_path")  # nothing to confirm: refused before writing
+    is_error, text, asked, _ = report.pop("bad_path")  # nothing to confirm: refused before writing
     assert is_error and not asked and "cloud_path must name the file" in text, text
     refusals = {
         "import_annotations": "pass exactly one of job_id or task_id",
         "auto_annotate": "conf_threshold must be between 0 and 1",
     }
-    for name, (is_error, text, asked) in report.pop("hopeless").items():
+    for name, (is_error, text, asked, _) in report.pop("hopeless").items():
         assert is_error and not asked and refusals[name] in text, (name, asked, text)
     code, message = report.pop("preapproved")
     assert code == -32602 and "unknown argument(s) confirmation" in message
     expected = set(MESSAGES) if AUTO_ANNOTATION else set(MESSAGES) - {"auto_annotate"}
     for mode, runs in report.items():
         assert set(runs["accept"]) == expected
-        for name, (is_error, text, asked) in runs["accept"].items():
+        for name, (is_error, text, asked, _) in runs["accept"].items():
             assert asked == [MESSAGES[name]], (mode, name, asked)
             assert is_error and text.endswith(": reached the service"), (mode, name, text)
-        for name, (is_error, text, asked) in runs["decline"].items():
+        for name, (is_error, text, asked, _) in runs["decline"].items():
             assert asked == [MESSAGES[name]], (mode, name, asked)
             refusal = f": the user declined: {REFUSALS[name]}; {AGAIN}"
             assert is_error and text.endswith(refusal), (mode, name, text)
-        for name, (_, text, asked) in runs["safe"].items():
+        for name, (_, text, asked, _) in runs["safe"].items():
             # an omitted mode means append, an omitted overwrite means false
             assert not asked, (mode, name, "asked without a risky argument")
             assert text.endswith(": reached the service"), (mode, name, text)
-        for name, (_, text, asked) in runs["no_form"].items():
+        for name, (_, text, asked, _) in runs["no_form"].items():
             assert not asked and text.endswith(": reached the service"), (mode, name, text)
+
+
+TASKS_IN_PROCESS = FAKE_CVAT + """
+import sys
+sys.path.insert(0, TESTS_DIR)
+from mcp_types import ElicitResult
+from tasks_client import TasksClient
+
+LABELS = [{"name": "car"}]
+EXPORT = {"task_id": 1, "format": "COCO 1.0", "cloud_storage_id": 1, "cloud_path": "a.zip"}
+LONG = {
+    "create_task": {"name": "t", "labels": LABELS, "urls": ["https://e.com/a"]},
+    "import_annotations": {"task_id": 1, "cloud_storage_id": 1, "cloud_path": "a.json"},
+    "export_dataset": EXPORT,
+    "create_report": {"task_id": 1},
+    "auto_annotate": {"task_id": 1},
+}
+SHORT = {
+    "get_frame_annotations": {"task_id": 1, "frame": 0},
+    "auto_annotate": {"task_id": 1, "frame": 0},
+}
+LONG = {name: args for name, args in LONG.items() if name in s.REGISTERED_TOOLS}
+SHORT = {name: args for name, args in SHORT.items() if name in s.REGISTERED_TOOLS}
+
+async def main():
+    yes = ElicitResult(action="accept", content={"confirm": True})
+    no = ElicitResult(action="decline")
+    overwrite = {"export_dataset": EXPORT | {"overwrite": True}}
+    print(json.dumps({
+        "long": await outcomes("2026-07-28", LONG, tasks=TasksClient()),
+        "short": await outcomes("2026-07-28", SHORT, tasks=TasksClient()),
+        "no_extension": await outcomes("2026-07-28", LONG),
+        "legacy": await outcomes("legacy", LONG, tasks=TasksClient()),
+        "accepted": await outcomes("2026-07-28", overwrite, yes, TasksClient()),
+        "declined": await outcomes("2026-07-28", overwrite, no, TasksClient()),
+    }))
+
+anyio.run(main)
+"""
+
+
+def test_tasks_in_process(monkeypatch):
+    tests_dir = repr(str(Path(__file__).parent))
+    result = run(TASKS_IN_PROCESS.replace("TESTS_DIR", tests_dir), monkeypatch, "write")
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout.strip().splitlines()[-1])
+    long_tools = {"create_task", "import_annotations", "export_dataset", "create_report"}
+    assert set(report["long"]) == long_tools | ({"auto_annotate"} if AUTO_ANNOTATION else set())
+    for name, (is_error, text, _, task) in report["long"].items():
+        assert task, (name, "not a task")
+        assert is_error and text.endswith(": reached the service"), (name, text)
+    for group in ("short", "no_extension", "legacy"):
+        for name, (_, text, _, task) in report[group].items():
+            assert not task, (group, name, "became a task")
+            assert text.endswith(": reached the service"), (group, name, text)
+    # test_confirmation_before_task: the form first, the task only after a yes
+    _, text, asked, task = report["accepted"]["export_dataset"]
+    assert asked == [MESSAGES["export_dataset"]] and task
+    assert text.endswith(": reached the service")
+    _, text, asked, task = report["declined"]["export_dataset"]
+    assert len(asked) == 1 and not task
+    assert f"the user declined: {REFUSALS['export_dataset']}" in text

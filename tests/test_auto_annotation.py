@@ -548,6 +548,63 @@ def test_background_label_mismatch_fails_call(use_function):
     assert not aa._LOCK.locked()
 
 
+class Gate(FakeFunction):
+    """Holds the first frame until the test lets it go, so a cancel lands inside batch 1."""
+
+    def __init__(self):
+        super().__init__()
+        self.started, self.release = threading.Event(), threading.Event()
+
+    def detect(self, context, image):
+        if not self.contexts:
+            self.started.set()
+            self.release.wait(10)
+        return super().detect(context, image)
+
+
+def test_cancel_stops_after_the_current_batch(use_function, batches_of_2):
+    gate = Gate()
+    result, _, _, run_api = _start(gate, use_function)
+    assert gate.started.wait(10)
+    assert aa.cancel_run(result.run.run_id)
+    gate.release.set()
+    run = _finish(result.run.run_id)
+    assert (run.state, run.frames_done, run.added) == ("cancelled", 2, {"car": 2})
+    assert len(_sent(run_api)) == 1  # the batch that was running is saved, nothing after it
+    assert "stopped by a cancel" in run.error and "the first 2 of 5 frames" in run.error
+    assert not aa._LOCK.locked()
+
+
+def test_cancel_unknown_or_finished_run_is_false(use_function):
+    result, *_ = _start(FakeFunction(), use_function)
+    _finish(result.run.run_id)
+    assert not aa.cancel_run(result.run.run_id)
+    assert not aa.cancel_run("run-999")
+
+
+def test_watch_run_keeps_its_run_after_a_newer_one(use_function):
+    first, *_ = _start(FakeFunction(), use_function)
+    _finish(first.run.run_id)
+    read = aa.watch_run(first.run.run_id)
+    second, *_ = _start(FakeFunction(), use_function)
+    _finish(second.run.run_id)
+    assert aa.get_run(None).run.run_id == second.run.run_id  # only the latest is kept...
+    run = read()  # ...but a reader keeps its own run
+    assert (run.run_id, run.state, run.frames_done) == (first.run.run_id, "finished", 5)
+    assert aa.watch_run("run-999") is None
+
+
+def test_watch_run_finds_a_recent_run_after_a_newer_one(use_function):
+    """The task asks for its reader only once the start call has returned; a quick run can be
+    finished and replaced by then."""
+    first, *_ = _start(FakeFunction(), use_function)
+    _finish(first.run.run_id)
+    second, *_ = _start(FakeFunction(), use_function)
+    _finish(second.run.run_id)
+    read = aa.watch_run(first.run.run_id)
+    assert read is not None and read().run_id == first.run.run_id
+
+
 def test_get_run_none_yet(monkeypatch):
     monkeypatch.setattr(aa, "_latest", None)
     for run_id in (None, "run-7"):

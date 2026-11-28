@@ -8,8 +8,8 @@ from mcp.server.elicitation import AcceptedElicitation, ElicitationResult
 from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.mcpserver.resolve import Elicit
-from mcp_types import ClientCapabilities
-from pydantic import BaseModel, Field
+from mcp_types import ClientCapabilities, ElicitResult
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 
 class Confirm(BaseModel):
@@ -24,8 +24,15 @@ def _replace(arguments: Mapping[str, Any]) -> bool:
     return arguments.get("mode", "append") == "replace"
 
 
+_BOOL = TypeAdapter(bool)
+
+
 def _overwrite(arguments: Mapping[str, Any]) -> bool:
-    return arguments.get("overwrite", False) is True
+    """Read as the tool reads it ("true" and 1 are true): the tasks hook sees raw arguments."""
+    try:
+        return _BOOL.validate_python(arguments.get("overwrite", False))
+    except ValidationError:
+        return False  # the tool refuses the value before anything is written
 
 
 RISKY: dict[str, Callable[[Mapping[str, Any]], bool]] = {
@@ -65,6 +72,14 @@ def ask(
     if not retry and not can_show_form(ctx.client_capabilities):
         return YES.data
     return Elicit(message, Confirm)
+
+
+def answered_yes(responses: Mapping[str, Any] | None) -> bool:
+    """A retry's raw input responses (2026-07-28) say yes to every question asked."""
+    return bool(responses) and all(
+        isinstance(r, ElicitResult) and r.action == "accept" and (r.content or {}).get("confirm")
+        for r in responses.values()
+    )
 
 
 def require_yes(answer: Answer, refusal: str) -> None:

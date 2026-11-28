@@ -6,6 +6,11 @@ import pytest
 SRC = str(Path(__file__).resolve().parents[1] / "src")
 
 
+@pytest.fixture
+def anyio_backend():  # the server runs on asyncio
+    return "asyncio"
+
+
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch, tmp_path):
     """No CVAT_* variables from the shell and no .env: each test sets what it needs."""
