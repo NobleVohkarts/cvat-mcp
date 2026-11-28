@@ -5,7 +5,9 @@ import io
 from cvat_sdk import Client
 from PIL import Image, ImageColor, ImageDraw, ImageFont, ImageStat
 
+from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.services.annotations import FrameObject, frame_annotations, scope_of
+from cvat_mcp.services.issues import check_bbox
 from cvat_mcp.services.tasks import clamp_limit
 
 FALLBACK_COLOR = "#ffffff"
@@ -42,27 +44,54 @@ def place_caption(
     return fitting[0]
 
 
-def resize(image: Image.Image, max_side: int) -> tuple[Image.Image, float]:
+def resize(image: Image.Image, max_side: int, max_zoom: float = 1.0) -> tuple[Image.Image, float]:
+    """Fit into max_side; enlarge at most max_zoom times (1: only ever shrink)."""
     out = image.convert("RGB")
-    out.thumbnail((max_side, max_side), Image.LANCZOS)  # only ever shrinks
+    zoom = min(max_side / max(image.size), max_zoom)
+    if zoom > 1:
+        out = out.resize((round(image.width * zoom), round(image.height * zoom)), Image.LANCZOS)
+    else:
+        out.thumbnail((max_side, max_side), Image.LANCZOS)
     return out, out.width / image.width
 
 
+def clip_region(region: list[float], width: int, height: int) -> Rect:
+    """The region [x1, y1, x2, y2] (original pixels) clipped to the frame."""
+    check_bbox(region)
+    x1, y1, x2, y2 = (
+        max(region[0], 0),
+        max(region[1], 0),
+        min(region[2], width),
+        min(region[3], height),
+    )
+    if x1 >= x2 or y1 >= y2:
+        raise InvalidArgument(f"region {region} is outside the frame ({width}x{height} pixels)")
+    return x1, y1, x2, y2
+
+
 def annotate(
-    image: Image.Image, objects: list[FrameObject], colors: dict[str, str], scale: float
+    image: Image.Image,
+    objects: list[FrameObject],
+    colors: dict[str, str],
+    scale: float,
+    offset: tuple[float, float] = (0.0, 0.0),
 ) -> Image.Image:
-    """A copy of the (already resized) frame with shapes and semi-transparent captions."""
+    """A copy of the (already resized) frame with shapes and semi-transparent captions;
+    original pixel (x, y) is drawn at ((x - offset x) * scale, (y - offset y) * scale)."""
     out = image.copy()
     side = max(out.size)
     width = max(2, round(side / 400))
     font = ImageFont.load_default(size=max(12, side // 60))
     draw = ImageDraw.Draw(out, "RGBA")  # RGBA fills blend into the RGB frame
+
+    def to_image(values: list[float]) -> list[float]:  # x, y, x, y, ...
+        return [(v - offset[i % 2]) * scale for i, v in enumerate(values)]
+
     boxes = [
-        (obj, tuple(v * scale for v in obj.bbox), colors.get(obj.label, FALLBACK_COLOR))
-        for obj in objects
+        (obj, tuple(to_image(obj.bbox)), colors.get(obj.label, FALLBACK_COLOR)) for obj in objects
     ]
     for obj, box, color in boxes:
-        xy = [v * scale for v in obj.points or []]
+        xy = to_image(obj.points or [])
         if not xy:  # rectangles, and shapes without vertices (masks, skeletons, ellipses)
             draw.rectangle(box, outline=color, width=width)
         elif obj.type == "polygon":

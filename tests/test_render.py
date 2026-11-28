@@ -1,15 +1,20 @@
 import io
 
+import pytest
 from fakes import fake_client, fake_task, gt_job, job_client, shape
 from PIL import Image
 
+from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.render import (
     _overlaps,
+    annotate,
     clamp_side,
+    clip_region,
     legend,
     place_caption,
     render,
     render_frame,
+    resize,
 )
 from cvat_mcp.services.annotations import FrameObject, shape_bbox
 
@@ -100,6 +105,48 @@ def test_caption_stays_inside_image_at_right_edge():
 
 def test_clamp_side():
     assert clamp_side(10) == 256 and clamp_side(5000) == 2048 and clamp_side(1280) == 1280
+
+
+def test_resize_zooms_up_to_max_zoom():
+    out, scale = resize(Image.new("RGB", (100, 50)), 1280, max_zoom=4.0)
+    assert out.size == (400, 200) and scale == 4.0
+
+
+def test_resize_zoom_is_capped():
+    out, _ = resize(Image.new("RGB", (10, 10)), 1280, max_zoom=4.0)
+    assert out.size == (40, 40)
+
+
+def test_resize_zoom_still_fits_max_side():
+    out, scale = resize(Image.new("RGB", (400, 200)), 1280, max_zoom=4.0)
+    assert out.size == (1280, 640) and scale == 3.2
+
+
+def test_annotate_offset_moves_the_box():
+    out = annotate(Image.new("RGB", (400, 300)), [CAR], {"car": "#ff0000"}, 2.0, (100, 100))
+    assert _red(out.getpixel((1, 150)))  # left edge: (100 - 100) * 2 = 0
+    assert out.getpixel((200, 150)) == (0, 0, 0)  # inside stays untouched
+
+
+@pytest.mark.parametrize(
+    "region, clipped",
+    [
+        ([10, 20, 30, 40], (10, 20, 30, 40)),
+        ([-50, -50, 100, 100], (0, 0, 100, 100)),
+        ([600, 400, 700, 500], (600, 400, 640, 480)),
+    ],
+)
+def test_clip_region(region, clipped):
+    assert clip_region(region, 640, 480) == clipped
+
+
+@pytest.mark.parametrize(
+    "region, match",
+    [([700, 0, 800, 100], r"outside the frame \(640x480"), ([30, 30, 10, 10], "x1 < x2")],
+)
+def test_clip_region_refuses(region, match):
+    with pytest.raises(InvalidArgument, match=match):
+        clip_region(region, 640, 480)
 
 
 def test_caption_goes_above_a_free_box():
