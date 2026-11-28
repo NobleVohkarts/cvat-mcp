@@ -27,7 +27,8 @@ def list_jobs(  # pylint: disable=too-many-arguments,too-many-positional-argumen
     with task, frame range, stage, state, assignee, issue count (resolved ones included; use
     list_issues for open ones) and a UI link, plus `total`, the number of all matching jobs.
     `type` defaults to annotation jobs; None lists every type (ground_truth, replica too).
-    Unassigned jobs can't be filtered: list without assignee and look for assignee null. Use
+    Unassigned jobs can't be filtered: list without assignee and look for assignee null. An
+    organization's jobs are listed only with task_id or project_id. Use
     get_task_overview for one task's labels and object counts."""
     return tasks.list_jobs(
         get_client(ctx), settings.url, stage, state, assignee, task_id, project_id, type, limit

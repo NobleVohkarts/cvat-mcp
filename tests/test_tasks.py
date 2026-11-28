@@ -10,6 +10,7 @@ from cvat_mcp.services.tasks import (
     count_objects_by_label,
     get_task_overview,
     list_jobs,
+    list_tasks,
 )
 
 
@@ -60,10 +61,43 @@ def _job(job_id, assignee, issues, start=0, stop=9):
     )
 
 
-def _jobs_client():
+def _owned_by(organization):
+    """tasks_api/projects_api whose retrieve answers an object of that organization."""
+    return Obj(retrieve=Mock(return_value=(Obj(organization=organization), None)))
+
+
+def _jobs_client(organization=None):
     jobs = [_job(12, Obj(username="anna"), 2), _job(11, None, 0, 10, 19)]
     listed = Mock(return_value=(Obj(count=57, results=jobs), None))
-    return Obj(api_client=Obj(jobs_api=Obj(list=listed))), listed
+    api = Obj(
+        jobs_api=Obj(list=listed),
+        tasks_api=_owned_by(organization),
+        projects_api=_owned_by(organization),
+    )
+    return Obj(api_client=api), listed
+
+
+@pytest.mark.parametrize("task_id, project_id", [(4, None), (None, 3), (4, 3)])
+def test_list_jobs_in_the_filters_organization(task_id, project_id):
+    client, listed = _jobs_client(organization=9)
+    list_jobs(client, "http://cvat", None, None, None, task_id, project_id, None, 20)
+    assert listed.call_args.kwargs["org_id"] == 9
+    if task_id is not None:  # a task decides; its project needs no second request
+        client.api_client.projects_api.retrieve.assert_not_called()
+
+
+def test_list_jobs_without_task_or_project_asks_for_no_organization():
+    client, listed = _jobs_client(organization=9)
+    list_jobs(client, "http://cvat", "validation", None, None, None, None, None, 20)
+    assert "org_id" not in listed.call_args.kwargs
+    client.api_client.tasks_api.retrieve.assert_not_called()
+
+
+def test_list_tasks_in_the_projects_organization():
+    listed = Mock(return_value=(Obj(count=0, results=[]), None))
+    client = Obj(api_client=Obj(tasks_api=Obj(list=listed), projects_api=_owned_by(9)))
+    list_tasks(client, 3, None, 20)
+    assert listed.call_args.kwargs == {"page_size": 20, "sort": "-id", "project_id": 3, "org_id": 9}
 
 
 def test_list_jobs_summaries():

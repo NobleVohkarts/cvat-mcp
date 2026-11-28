@@ -20,7 +20,8 @@ def list_tasks(
     """Use to find tasks: returns up to `limit` tasks (newest first, max 100) with frame count,
     status and job progress, plus `total`, the number of all matching tasks. `search` is CVAT's
     free-text search: it matches task names but also project names, owners and assignees.
-    Use get_task_overview for one task's labels, jobs and object counts."""
+    An organization's tasks are listed only with its project_id; without a filter you get the
+    personal workspace. Use get_task_overview for one task's labels, jobs and object counts."""
     return tasks.list_tasks(get_client(ctx), project_id, search, limit)
 
 
