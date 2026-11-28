@@ -12,8 +12,9 @@ from cvat_mcp.services.issues import DeletedIssue, IssueList, IssueRef
 def list_issues(ctx: Context, task_id: int, frame: int | None = None) -> IssueList:
     """Use to see the issues already filed on a task, or on one frame if given, before filing
     or rewriting issues there: id, job, frame, position, message (the earliest remaining
-    comment), resolved, author, number of replies, and own (filed under this server's CVAT
-    account, which includes issues filed in the UI with that account)."""
+    comment), resolved, author, the replies (author and text, oldest first), and own (filed
+    under this server's CVAT account, which includes issues filed in the UI with that
+    account)."""
     return issues.list_issues(get_client(ctx), task_id, frame)
 
 

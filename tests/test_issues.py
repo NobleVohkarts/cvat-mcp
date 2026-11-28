@@ -96,8 +96,8 @@ def _issue(id, job, frame, owner, count=1, **kw):  # pylint: disable=redefined-b
     )
 
 
-def _comment(id, issue, message):  # pylint: disable=redefined-builtin
-    return Obj(id=id, issue=issue, message=message)
+def _comment(id, issue, message, owner=ME):  # pylint: disable=redefined-builtin
+    return Obj(id=id, issue=issue, message=message, owner=owner)
 
 
 @pytest.fixture
@@ -111,6 +111,8 @@ def listed():
             _comment(101, 41, "box misses the car"),
             _comment(100, 40, "label is wrong"),
             _comment(103, 42, "missing person"),
+            _comment(104, 41, "fixed", ANNA),
+            _comment(105, 41, "thanks", None),  # a deleted user's comment
         ],
     }
 
@@ -141,11 +143,21 @@ def _list_client(listed, organization=None):
 def test_list_issues_messages_authors_and_own(listed):
     result = list_issues(_list_client(listed), 4, None)
     assert [
-        (i.issue_id, i.frame, i.message, i.author, i.own, i.replies) for i in result.issues
+        (i.issue_id, i.frame, i.message, i.author, i.own, len(i.replies)) for i in result.issues
     ] == [
         (40, 5, "label is wrong", "anna", False, 0),
-        (41, 25, "box misses the car", "reviewer", True, 1),
+        (41, 25, "box misses the car", "reviewer", True, 3),
         (42, 25, "missing person", None, False, 0),
+    ]
+
+
+def test_list_issues_reply_texts_in_order(listed):
+    issue = {i.issue_id: i for i in list_issues(_list_client(listed), 4, None).issues}[41]
+    assert issue.message == "box misses the car"
+    assert [(r.author, r.message) for r in issue.replies] == [
+        ("reviewer", "reply"),
+        ("anna", "fixed"),
+        (None, "thanks"),
     ]
 
 

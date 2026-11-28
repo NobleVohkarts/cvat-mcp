@@ -15,6 +15,11 @@ class IssueRef(BaseModel):
     url: str
 
 
+class Reply(BaseModel):
+    author: str | None
+    message: str
+
+
 class IssueInfo(BaseModel):
     issue_id: int
     job_id: int
@@ -23,7 +28,7 @@ class IssueInfo(BaseModel):
     message: str
     resolved: bool
     author: str | None
-    replies: int
+    replies: list[Reply]
     own: bool
 
 
@@ -123,11 +128,11 @@ def list_issues(client: Client, task_id: int, frame: int | None) -> IssueList:
     # An explicit org context: without it the comments endpoint answers an empty list.
     found = client.issues.list(org_id=task.organization, task_id=task_id, **filters)
     # CVAT keeps an issue's message as its first comment; comments filter by job, not task.
-    messages = {}
+    threads = {}
     for job_id in {i.job for i in found}:
         comments = client.comments.list(org_id=task.organization, job_id=job_id, **filters)
         for comment in sorted(comments, key=lambda c: c.id):
-            messages.setdefault(comment.issue, comment.message)
+            threads.setdefault(comment.issue, []).append(comment)
     me = client.users.retrieve_current_user().id
     return IssueList(
         task_id=task_id,
@@ -138,10 +143,13 @@ def list_issues(client: Client, task_id: int, frame: int | None) -> IssueList:
                 job_id=i.job,
                 frame=i.frame,
                 position=i.position,
-                message=messages.get(i.id, ""),
+                message=threads[i.id][0].message if i.id in threads else "",
                 resolved=i.resolved,
                 author=i.owner.username if i.owner else None,
-                replies=max(i.comments.count - 1, 0),  # the first comment is the message
+                replies=[  # the first comment is the message
+                    Reply(author=c.owner.username if c.owner else None, message=c.message)
+                    for c in threads.get(i.id, [])[1:]
+                ],
                 own=is_own(i, me),
             )
             for i in sorted(found, key=lambda i: (i.frame, i.id))
