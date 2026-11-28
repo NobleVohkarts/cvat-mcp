@@ -326,12 +326,10 @@ def test_http_mode_reports_unreachable_cvat_in_one_line(monkeypatch):
     assert "cannot reach CVAT" in result.stderr and "Traceback" not in result.stderr
 
 
-IN_PROCESS = """
+FAKE_CVAT = """
 import anyio, json
-from types import SimpleNamespace as Obj
 import cvat_mcp.server as s, cvat_mcp.tools
 from mcp import Client
-from mcp.shared.exceptions import MCPError
 from cvat_mcp.errors import InvalidArgument
 
 class Reached:
@@ -342,6 +340,11 @@ class Reached:
         raise InvalidArgument("reached the service")
 
 s._connect = lambda _settings: (Reached(), "admin")
+"""
+IN_PROCESS = FAKE_CVAT + """
+from types import SimpleNamespace as Obj
+from mcp.shared.exceptions import MCPError
+
 LABELS = [{"name": "car"}]
 CALLS = {  # write tools whose arguments changed: each must reach its service
     "create_task": ("create_task", {"name": "t", "labels": LABELS, "urls": ["https://e.com/a"]}),
@@ -400,3 +403,133 @@ def test_strict_arguments_and_version_in_process(monkeypatch):
     # local files are gone: the old arguments are unknown, not silently dropped
     assert checks["old_files"][:2] == ["error", -32602] and "files" in checks["old_files"][2]
     assert checks["old_file"][:2] == ["error", -32602] and "file" in checks["old_file"][2]
+
+
+CONFIRMATIONS = FAKE_CVAT + """
+from mcp.shared.exceptions import MCPError
+from mcp_types import ElicitResult
+
+CASES = {
+    "delete_task": {"task_id": 7},
+    "delete_gt_job": {"job_id": 73},
+    "delete_cloud_storage": {"cloud_storage_id": 1},
+    "import_annotations": {
+        "task_id": 7, "cloud_storage_id": 1, "cloud_path": "a.json", "mode": "replace"
+    },
+    "auto_annotate": {"task_id": 7, "mode": "replace"},
+    "export_dataset": {  # the service adds .zip: the form names the object it writes
+        "task_id": 7, "format": "COCO 1.0", "cloud_storage_id": 1, "cloud_path": "a",
+        "overwrite": True,
+    },
+}
+SAFE = {  # the same tools with arguments that ask nothing, and the deletes that never ask
+    "import_annotations": {"task_id": 7, "cloud_storage_id": 1, "cloud_path": "a.json"},
+    "auto_annotate": {"task_id": 7},
+    "export_dataset": {
+        "task_id": 7, "format": "COCO 1.0", "cloud_storage_id": 1, "cloud_path": "a.zip"
+    },
+    "delete_issue": {"issue_id": 5},
+    "delete_annotations": {"task_id": 7, "shape_ids": [1]},
+}
+CASES = {name: args for name, args in CASES.items() if name in s.REGISTERED_TOOLS}
+SAFE = {name: args for name, args in SAFE.items() if name in s.REGISTERED_TOOLS}
+
+async def outcomes(mode, calls, answer=None):
+    asked = []
+
+    async def callback(_ctx, params):
+        asked.append(params.message)
+        return answer
+
+    out = {}
+    async with Client(s.mcp, mode=mode, elicitation_callback=answer and callback) as client:
+        for name, arguments in calls.items():
+            asked.clear()
+            result = await client.call_tool(name, arguments)
+            out[name] = [result.is_error, result.content[0].text, list(asked)]
+    return out
+
+async def main():
+    yes = ElicitResult(action="accept", content={"confirm": True})
+    no = ElicitResult(action="decline")
+    report = {}
+    for mode in ("2026-07-28", "legacy"):
+        report[mode] = {
+            "accept": await outcomes(mode, CASES, yes),
+            "decline": await outcomes(mode, CASES, no),
+            "safe": await outcomes(mode, SAFE, no),
+            "no_form": await outcomes(mode, CASES),
+        }
+    async with Client(s.mcp, mode="2026-07-28") as client:  # the model can't pre-approve
+        try:
+            await client.call_tool("delete_task", {"task_id": 7, "confirmation": {"action": "accept"}})
+            report["preapproved"] = "accepted"
+        except MCPError as error:
+            report["preapproved"] = [error.error.code, error.error.message]
+    folder = {"task_id": 7, "format": "COCO 1.0", "cloud_storage_id": 1, "cloud_path": "x/"}
+    report["bad_path"] = (await outcomes("2026-07-28", {"export_dataset": folder | {"overwrite": True}}, no))["export_dataset"]
+    hopeless = {  # calls the service refuses anyway: no form for them
+        "import_annotations": {"cloud_storage_id": 1, "cloud_path": "a.json", "mode": "replace"},
+        "auto_annotate": {"task_id": 7, "mode": "replace", "conf_threshold": 2},
+    }
+    hopeless = {name: args for name, args in hopeless.items() if name in s.REGISTERED_TOOLS}
+    report["hopeless"] = await outcomes("2026-07-28", hopeless, no)
+    tools = await s.mcp.list_tools()
+    report["schemas_with_confirmation"] = [
+        t.name for t in tools if "confirmation" in t.input_schema.get("properties", {})
+    ]
+    print(json.dumps(report))
+
+anyio.run(main)
+"""
+MESSAGES = {
+    "delete_task": "Delete task 7 with all its jobs, annotations and issues? This can't be undone.",
+    "delete_gt_job": "Delete ground-truth job 73 with its annotations? This can't be undone.",
+    "delete_cloud_storage": "Delete cloud storage 1 from CVAT? The bucket and its files stay; "
+    "tasks and projects using it for import or export switch to local storage.",
+    "import_annotations": "Replace all annotations of task 7 with the ones in 'a.json'?",
+    "auto_annotate": "Replace the shapes and tags on all frames of task 7 with the model's?",
+    "export_dataset": "Overwrite 'a.zip' in cloud storage 1 if it exists?",  # cloud_path "a"
+}
+AGAIN = "don't call again unless the user asks"
+REFUSALS = {
+    "delete_task": "task 7 was not deleted",
+    "delete_gt_job": "ground-truth job 73 was not deleted",
+    "delete_cloud_storage": "cloud storage 1 was not deleted",
+    "import_annotations": "the annotations of task 7 were not replaced",
+    "auto_annotate": "nothing was annotated on task 7",
+    "export_dataset": "nothing was exported to a.zip",
+}
+
+
+def test_confirmations_in_process(monkeypatch):
+    result = run(CONFIRMATIONS, monkeypatch, "write")
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout.strip().splitlines()[-1])
+    assert report.pop("schemas_with_confirmation") == []  # the resolver parameter is hidden
+    is_error, text, asked = report.pop("bad_path")  # nothing to confirm: refused before writing
+    assert is_error and not asked and "cloud_path must name the file" in text, text
+    refusals = {
+        "import_annotations": "pass exactly one of job_id or task_id",
+        "auto_annotate": "conf_threshold must be between 0 and 1",
+    }
+    for name, (is_error, text, asked) in report.pop("hopeless").items():
+        assert is_error and not asked and refusals[name] in text, (name, asked, text)
+    code, message = report.pop("preapproved")
+    assert code == -32602 and "unknown argument(s) confirmation" in message
+    expected = set(MESSAGES) if AUTO_ANNOTATION else set(MESSAGES) - {"auto_annotate"}
+    for mode, runs in report.items():
+        assert set(runs["accept"]) == expected
+        for name, (is_error, text, asked) in runs["accept"].items():
+            assert asked == [MESSAGES[name]], (mode, name, asked)
+            assert is_error and text.endswith(": reached the service"), (mode, name, text)
+        for name, (is_error, text, asked) in runs["decline"].items():
+            assert asked == [MESSAGES[name]], (mode, name, asked)
+            refusal = f": the user declined: {REFUSALS[name]}; {AGAIN}"
+            assert is_error and text.endswith(refusal), (mode, name, text)
+        for name, (_, text, asked) in runs["safe"].items():
+            # an omitted mode means append, an omitted overwrite means false
+            assert not asked, (mode, name, "asked without a risky argument")
+            assert text.endswith(": reached the service"), (mode, name, text)
+        for name, (_, text, asked) in runs["no_form"].items():
+            assert not asked and text.endswith(": reached the service"), (mode, name, text)

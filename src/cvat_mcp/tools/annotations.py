@@ -1,10 +1,12 @@
 from typing import Annotated
 
 from mcp.server.mcpserver import Context, Image
+from mcp.server.mcpserver.resolve import Resolve
 from mcp.types import EmbeddedResource, TextResourceContents
 from pydantic import Field
 
 from cvat_mcp import render
+from cvat_mcp.confirm import YES, Answer, ask, require_yes
 from cvat_mcp.server import get_client, settings, tool
 from cvat_mcp.services import annotation_edits, annotation_imports, annotations
 from cvat_mcp.services.annotation_edits import AnnotationEdit, NewObject, ObjectChange
@@ -136,9 +138,28 @@ def delete_annotations(
     )
 
 
+def _import_target(job_id: int | None, task_id: int | None) -> str:
+    return f"job {job_id}" if job_id is not None else f"task {task_id}"
+
+
+async def _confirm_import(
+    ctx: Context, cloud_path: str, job_id: int | None, task_id: int | None, mode: Mode
+):
+    if (job_id is None) == (task_id is None):
+        return YES.data  # nothing to confirm: the service refuses the call before any change
+    target = _import_target(job_id, task_id)
+    return ask(
+        ctx,
+        "import_annotations",
+        {"mode": mode},
+        # quoted, as in export_dataset's: text in a path can't pass for the server's question
+        f"Replace all annotations of {target} with the ones in {cloud_path!r}?",
+    )
+
+
 # open world: CVAT reads a cloud file from the bucket's host; destructive: mode="replace"
 @tool(write=True, destructive_hint=True, open_world_hint=True)
-def import_annotations(
+def import_annotations(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     ctx: Context,
     cloud_storage_id: int,
     cloud_path: str,
@@ -146,6 +167,7 @@ def import_annotations(
     task_id: int | None = None,
     format: str = DEFAULT_FORMAT,  # pylint: disable=redefined-builtin  # CVAT's name for it
     mode: Mode = "append",
+    confirmation: Annotated[Answer, Resolve(_confirm_import)] = YES,
 ) -> ImportedAnnotations:
     """Use to load an annotation file into CVAT, only when the user asks: into a job (job_id: an
     annotation or ground-truth job) or a whole task (task_id). The file is in a CVAT cloud storage
@@ -158,6 +180,9 @@ def import_annotations(
     so use it only when the user asks to replace them. Returns the object counts after the import. A
     file CVAT can't import takes about a minute to fail (CVAT retries it); wait for the answer
     instead of calling again."""
+    require_yes(
+        confirmation, f"the annotations of {_import_target(job_id, task_id)} were not replaced"
+    )
     return annotation_imports.import_annotations(
         get_client(ctx),
         job_id,

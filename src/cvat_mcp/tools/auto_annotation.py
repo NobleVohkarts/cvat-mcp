@@ -1,8 +1,11 @@
 from typing import Annotated
 
 from mcp.server.mcpserver import Context
+from mcp.server.mcpserver.resolve import Resolve
 from pydantic import Field
 
+from cvat_mcp.confirm import YES, Answer, ask, require_yes
+from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.server import AUTO_ANNOTATION, get_client, open_client, tool
 from cvat_mcp.services import auto_annotation
 from cvat_mcp.services.auto_annotation import (
@@ -53,9 +56,33 @@ Model = Annotated[
 ]
 
 
+async def _confirm_replace(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    ctx: Context,
+    task_id: int,
+    frame: int | None,
+    output: Output,
+    model: str | None,
+    conf_threshold: float,
+    mode: Mode,
+):
+    try:
+        auto_annotation.check_options(output, model, conf_threshold, mode)
+    except InvalidArgument:
+        return YES.data  # nothing to confirm: the body refuses the options before any change
+    scope = (
+        f"frame {frame} of task {task_id}" if frame is not None else f"all frames of task {task_id}"
+    )
+    return ask(
+        ctx,
+        "auto_annotate",
+        {"mode": mode},
+        f"Replace the shapes and tags on {scope} with the model's?",
+    )
+
+
 # destructive: mode="replace"; open world: the first use of a model downloads its weights
 @tool(write=True, destructive_hint=True, open_world_hint=True, enabled=AUTO_ANNOTATION)
-def auto_annotate(
+def auto_annotate(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     ctx: Context,
     task_id: int,
     frame: Frame = None,
@@ -63,6 +90,7 @@ def auto_annotate(
     model: Model = None,
     conf_threshold: float = 0.5,
     mode: Mode = "append",
+    confirmation: Annotated[Answer, Resolve(_confirm_replace)] = YES,
 ) -> AutoAnnotation:
     """Use to auto-annotate a task with a built-in torchvision model, only when the user asks:
     one frame, or the whole task. The model's labels are matched to the task's by name; the
@@ -75,6 +103,7 @@ def auto_annotate(
     (each batch's old ones deleted after its new ones are saved), never tracks, only when the
     user asks. One run at a time. Tasks with overlapping jobs are refused. The first use of a
     model downloads its weights (~170 MB)."""
+    require_yes(confirmation, f"nothing was annotated on task {task_id}")
     opts = auto_annotation.check_options(output, model, conf_threshold, mode)
     client = get_client(ctx)
     if frame is None:
