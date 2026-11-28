@@ -1,6 +1,7 @@
 from unittest.mock import Mock
 
 import pytest
+from cvat_sdk.api_client.exceptions import ApiException
 from fakes import Obj, annotation_job, fake_client, fake_task
 
 from cvat_mcp.errors import InvalidArgument
@@ -11,6 +12,7 @@ from cvat_mcp.services.tasks import (
     get_task_overview,
     list_jobs,
     list_tasks,
+    org_of,
 )
 
 
@@ -91,6 +93,31 @@ def test_list_jobs_without_task_or_project_asks_for_no_organization():
     list_jobs(client, "http://cvat", "validation", None, None, None, None, None, 20)
     assert "org_id" not in listed.call_args.kwargs
     client.api_client.tasks_api.retrieve.assert_not_called()
+
+
+@pytest.mark.parametrize("status", [403, 404])
+def test_list_jobs_lists_as_before_when_the_task_cant_be_read(status):
+    client, listed = _jobs_client()
+    client.api_client.tasks_api.retrieve.side_effect = ApiException(status=status)
+    assert list_jobs(client, "http://cvat", None, None, None, 999, None, None, 20).total == 57
+    assert "org_id" not in listed.call_args.kwargs
+
+
+def test_org_of_lets_other_errors_through():
+    client, _ = _jobs_client()
+    client.api_client.projects_api.retrieve.side_effect = ApiException(status=500)
+    with pytest.raises(ApiException):
+        org_of(client, project_id=3)
+
+
+@pytest.mark.parametrize("project_id, organization", [(None, 9), (3, None)])
+def test_list_tasks_without_an_org_project_sends_no_org(project_id, organization):
+    listed = Mock(return_value=(Obj(count=0, results=[]), None))
+    projects = _owned_by(organization)
+    client = Obj(api_client=Obj(tasks_api=Obj(list=listed), projects_api=projects))
+    list_tasks(client, project_id, "cars", 20)
+    assert "org_id" not in listed.call_args.kwargs
+    assert projects.retrieve.called == (project_id is not None)
 
 
 def test_list_tasks_in_the_projects_organization():

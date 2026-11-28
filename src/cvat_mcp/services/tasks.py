@@ -3,6 +3,7 @@ from collections.abc import Iterable, Mapping
 from typing import Literal
 
 from cvat_sdk import Client
+from cvat_sdk.api_client.exceptions import ApiException
 from pydantic import BaseModel
 
 from cvat_mcp.errors import InvalidArgument
@@ -117,12 +118,18 @@ def count_objects_by_label(label_ids: Iterable[int], labels: Mapping[int, str]) 
 def org_of(client: Client, task_id: int | None = None, project_id: int | None = None) -> dict:
     """The org context of the filtered task or project: without it CVAT lists a user who isn't a
     superuser only their personal workspace, so an org's tasks and jobs would come back empty."""
-    if task_id is not None:
-        found, _ = client.api_client.tasks_api.retrieve(task_id)
-    elif project_id is not None:
-        found, _ = client.api_client.projects_api.retrieve(project_id)
-    else:
-        return {}
+    try:
+        if task_id is not None:
+            found, _ = client.api_client.tasks_api.retrieve(task_id)
+        elif project_id is not None:
+            found, _ = client.api_client.projects_api.retrieve(project_id)
+        else:
+            return {}
+    except ApiException as error:
+        # Missing, or visible only through its jobs: list as before rather than fail the list.
+        if error.status in (403, 404):
+            return {}
+        raise
     return {"org_id": found.organization} if found.organization is not None else {}
 
 
