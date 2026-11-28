@@ -177,9 +177,14 @@ def update_issue(
         raise InvalidArgument("reply must say something; leave it out to only change resolved")
 
     issue = client.issues.retrieve(issue_id)
+    job = client.jobs.retrieve(issue.job)  # before the reply: nothing may fail after it unsaid
     comment = None
     if reply is not None:  # first, so a reply-and-close keeps its reason even if the patch fails
-        comment = client.comments.create(models.CommentWriteRequest(issue=issue_id, message=reply))
+        # CVAT checks a create in the request's org context, not the issue's.
+        org = {"org_id": job.organization} if job.organization is not None else {}
+        comment, _ = client.api_client.comments_api.create(
+            models.CommentWriteRequest(issue=issue_id, message=reply), **org
+        )
     if resolved is not None and resolved != issue.resolved:
         try:  # one PATCH: the SDK proxy's update() would GET the issue again
             patch = models.PatchedIssueWriteRequest(resolved=resolved)
@@ -189,7 +194,7 @@ def update_issue(
                 raise
             # Said explicitly, so the model doesn't post the same reply again on a retry.
             raise InvalidArgument(
-                f"the reply was posted (comment #{comment.id}), but resolved was not changed: "
+                f"the reply was posted (comment #{comment.id}), but changing resolved failed: "
                 f"{explain(error) or error}"
             ) from error
     return UpdatedIssue(
@@ -198,7 +203,7 @@ def update_issue(
         frame=issue.frame,
         resolved=issue.resolved if resolved is None else resolved,
         reply_id=comment.id if comment else None,
-        url=job_url(base_url, client.jobs.retrieve(issue.job).task_id, issue.job, issue.frame),
+        url=job_url(base_url, job.task_id, issue.job, issue.frame),
     )
 
 

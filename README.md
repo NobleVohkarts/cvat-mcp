@@ -54,8 +54,8 @@ unless one job is edited (`job_id`). Ground-truth annotations are reached with `
 GT job; the instructions say to edit ground truth only when the user explicitly asks, since
 annotators are measured against it. Tasks can be created and edited; `delete_task` and `delete_issue` are limited to
 what the token's CVAT account owns, so anyone else's tasks and issues stay untouched.
-`update_issue` isn't: replying and resolving can be undone, so it works on any issue CVAT lets
-the account change. Jobs can be
+`update_issue` isn't: it removes nothing (a resolve can be reopened; replies stay in the thread),
+so it works on any issue CVAT lets the account change. Jobs can be
 reassigned and moved through stages; ground-truth jobs can be created, and deleted in the
 account's own tasks. Annotation jobs can't be created or deleted: CVAT makes them from the task's
 segments. Tasks and issues you created in the UI with that same account count as its own, so

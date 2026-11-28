@@ -210,24 +210,45 @@ def test_delete_refuses_foreign_issue(owner, author):
     remove.assert_not_called()
 
 
-def _update_client(issue, log, fail_patch=None):
+def _update_client(issue, log, fail_patch=None, organization=None, fail_job=None):
     """A fake client for update_issue; `log` records the reply and the PATCH in order."""
 
-    def create(request):
-        log.append(("reply", request.issue, request.message))
-        return Obj(id=200)
+    def create(request, **org):
+        log.append(("reply", request.issue, request.message, *org.items()))
+        return Obj(id=200), None
 
     def partial_update(issue_id, patched_issue_write_request):
         log.append(("patch", issue_id, patched_issue_write_request.resolved))
         if fail_patch:
             raise fail_patch
 
+    def retrieve_job(_id):
+        if fail_job:
+            raise fail_job
+        return Obj(task_id=4, organization=organization)
+
     return Obj(
         issues=Obj(retrieve=lambda _id: issue),
-        comments=Obj(create=create),
-        api_client=Obj(issues_api=Obj(partial_update=partial_update)),
-        jobs=Obj(retrieve=lambda _id: Obj(task_id=4)),
+        api_client=Obj(
+            issues_api=Obj(partial_update=partial_update), comments_api=Obj(create=create)
+        ),
+        jobs=Obj(retrieve=retrieve_job),
     )
+
+
+def test_update_issue_reply_goes_to_the_issues_organization():
+    log = []
+    client = _update_client(_issue(41, 3, 25, ME), log, organization=9)
+    update_issue(client, "http://cvat", 41, "ok", None)
+    assert log == [("reply", 41, "ok", ("org_id", 9))]
+
+
+def test_update_issue_failed_job_lookup_posts_no_reply():
+    log = []
+    client = _update_client(_issue(41, 3, 25, ME), log, fail_job=ApiException(status=502))
+    with pytest.raises(ApiException):
+        update_issue(client, "http://cvat", 41, "fixed", True)
+    assert not log
 
 
 @pytest.mark.parametrize("owner", [ME, ANNA])  # anyone's issue, not only the account's own
@@ -283,7 +304,7 @@ def test_update_issue_failed_resolve_says_reply_was_posted(error):
     log = []
     client = _update_client(_issue(41, 3, 25, ME), log, fail_patch=error)
     with pytest.raises(
-        InvalidArgument, match=r"reply was posted \(comment #200\).*resolved was not changed"
+        InvalidArgument, match=r"reply was posted \(comment #200\).*changing resolved failed"
     ):
         update_issue(client, "http://cvat", 41, "done", True)
     assert log[0] == ("reply", 41, "done")
