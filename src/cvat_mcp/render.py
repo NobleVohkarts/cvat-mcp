@@ -1,11 +1,14 @@
 """Draw annotations over a frame so the model can check them by looking."""
 
 import io
+import math
 
 from cvat_sdk import Client
 from PIL import Image, ImageColor, ImageDraw, ImageFont, ImageStat
 
+from cvat_mcp.errors import InvalidArgument
 from cvat_mcp.services.annotations import FrameObject, frame_annotations, scope_of
+from cvat_mcp.services.issues import check_bbox
 from cvat_mcp.services.tasks import clamp_limit
 
 FALLBACK_COLOR = "#ffffff"
@@ -15,6 +18,8 @@ def clamp_side(max_side: int) -> int:
     return clamp_limit(max_side, low=256, high=2048)
 
 
+MAX_ZOOM = 4.0  # a region is enlarged at most this much, so small crops don't turn to mush
+
 CAPTION_ALPHA = 140  # ~0.55: the frame stays visible under the caption bars
 
 Rect = tuple[float, float, float, float]
@@ -22,6 +27,13 @@ Rect = tuple[float, float, float, float]
 
 def _overlaps(a: Rect, b: Rect) -> bool:
     return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+def _touches(box: list[float], region: Rect) -> bool:
+    """Inclusive, so points and zero-area boxes inside or on the edge count."""
+    return (
+        box[0] <= region[2] and region[0] <= box[2] and box[1] <= region[3] and region[1] <= box[3]
+    )
 
 
 def place_caption(
@@ -42,27 +54,62 @@ def place_caption(
     return fitting[0]
 
 
-def resize(image: Image.Image, max_side: int) -> tuple[Image.Image, float]:
+def resize(image: Image.Image, max_side: int, max_zoom: float = 1.0) -> tuple[Image.Image, float]:
+    """Fit into max_side; enlarge at most max_zoom times (1: only ever shrink)."""
     out = image.convert("RGB")
-    out.thumbnail((max_side, max_side), Image.LANCZOS)  # only ever shrinks
+    zoom = min(max_side / max(image.size), max_zoom)
+    if zoom > 1:
+        out = out.resize((round(image.width * zoom), round(image.height * zoom)), Image.LANCZOS)
+    else:
+        out.thumbnail((max_side, max_side), Image.LANCZOS)
     return out, out.width / image.width
 
 
+def crop_box(rect: Rect, k: float, size: tuple[int, int]) -> tuple[int, int, int, int]:
+    """The image pixels covering rect (original pixels, k = image / original), rounded outwards
+    so even a region thinner than a pixel crops at least one."""
+    x1, y1 = math.floor(rect[0] * k), math.floor(rect[1] * k)
+    x2, y2 = min(math.ceil(rect[2] * k), size[0]), min(math.ceil(rect[3] * k), size[1])
+    return x1, y1, max(x2, x1 + 1), max(y2, y1 + 1)
+
+
+def clip_region(region: list[float], width: int, height: int) -> Rect:
+    """The region [x1, y1, x2, y2] (original pixels) clipped to the frame."""
+    check_bbox(region, "region")
+    x1, y1, x2, y2 = (
+        max(region[0], 0),
+        max(region[1], 0),
+        min(region[2], width),
+        min(region[3], height),
+    )
+    if x1 >= x2 or y1 >= y2:
+        raise InvalidArgument(f"region {region} is outside the frame ({width}x{height} pixels)")
+    return x1, y1, x2, y2
+
+
 def annotate(
-    image: Image.Image, objects: list[FrameObject], colors: dict[str, str], scale: float
+    image: Image.Image,
+    objects: list[FrameObject],
+    colors: dict[str, str],
+    scale: float,
+    offset: tuple[float, float] = (0.0, 0.0),
 ) -> Image.Image:
-    """A copy of the (already resized) frame with shapes and semi-transparent captions."""
+    """A copy of the (already resized) frame with shapes and semi-transparent captions;
+    original pixel (x, y) is drawn at ((x - offset x) * scale, (y - offset y) * scale)."""
     out = image.copy()
     side = max(out.size)
     width = max(2, round(side / 400))
     font = ImageFont.load_default(size=max(12, side // 60))
     draw = ImageDraw.Draw(out, "RGBA")  # RGBA fills blend into the RGB frame
+
+    def to_image(values: list[float]) -> list[float]:  # x, y, x, y, ...
+        return [(v - offset[i % 2]) * scale for i, v in enumerate(values)]
+
     boxes = [
-        (obj, tuple(v * scale for v in obj.bbox), colors.get(obj.label, FALLBACK_COLOR))
-        for obj in objects
+        (obj, tuple(to_image(obj.bbox)), colors.get(obj.label, FALLBACK_COLOR)) for obj in objects
     ]
     for obj, box, color in boxes:
-        xy = [v * scale for v in obj.points or []]
+        xy = to_image(obj.points or [])
         if not xy:  # rectangles, and shapes without vertices (masks, skeletons, ellipses)
             draw.rectangle(box, outline=color, width=width)
         elif obj.type == "polygon":
@@ -101,9 +148,18 @@ def render(
     return annotate(resized, objects, colors, scale), scale
 
 
-def legend(objects: list[FrameObject], scale: float, frame: int, skipped_tracks: int = 0) -> str:
+def legend(
+    objects: list[FrameObject],
+    scale: float,
+    frame: int,
+    skipped_tracks: int = 0,
+    region: Rect | None = None,
+) -> str:
+    what = f"{len(objects)} objects"
+    if region is not None:
+        what = f"region [{', '.join(f'{round(v, 2):.12g}' for v in region)}], {what} touch it"
     head = (
-        f"frame {frame}, {len(objects)} objects, image scaled by {scale:.3f} "
+        f"frame {frame}, {what}, image scaled by {scale:.3f} "
         "(coordinates below are original pixels)"
     )
     if skipped_tracks:
@@ -126,17 +182,30 @@ def render_frame(
     max_side: int,
     include_clean: bool = False,
     job_id: int | None = None,
+    region: list[float] | None = None,
 ) -> tuple[list[bytes], str]:
-    """JPEGs of the frame with its annotations drawn (and, optionally, clean), and a legend."""
+    """JPEGs of the frame (or of a region of it, enlarged up to MAX_ZOOM) with its annotations
+    drawn (and, optionally, clean), and a legend."""
     task = client.tasks.retrieve(task_id)
     labels = task.get_labels()
     data = frame_annotations(scope_of(client, task, job_id), labels, frame)
     colors = {label.name: label.color for label in labels if label.color}
-    # "compressed" frames are EXIF-rotated like CVAT's coordinates, and smaller than originals.
+    objects, rect = data.objects, (0, 0, data.width, data.height)
+    if region is not None:  # checked before the frame is downloaded
+        rect = clip_region(region, data.width, data.height)
+        objects = [o for o in objects if _touches(o.bbox, rect)]
+    # "compressed" frames are EXIF-rotated like CVAT's coordinates, and may be smaller than the
+    # originals, whose pixels the coordinates are in.
     with Image.open(task.get_frame(frame, quality="compressed")) as image:
-        resized, scale = resize(image, clamp_side(max_side))
-    images = [annotate(resized, data.objects, colors, scale)]
-    text = legend(data.objects, scale, frame, data.skipped_tracks)
+        k = image.width / data.width  # original pixels -> this image's pixels
+        box = crop_box(rect, k, image.size)
+        if region is not None:
+            image = image.crop(box)
+        resized, zoom = resize(image, clamp_side(max_side), MAX_ZOOM if region else 1.0)
+    scale = zoom * k  # original pixels -> output pixels
+    origin = (box[0] / k, box[1] / k)  # where the crop really starts, in original pixels
+    images = [annotate(resized, objects, colors, scale, origin)]
+    text = legend(objects, scale, frame, data.skipped_tracks, rect if region else None)
     if include_clean:
         images.append(resized)
         text = "The second image is the same frame without annotations.\n" + text
